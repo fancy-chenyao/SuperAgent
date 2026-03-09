@@ -14,11 +14,22 @@ agent_history.gif
 # Environment variables
 .env
 
+# IDE and editor files
 .idea/
-store
 .vscode/*
 .DS_Store
+
+# Build and cache directories
+store
+.uv/
+.pytest_cache/
+.ruff_cache/
+
+# Configuration files
 config/mcp.json
+
+# Log files
+blackd.log
 
 # mypy
 .mypy_cache/
