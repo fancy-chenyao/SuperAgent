@@ -1,0 +1,26 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+.coverage
+agent_history.gif
+
+# Virtual environments
+.venv
+
+# Environment variables
+.env
+
+.idea/
+store
+.vscode/*
+.DS_Store
+config/mcp.json
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
