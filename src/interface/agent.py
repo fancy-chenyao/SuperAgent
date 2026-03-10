@@ -1,9 +1,15 @@
-from pydantic import BaseModel, ConfigDict
-from typing import List, Optional
-from .mcp import Tool
-from enum import Enum, unique
+﻿from enum import Enum, unique
+from typing import Any, Dict, List, Optional
+
+try:
+    from langgraph.graph import MessagesState
+except Exception:  # pragma: no cover - optional dependency in lightweight test env
+    class MessagesState(dict):  # type: ignore
+        pass
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from typing_extensions import TypedDict
-from langgraph.graph import MessagesState
+
+from .mcp import Tool
 
 
 @unique
@@ -11,15 +17,28 @@ class Lang(str, Enum):
     EN = "en"
     ZH = "zh"
     JP = "jp"
-    SP = 'sp'
-    DE = 'de'
+    SP = "sp"
+    DE = "de"
+
+
+@unique
+class AgentSource(str, Enum):
+    LOCAL = "local"
+    REMOTE = "remote"
 
 
 class LLMType(str, Enum):
     BASIC = "basic"
     REASONING = "reasoning"
     VISION = "vision"
-    CODE = 'code'
+    CODE = "code"
+
+
+class AgentMCPConfig(BaseModel):
+    mcp_servers: Dict[str, Any] = Field(default_factory=dict)
+    enabled: bool = True
+    model_config = ConfigDict(populate_by_name=True, extra="allow")
+
 
 class Component(BaseModel):
     component_type: str
@@ -28,27 +47,21 @@ class Component(BaseModel):
     description: str
     config: dict
 
+
 COORDINATOR = Component(
     component_type="agent",
     label="coordinator",
     name="coordinator",
     description="Coordinator node that communicate with customers.",
-    config={
-        "type": "system_agent",
-        "name": "coordinator",
-    }
+    config={"type": "system_agent", "name": "coordinator"},
 )
-
 
 PLANNER = Component(
     component_type="agent",
     label="planner",
     name="planner",
     description="Planner node that plan the task.",
-    config={
-        "type": "system_agent",
-        "name": "planner",
-    }
+    config={"type": "system_agent", "name": "planner"},
 )
 
 PUBLISHER = Component(
@@ -56,10 +69,7 @@ PUBLISHER = Component(
     label="publisher_condition",
     name="publisher",
     description="Publisher node that publish the task.",
-    config={
-        "type": "system_agent",
-        "name": "publisher",
-    }
+    config={"type": "system_agent", "name": "publisher"},
 )
 
 AGENT_FACTORY = Component(
@@ -67,15 +77,14 @@ AGENT_FACTORY = Component(
     label="system_agent",
     name="agent_factory",
     description="Agent factory node that create the agent.",
-    config={
-        "type": "system_agent",
-        "name": "agent_factory",
-    }
+    config={"type": "system_agent", "name": "agent_factory"},
 )
+
 
 class TaskType(str, Enum):
     AGENT_FACTORY = "agent_factory"
     AGENT_WORKFLOW = "agent_workflow"
+
 
 class WorkMode(str, Enum):
     LAUNCH = "launch"
@@ -84,30 +93,42 @@ class WorkMode(str, Enum):
     AUTO = "auto"
 
 
-    
 class Agent(BaseModel):
-    """Definition for an agent the client can call."""
     user_id: str
-    """The id of the user."""
     agent_name: str
-    """The name of the agent."""
     nick_name: str
-    """The id of the agent."""
     description: str
-    """The description of the agent."""
     llm_type: LLMType
-    """The type of LLM to use for the agent."""
     selected_tools: List[Tool]
-    """The tools that the agent can use."""
     prompt: str
-    """The prompt to use for the agent."""
+
+    source: AgentSource = AgentSource.LOCAL
+    endpoint: Optional[str] = None
+    api_key: Optional[str] = None
+    mcp_config: Optional[AgentMCPConfig] = None
+    mcp_servers: Optional[Dict[str, Any]] = None
+
     model_config = ConfigDict(extra="allow")
 
-    
+    @model_validator(mode="after")
+    def _validate_and_normalize(self):
+        if self.source == AgentSource.REMOTE and not self.endpoint:
+            raise ValueError("Remote agent requires endpoint")
+
+        if self.mcp_config is None and self.mcp_servers:
+            self.mcp_config = AgentMCPConfig(mcp_servers=self.mcp_servers, enabled=True)
+
+        if self.mcp_config is not None and not self.mcp_servers:
+            self.mcp_servers = self.mcp_config.mcp_servers
+
+        return self
+
+
 class AgentMessage(BaseModel):
     content: str
     role: str
-    
+
+
 class AgentRequest(BaseModel):
     user_id: str
     lang: Lang
@@ -120,17 +141,20 @@ class AgentRequest(BaseModel):
     workmode: WorkMode
     workflow_id: Optional[str] = None
 
+
 class listAgentRequest(BaseModel):
     user_id: Optional[str]
     match: Optional[str]
+
 
 class EditStepsRequest(BaseModel):
     workflow_id: str
     planning_steps: dict
 
+
 class Router(TypedDict):
-    """Worker to route to next. If no workers needed, route to FINISH."""
     next: str
+
 
 class PromptBuilder(TypedDict):
     prompt: str
@@ -138,7 +162,6 @@ class PromptBuilder(TypedDict):
 
 
 class State(MessagesState):
-    """State for the agent system, extends MessagesState with next field."""
     TEAM_MEMBERS: list[str]
     TEAM_MEMBERS_DESCRIPTION: str
     user_id: str
@@ -149,6 +172,7 @@ class State(MessagesState):
     workflow_id: str
     workflow_mode: WorkMode
     initialized: bool
+
 
 class RemoveAgentRequest(BaseModel):
     user_id: str

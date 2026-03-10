@@ -10,11 +10,10 @@ from src.manager import agent_manager
 from src.manager.agents import NotFoundAgentError
 from src.service.session import SessionManager
 from src.interface.agent import RemoveAgentRequest
-from src.interface.workflow import WorkflowRequest
-from fastapi.responses import FileResponse
-from src.service.tool_tracker import tool_tracker
-from src.tools.websocket_manager import websocket_manager
 from src.workflow.cache import workflow_cache
+from src.service.env import USE_MCP_TOOLS
+from src.manager.mcp import get_mcp_hot_reload_manager
+from src.manager.registry import ToolRegistry
 
 
 logger = logging.getLogger(__name__)
@@ -30,11 +29,17 @@ class Server:
         return [{"role": message.role, "content": message.content} for message in request.messages]
 
     @staticmethod
+    async def _trigger_mcp_reload(force: bool = False) -> None:
+        if USE_MCP_TOOLS:
+            hot_manager = await get_mcp_hot_reload_manager()
+            await hot_manager.reload(force=force)
+
+    @staticmethod
     async def _run_agent_workflow(
             request: "AgentRequest"
     ) -> AsyncGenerator[str, None]:
-        if agent_manager is None:
-             logger.error("Agent workflow called before AgentManager was initialized.")
+        await agent_manager.ensure_initialized()
+        await Server._trigger_mcp_reload(force=False)
 
         session = session_manager.get_session(request.user_id)
         for message in request.messages:
@@ -72,11 +77,12 @@ class Server:
     async def _list_agents(
          request: "listAgentRequest"
     ) -> AsyncGenerator[str, None]:
-        if agent_manager is None:
-             logger.error("Agent workflow called before AgentManager was initialized.")
-             raise Exception("Agent workflow called before AgentManager was initialized.")
+        await agent_manager.ensure_initialized()
         try:
-            agents:List[Agent] = await agent_manager._list_agents(request.user_id, request.match)
+            agents: List[Agent] = await agent_manager.agent_registry.list(
+                user_id=request.user_id,
+                match=request.match,
+            )
             for agent in agents:
                 yield agent.model_dump_json() + "\n"
         except Exception as e:
@@ -85,8 +91,12 @@ class Server:
 
     @staticmethod
     async def _list_agents_json(user_id: str, match: Optional[str] = None):
+        await agent_manager.ensure_initialized()
         try:
-            agents: List[Agent] = await agent_manager._list_agents(user_id, match)
+            agents: List[Agent] = await agent_manager.agent_registry.list(
+                user_id=user_id,
+                match=match,
+            )
             return [agent.model_dump() for agent in agents]
         except Exception as e:
             raise Exception(f"Error listing agents: {e}")
@@ -135,31 +145,34 @@ class Server:
 
     @staticmethod
     async def _list_user_all_agents(user_id: str):
+        await agent_manager.ensure_initialized()
         try:
-            agents = agent_manager._list_user_all_agents(user_id)
+            agents = await agent_manager.agent_registry.list(user_id=user_id)
             return [agent.model_dump() for agent in agents]
         except Exception as e:
             raise Exception(f"Error listing user all agents: {e}")
         
     @staticmethod
     async def _list_default_agents_json():
+        await agent_manager.ensure_initialized()
         try:
-            agents = agent_manager._list_default_agents()
+            agents = await agent_manager.agent_registry.list(user_id="share")
             return [agent.model_dump() for agent in agents]
         except Exception as e:
             raise Exception(f"Error listing default agents: {e}")
         
     @staticmethod
     async def _edit_workflow(user_id: str, workflow):
+        await agent_manager.ensure_initialized()
         try:
             nodes = workflow["nodes"]
             for _, node in nodes.items():
                 if node["component_type"] == "agent" and node["config"]["type"] == "execution_agent":
                     if "add" in node and node["add"] == "1":
                         agent_name = node["name"]
-                        agents = agent_manager._list_user_all_agents(user_id)
+                        agents = await agent_manager._list_user_all_agents(user_id)
                         for agent in agents:
-                            if agent["agent_name"] == node["name"]:
+                            if agent.agent_name == node["name"]:
                                 from datetime import datetime
                                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                                 agent_name = f"{node['name']}_{timestamp}"
@@ -202,7 +215,7 @@ class Server:
                             selected_tools=_tools,
                             prompt=node["config"]["prompt"]
                         )
-                        agent_manager._edit_agent(agent)
+                        await agent_manager._edit_agent(agent)
                         workflow_cache.save_workflow(user_id, workflow)
             return workflow
         except Exception as e:
@@ -210,11 +223,9 @@ class Server:
 
     @staticmethod
     async def _list_default_agents() -> AsyncGenerator[str, None]:
-        if agent_manager is None:
-             logger.error("Agent workflow called before AgentManager was initialized.")
-             raise Exception("Agent workflow called before AgentManager was initialized.")
+        await agent_manager.ensure_initialized()
         try:
-            agents = await agent_manager._list_default_agents()
+            agents = await agent_manager.agent_registry.list(user_id="share")
             for agent in agents:
                 yield agent.model_dump_json() + "\n"
         except Exception as e:
@@ -223,13 +234,21 @@ class Server:
 
     @staticmethod
     async def _list_default_tools() -> AsyncGenerator[str, None]:
-        if agent_manager is None:
-             logger.error("Agent workflow called before AgentManager was initialized.")
-             raise Exception("Agent workflow called before AgentManager was initialized.")
+        await agent_manager.ensure_initialized()
         try:
-            tools = await agent_manager._list_default_tools()
-            for tool in tools:
-                yield tool.model_dump_json() + "\n"
+            await Server._trigger_mcp_reload(force=False)
+            registry = await ToolRegistry.get_instance()
+            tools = await registry.list_global_tools()
+            for meta in tools:
+                tool = meta.tool
+                tool_name = getattr(tool, "name", "")
+                if not tool_name:
+                    continue
+                payload = Tool(
+                    name=tool_name,
+                    description=meta.description or getattr(tool, "description", ""),
+                )
+                yield payload.model_dump_json() + "\n"
         except Exception as e:
             logger.error(f"Error listing default tools: {e}", exc_info=True)
             raise Exception(f"Error listing default tools: {e}")
@@ -238,9 +257,7 @@ class Server:
     async def _edit_agent(
         request: "Agent"
     ) -> AsyncGenerator[str, None]:
-        if agent_manager is None:
-             logger.error("Agent workflow called before AgentManager was initialized.")
-             raise Exception("Agent workflow called before AgentManager was initialized.")
+        await agent_manager.ensure_initialized()
         try:
             result = await agent_manager._edit_agent(request)
             yield json.dumps({"result": result}) + "\n"
@@ -255,9 +272,7 @@ class Server:
     async def _edit_planning_steps(
         request: "EditStepsRequest"
     ) -> AsyncGenerator[str, None]:
-        if agent_manager is None:
-             logger.error("Agent workflow called before AgentManager was initialized.")
-             raise Exception("Agent workflow called before AgentManager was initialized.")
+        await agent_manager.ensure_initialized()
         try:
             workflow_cache.save_planning_steps(request.workflow_id,request.planning_steps)
             yield json.dumps({"result": "success"}) + "\n"
@@ -267,9 +282,7 @@ class Server:
 
     @staticmethod
     async def _remove_agent(request: RemoveAgentRequest) -> AsyncGenerator[str, None]:
-        if agent_manager is None:
-             yield json.dumps({"result": "error", "message": "Service not ready, AgentManager not initialized."}) + "\n"
-             return
+        await agent_manager.ensure_initialized()
         try:
             await agent_manager._remove_agent(request.agent_name)
             yield json.dumps({"result": "success", "message": f"Agent '{request.agent_name}' deleted successfully."}) + "\n"

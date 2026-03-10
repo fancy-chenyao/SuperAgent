@@ -12,6 +12,7 @@ from src.service.env import USE_BROWSER
 from src.workflow.cache import workflow_cache as cache
 from src.workflow.graph import CompiledWorkflow
 from src.interface.agent import WorkMode
+from src.manager.registry import ToolRegistry
 
 logging.basicConfig(
     level=logging.INFO,
@@ -46,9 +47,58 @@ else:
 TEAM_MEMBERS_DESCRIPTION_TEMPLATE = """
 - **`{agent_name}`**: {agent_description}
 """
+TOOLS_DESCRIPTION_TEMPLATE = """
+- **`{tool_name}`**: {tool_description}
+"""
 # Cache for coordinator messages
 coordinator_cache = []
 MAX_CACHE_SIZE = 2
+
+
+async def _build_team_members(
+    user_id: str,
+    coor_agents: list[str] | None,
+) -> tuple[list[str], str]:
+    coor_agents = coor_agents or []
+    member_desc = DEFAULT_TEAM_MEMBERS_DESCRIPTION
+    members = ["agent_factory"]
+
+    agents = await agent_manager.agent_registry.list()
+    for agent in agents:
+        should_include = (
+            agent.user_id == "share"
+            or agent.user_id == user_id
+            or agent.agent_name in coor_agents
+        )
+        if should_include and agent.agent_name not in members:
+            members.append(agent.agent_name)
+
+        if agent.user_id != "share":
+            member_desc += "\n" + TEAM_MEMBERS_DESCRIPTION_TEMPLATE.format(
+                agent_name=agent.agent_name,
+                agent_description=agent.description,
+            )
+
+    return members, member_desc
+
+
+async def _build_tools_description() -> str:
+    registry = await ToolRegistry.get_instance()
+    tools = await registry.list_global_tools()
+    descriptions = []
+
+    for meta in tools:
+        tool_name = getattr(meta.tool, "name", "")
+        if not tool_name:
+            continue
+        tool_desc = meta.description or getattr(meta.tool, "description", "")
+        descriptions.append(
+            TOOLS_DESCRIPTION_TEMPLATE.format(
+                tool_name=tool_name,
+                tool_description=tool_desc,
+            )
+        )
+    return "".join(descriptions)
 
 
 async def run_agent_workflow(
@@ -83,6 +133,8 @@ async def run_agent_workflow(
                 polish_id = cache.get_latest_polish_id(user_id)
 
         workflow_id = f"{user_id}:{polish_id}"
+
+    await agent_manager.ensure_initialized()
     lap = cache.get_lap(workflow_id) if workmode != "launch" else 0
 
     if workmode != "production":
@@ -112,33 +164,11 @@ async def run_agent_workflow(
 
     logger.info(f"Starting workflow with user input: {user_input_messages}")
 
-    TEAM_MEMBERS_DESCRIPTION_TEMPLATE = """
-    - **`{agent_name}`**: {agent_description}
-    """
-    TOOLS_DESCRIPTION_TEMPLATE = """
-    - **`{tool_name}`**: {tool_description}
-    """
-    TOOLS_DESCRIPTION = """
-    """
-    TEAM_MEMBERS_DESCRIPTION = DEFAULT_TEAM_MEMBERS_DESCRIPTION
-    TEAM_MEMBERS = ["agent_factory"]
-    for agent in agent_manager.available_agents.values():
-        if agent.user_id == "share":
-            TEAM_MEMBERS.append(agent.agent_name)
-
-        if agent.user_id == user_id or agent.agent_name in coor_agents:
-            TEAM_MEMBERS.append(agent.agent_name)
-
-        if agent.user_id != "share":
-            MEMBER_DESCRIPTION = TEAM_MEMBERS_DESCRIPTION_TEMPLATE.format(
-                agent_name=agent.agent_name, agent_description=agent.description
-            )
-            TEAM_MEMBERS_DESCRIPTION += "\n" + MEMBER_DESCRIPTION
-
-    for tool_name, tool in agent_manager.available_tools.items():
-        TOOLS_DESCRIPTION += "\n" + TOOLS_DESCRIPTION_TEMPLATE.format(
-            tool_name=tool_name, tool_description=tool.description
-        )
+    team_members, team_members_description = await _build_team_members(
+        user_id=user_id,
+        coor_agents=coor_agents,
+    )
+    tools_description = await _build_tools_description()
 
     global coordinator_cache
     coordinator_cache = []
@@ -149,9 +179,9 @@ async def run_agent_workflow(
         graph,
         {
             "user_id": user_id,
-            "TEAM_MEMBERS": TEAM_MEMBERS,
-            "TEAM_MEMBERS_DESCRIPTION": TEAM_MEMBERS_DESCRIPTION,
-            "TOOLS": TOOLS_DESCRIPTION,
+            "TEAM_MEMBERS": team_members,
+            "TEAM_MEMBERS_DESCRIPTION": team_members_description,
+            "TOOLS": tools_description,
             "USER_QUERY": user_input_messages[-1]["content"],
             "messages": user_input_messages,
             "deep_thinking_mode": deep_thinking_mode,
@@ -233,12 +263,13 @@ async def _process_workflow(
                                     await asyncio.sleep(0.01)
 
                     if agent_name == "agent_factory" and key == "new_agent_name":
+                        new_agent = await agent_manager.agent_registry.get(value)
                         yield {
                             "event": "new_agent_created",
                             "agent_name": value,
                             "data": {
                                 "new_agent_name": value,
-                                "agent_obj": agent_manager.available_agents[value],
+                                "agent_obj": new_agent,
                             },
                         }
 

@@ -1,25 +1,73 @@
 import logging
 import json
 from copy import deepcopy
-from langgraph.types import Command
 from typing import Literal
+try:
+    from langgraph.types import Command
+except Exception:  # pragma: no cover - optional dependency in lightweight test env
+    class Command:  # type: ignore
+        def __class_getitem__(cls, _item):
+            return cls
+
+        def __init__(self, update=None, goto=None):
+            self.update = update or {}
+            self.goto = goto
 from src.interface.agent import COORDINATOR, PLANNER, PUBLISHER, AGENT_FACTORY
-from src.llm.llm import get_llm_by_type
 from src.llm.agents import AGENT_LLM_MAP
-from src.prompts.template import apply_prompt_template
-from src.tools.search import tavily_tool
 from src.interface.agent import State, Router
 from src.manager import agent_manager
-from src.prompts.template import apply_prompt
-from langgraph.prebuilt import create_react_agent
 from src.workflow.graph import AgentWorkflow
-from src.service.env import MAX_STEPS
 from src.workflow.cache import workflow_cache as cache
 from src.utils.content_process import clean_response_tags
 from src.interface.serializer import AgentBuilder
+from src.manager.executor.base import ExecutionContext
+from src.manager.executor.factory import execute_agent
+from src.manager.registry import ToolRegistry
+
+try:
+    from src.llm.llm import get_llm_by_type
+except Exception:  # pragma: no cover - optional dependency in lightweight test env
+    def get_llm_by_type(*args, **kwargs):  # type: ignore
+        raise RuntimeError("LLM dependencies are not installed")
+
+try:
+    from src.prompts.template import apply_prompt_template
+except Exception:  # pragma: no cover - optional dependency in lightweight test env
+    def apply_prompt_template(*args, **kwargs):  # type: ignore
+        return []
+
+try:
+    from src.tools.search import tavily_tool
+except Exception:  # pragma: no cover - optional dependency in lightweight test env
+    class _NoopTavilyTool:  # type: ignore
+        def invoke(self, *args, **kwargs):
+            return []
+
+        async def ainvoke(self, *args, **kwargs):
+            return []
+
+    tavily_tool = _NoopTavilyTool()
 
 
 logger = logging.getLogger(__name__)
+
+
+async def _resolve_tools_by_names(tool_names: list[str]) -> list:
+    registry = await ToolRegistry.get_instance()
+    global_tools = await registry.list_global_tools()
+    tool_map = {
+        getattr(meta.tool, "name", ""): meta.tool
+        for meta in global_tools
+        if getattr(meta.tool, "name", "")
+    }
+
+    resolved = []
+    for name in tool_names:
+        if name in tool_map:
+            resolved.append(tool_map[name])
+        else:
+            logger.warning("Tool (%s) is not available", name)
+    return resolved
 
 
 async def agent_factory_node(state: State) -> Command[Literal["publisher", "__end__"]]:
@@ -27,7 +75,7 @@ async def agent_factory_node(state: State) -> Command[Literal["publisher", "__en
     logger.info("Agent Factory Start to work in %s workmode", state["workflow_mode"])
 
     goto = "publisher"
-    tools = []
+    await agent_manager.ensure_initialized()
 
     if state["workflow_mode"] == "launch":
         cache.restore_system_node(state["workflow_id"], AGENT_FACTORY, state["user_id"])
@@ -38,11 +86,8 @@ async def agent_factory_node(state: State) -> Command[Literal["publisher", "__en
             .ainvoke(messages)
         )
 
-        for tool in agent_spec["selected_tools"]:
-            if agent_manager.available_tools.get(tool["name"]):
-                tools.append(agent_manager.available_tools[tool["name"]])
-            else:
-                logger.warning("Tool (%s) is not available", tool["name"])
+        selected_tool_names = [tool["name"] for tool in agent_spec["selected_tools"]]
+        tools = await _resolve_tools_by_names(selected_tool_names)
                 
         await agent_manager._create_agent_by_prebuilt(
             user_id=state["user_id"],
@@ -147,24 +192,20 @@ async def agent_proxy_node(state: State) -> Command[Literal["publisher", "__end_
         state["next"],
     )
 
-    _agent = agent_manager.available_agents[state["next"]]
+    await agent_manager.ensure_initialized()
+    _agent = await agent_manager.agent_registry.get(state["next"])
+    if _agent is None:
+        raise KeyError(f"Agent not found in registry: {state['next']}")
     state["initialized"] = True
 
-    agent = create_react_agent(
-        get_llm_by_type(_agent.llm_type),
-        tools=[
-            agent_manager.available_tools[tool.name] for tool in _agent.selected_tools
-        ],
-        prompt=apply_prompt(state, _agent.prompt),
+    context = ExecutionContext(
+        user_id=state.get("user_id"),
+        workflow_id=state.get("workflow_id"),
+        workflow_mode=state.get("workflow_mode"),
+        deep_thinking_mode=state.get("deep_thinking_mode", False),
     )
-
-    # Create config with user_id for tool notifications
-    config = {
-        "configurable": {"user_id": state.get("user_id")},
-        "recursion_limit": int(MAX_STEPS),
-    }
-
-    response = await agent.ainvoke(state, config=config)
+    execute_result = await execute_agent(_agent, state["messages"], context)
+    response_content = execute_result.result if execute_result.is_success else execute_result.error
 
     if state["workflow_mode"] == "launch":
         cache.restore_node(
@@ -177,7 +218,7 @@ async def agent_proxy_node(state: State) -> Command[Literal["publisher", "__end_
         update={
             "messages": [
                 {
-                    "content": response["messages"][-1].content,
+                    "content": response_content,
                     "tool": state["next"],
                     "role": "assistant",
                 }

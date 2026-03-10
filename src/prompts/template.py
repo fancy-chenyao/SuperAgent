@@ -1,4 +1,4 @@
-import os
+﻿import os
 import re
 from datetime import datetime
 import copy
@@ -10,19 +10,27 @@ from src.interface.agent import Agent
 from src.interface.agent import State
 
 
-def get_prompt_template(prompt_name: str) -> str:
+def _read_prompt_template(prompt_name: str) -> str:
     prompts_dir = get_project_root() / "src" / "prompts"
-    template = open(os.path.join(prompts_dir, f"{prompt_name}.md")).read()
-    
-    # 提取模板中的变量名（格式为 <<VAR>>）
-    variables = re.findall(r"<<([^>>]+)>>", template)
-    
+    template = open(os.path.join(prompts_dir, f"{prompt_name}.md"), encoding="utf-8").read()
+
     # Escape curly braces using backslash
-    
     template = template.replace("{", "{{").replace("}", "}}")
     # Replace `<<VAR>>` with `{VAR}`
     template = re.sub(r"<<([^>>]+)>>", r"{\1}", template)
-    
+
+    return template
+
+
+def get_prompt_template(prompt_name: str) -> str:
+    return _read_prompt_template(prompt_name)
+
+
+def get_prompt_template_with_vars(prompt_name: str) -> tuple[str, list[str]]:
+    prompts_dir = get_project_root() / "src" / "prompts"
+    raw = open(os.path.join(prompts_dir, f"{prompt_name}.md"), encoding="utf-8").read()
+    variables = re.findall(r"<<([^>>]+)>>", raw)
+    template = _read_prompt_template(prompt_name)
     return template, variables
 
 
@@ -39,7 +47,7 @@ def apply_prompt_template(prompt_name: str, state: State, template:str=None) -> 
                 messages.append({"role": "assistant", "content": msg["content"]})
     state["messages"] = messages
     
-    _template, _ = get_prompt_template(prompt_name) if not template else template
+    _template, _ = get_prompt_template_with_vars(prompt_name) if not template else template
     system_prompt = PromptTemplate(
         input_variables=["CURRENT_TIME"],
         template=_template,
@@ -68,7 +76,7 @@ def apply_prompt(state: AgentState, template:str=None) -> list:
 def apply_polish_template(_agent: Agent, instruction: str):
     try:
         template_dir = get_project_root() / "src" / "prompts"
-        polish_template = open(os.path.join(template_dir, "agent_polish.md")).read()
+        polish_template = open(os.path.join(template_dir, "agent_polish.md"), encoding="utf-8").read()
         # First, escape all literal curly braces in the template
         polish_template = polish_template.replace("{", "{{").replace("}", "}}")
         # Then, unescape the <<VAR>> style placeholders by converting them to single brace {VAR}
@@ -90,3 +98,4 @@ def apply_polish_template(_agent: Agent, instruction: str):
         print_exc()
         return None
     return formatted_prompt
+

@@ -22,20 +22,31 @@ import atexit
 import logging
 import signal
 from config.global_variables import agents_dir
-from src.workflow.polish_task import polish_agent
 import traceback
+
+try:
+    from src.workflow.polish_task import polish_agent
+except Exception:  # pragma: no cover - optional dependency in lightweight test env
+    async def polish_agent(*args, **kwargs):  # type: ignore
+        raise RuntimeError("Polish feature dependencies are not installed")
 
 logging.basicConfig(level=logging.INFO)
 load_dotenv()
 
 from src.interface.agent import *
 from src.service.server import Server
+from src.manager import get_agent_manager
+from src.manager.registry import ToolRegistry
 
 if platform.system() == "Windows":
     import collections
     collections.Callable = collections.abc.Callable
-    from pyreadline import Readline
-    readline = Readline()
+    try:
+        from pyreadline import Readline
+
+        readline = Readline()
+    except Exception:  # pragma: no cover - optional dependency in lightweight test env
+        readline = None
 else:
     import readline
 
@@ -63,6 +74,24 @@ custom_theme = Theme({
 console = Console(theme=custom_theme)
 
 _pending_line = ''
+
+
+async def _list_agents_via_registry(user_id: str | None = None, match: str | None = None):
+    manager = get_agent_manager()
+    await manager.ensure_initialized()
+    return await manager.agent_registry.list(user_id=user_id, match=match)
+
+
+async def _list_tools_via_registry():
+    manager = get_agent_manager()
+    await manager.ensure_initialized()
+    registry = await ToolRegistry.get_instance()
+    tools = await registry.list_global_tools()
+    return [
+        {"name": getattr(meta.tool, "name", ""), "description": meta.description or getattr(meta.tool, "description", "")}
+        for meta in tools
+        if getattr(meta.tool, "name", "")
+    ]
 
 def direct_print(text):
     global _pending_line
@@ -200,13 +229,9 @@ async def edit_agent_option(_agent: Agent, edit_option:list[str], original_confi
         stream_print("[green]Fetching tool list...")
         default_tool_name = []
         default_tool_desc = {}
-        async for tool_json in server._list_default_tools():
-            try:
-                default_tool = json.loads(tool_json)
-                default_tool_name.append(default_tool.get('name'))
-                default_tool_desc[default_tool.get('name')] = default_tool.get('description')
-            except:
-                stream_print(f"[danger]Parsing error: {tool_json}[/danger]")
+        for default_tool in await _list_tools_via_registry():
+            default_tool_name.append(default_tool.get('name'))
+            default_tool_desc[default_tool.get('name')] = default_tool.get('description')
         stream_print("[success]Fetched tools!")
         table = Table(title=f"Tool list for agent [highlight]{modified_config.get('nick_name')}[/highlight]", show_header=True, header_style="bold magenta", border_style="cyan")
         table.add_column("Number", style="tool_desc")
@@ -906,16 +931,12 @@ async def run_production(ctx, user_id, messages, workflow_id):
 @async_command 
 async def list_agents(ctx, user_id, match):
     """List user's Agents"""
-    server = ctx.obj['server']
-    
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
         console=console
     ) as progress:
         task = progress.add_task("[green]Fetching Agent list...", total=None)
-        
-        request = listAgentRequest(user_id=user_id, match=match)
         
         table = Table(title=f"Agent list for user [highlight]{user_id}[/highlight]", show_header=True, header_style="bold magenta", border_style="cyan")
         table.add_column("Name", style="agent_name")
@@ -924,16 +945,10 @@ async def list_agents(ctx, user_id, match):
         table.add_column("Tools", style="agent_type")
         
         count = 0
-        async for agent_json in server._list_agents(request):
-            try:
-                agent = json.loads(agent_json)
-                tools = []
-                for tool in agent.get("selected_tools", []):
-                    tools.append(tool.get("name", ""))
-                table.add_row(agent.get("agent_name", ""), agent.get("nick_name", ""), agent.get("description", ""), ', '.join(tools))
-                count += 1
-            except:
-                stream_print(f"[danger]Parsing error: {agent_json}[/danger]")
+        for agent in await _list_agents_via_registry(user_id=user_id, match=match):
+            tools = [tool.name for tool in agent.selected_tools]
+            table.add_row(agent.agent_name, agent.nick_name, agent.description, ', '.join(tools))
+            count += 1
         
         progress.update(task, description=f"[success]Fetched {count} Agents!")
         
@@ -948,8 +963,6 @@ async def list_agents(ctx, user_id, match):
 @async_command 
 async def list_default_agents(ctx):
     """List default Agents"""
-    server = ctx.obj['server']
-    
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
@@ -963,13 +976,9 @@ async def list_default_agents(ctx):
         table.add_column("Description", style="agent_desc")
         
         count = 0
-        async for agent_json in server._list_default_agents():
-            try:
-                agent = json.loads(agent_json)
-                table.add_row(agent.get("agent_name", ""),agent.get("nick_name", ""), agent.get("description", ""))
-                count += 1
-            except:
-                stream_print(f"[danger]Parsing error: {agent_json}[/danger]")
+        for agent in await _list_agents_via_registry(user_id="share"):
+            table.add_row(agent.agent_name, agent.nick_name, agent.description)
+            count += 1
         
         progress.update(task, description=f"[success]Fetched {count} default Agents!")
         stream_print(table)
@@ -980,8 +989,6 @@ async def list_default_agents(ctx):
 @async_command  
 async def list_default_tools(ctx):
     """List default tools"""
-    server = ctx.obj['server']
-    
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
@@ -993,13 +1000,9 @@ async def list_default_tools(ctx):
         table.add_column("Description", style="tool_desc")
         
         count = 0
-        async for tool_json in server._list_default_tools():
-            try:
-                tool = json.loads(tool_json)
-                table.add_row(tool.get("name", ""), tool.get("description", ""))
-                count += 1
-            except:
-                stream_print(f"[danger]Parsing error: {tool_json}[/danger]")
+        for tool in await _list_tools_via_registry():
+            table.add_row(tool.get("name", ""), tool.get("description", ""))
+            count += 1
         
         progress.update(task, description=f"[success]Fetched {count} default tools!")
         stream_print(table)
@@ -1017,9 +1020,9 @@ async def edit_agent(ctx, agent_name, user_id, interactive):
     stream_print(Panel.fit(f"[highlight]Fetching configuration for {agent_name}...[/highlight]", border_style="cyan"))
     agent: Agent = None
     try:
-        async for agent_json in server._list_agents(listAgentRequest(user_id=user_id, match=agent_name)):
-            agent = Agent.model_validate_json(agent_json)
-            if agent.agent_name == agent_name:
+        for item in await _list_agents_via_registry(user_id=user_id, match=agent_name):
+            if item.agent_name == agent_name:
+                agent = item
                 break
         if not agent:
             stream_print(f"[danger]Agent not found: {agent_name}[/danger]")
