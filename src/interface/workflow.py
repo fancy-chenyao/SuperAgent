@@ -5,7 +5,11 @@ from datetime import datetime
 from enum import Enum, unique
 from .agent import WorkMode
 from typing_extensions import TypedDict
-from langgraph.graph import MessagesState
+try:
+    from langgraph.graph import MessagesState
+except Exception:  # pragma: no cover - optional dependency in lightweight test env
+    class MessagesState(dict):  # type: ignore
+        pass
 
 class UserMessage(BaseModel):
     role: str
@@ -24,4 +28,3 @@ class BaseWorkflow(BaseModel):
     user_input_messages: List[UserMessage]
     deep_thinking_mode: bool
     search_before_planning: bool
-

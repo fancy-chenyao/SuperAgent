@@ -12,6 +12,10 @@ context_variables = {
     "has_lauched": False
 }
 
+# Toggle Mermaid workflow visualization generation.
+# Set to True to enable, False to disable.
+mermaid_enabled = True
+
 system_agents = {
         "coordinator": {
             "type": "system_agent",

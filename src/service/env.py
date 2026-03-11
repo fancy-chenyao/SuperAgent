@@ -27,15 +27,49 @@ CODE_API_KEY = os.getenv("CODE_API_KEY")
 CODE_BASE_URL = os.getenv("CODE_BASE_URL")
 CODE_MODEL = os.getenv("CODE_MODEL")
 
-USR_AGENT = eval(os.getenv("USR_AGENT", "True"))
-MCP_AGENT = eval(os.getenv("MCP_AGENT", "False"))
-USE_MCP_TOOLS = eval(os.getenv("USE_MCP_TOOLS", "True"))
-USE_BROWSER = eval(os.getenv("USE_BROWSER", "False"))
-DEBUG = eval(os.getenv("DEBUG", "False"))
-BROWSER_BACKEND = os.getenv("BROWSER_BACKEND")
-MAX_STEPS = eval(os.getenv("MAX_STEPS", "25"))
+def _parse_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    normalized = str(raw).strip().lower()
+    if normalized in {"1", "true", "yes", "y", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "n", "off"}:
+        return False
+    logging.getLogger(__name__).warning(
+        "Invalid boolean env value for %s=%r, fallback to default=%s",
+        name,
+        raw,
+        default,
+    )
+    return default
 
-if DEBUG != "True":
+
+def _parse_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return int(str(raw).strip())
+    except Exception:
+        logging.getLogger(__name__).warning(
+            "Invalid integer env value for %s=%r, fallback to default=%s",
+            name,
+            raw,
+            default,
+        )
+        return default
+
+
+USR_AGENT = _parse_bool("USR_AGENT", True)
+MCP_AGENT = _parse_bool("MCP_AGENT", False)
+USE_MCP_TOOLS = _parse_bool("USE_MCP_TOOLS", True)
+USE_BROWSER = _parse_bool("USE_BROWSER", False)
+DEBUG = _parse_bool("DEBUG", False)
+BROWSER_BACKEND = os.getenv("BROWSER_BACKEND")
+MAX_STEPS = _parse_int("MAX_STEPS", 25)
+
+if not DEBUG:
     logging.basicConfig(
         level=logging.WARNING,
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',

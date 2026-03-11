@@ -1,13 +1,17 @@
-from typing import Dict, Callable, List, Optional
+from typing import Callable, Dict, List, Optional
+
 from src.interface.agent import State
-from langgraph.types import Command
-from src.manager import agent_manager
-from langchain_mcp_adapters.client import MultiServerMCPClient
-from src.manager.mcp import mcp_client_config
-from src.llm.llm import get_llm_by_type
-from langchain_core.prompts import ChatPromptTemplate
-from langgraph.prebuilt import create_react_agent
-from src.prompts.template import apply_prompt
+
+try:
+    from langgraph.types import Command
+except Exception:  # pragma: no cover - optional dependency in lightweight test env
+    class Command:  # type: ignore
+        def __class_getitem__(cls, _item):
+            return cls
+
+        def __init__(self, update=None, goto=None):
+            self.update = update or {}
+            self.goto = goto
 
 
 
@@ -57,4 +61,3 @@ class CompiledWorkflow:
             current_node = command.goto
             
         return state
-
