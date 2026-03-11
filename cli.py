@@ -37,6 +37,14 @@ from src.interface.agent import *
 from src.service.server import Server
 from src.manager import get_agent_manager
 from src.manager.registry import ToolRegistry
+from src.robust.checkpoint import CheckpointManager
+
+def _configure_windows_event_loop_policy() -> None:
+    """在 Windows 下切换为 SelectorEventLoopPolicy，规避 Proactor 管道析构时的 closed pipe 异常。"""
+    if platform.system() == "Windows":
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+_configure_windows_event_loop_policy()
 
 if platform.system() == "Windows":
     import collections
@@ -1506,6 +1514,241 @@ async def run_polish(ctx, user_id, match, interactive):
                     break
 
 
+@cli.command(name="resume")
+@click.pass_context
+@click.option('--workflow-id', '-w', required=True, help='Workflow ID to resume')
+@click.option('--step', '-s', default=None, type=int, help='Step number to resume from (optional, defaults to latest)')
+@click.option('--user-id', '-u', default="test", help='User ID')
+@async_command
+async def resume_workflow(ctx, workflow_id, step, user_id):
+    """Resume a workflow from a specific checkpoint step"""
+    server: Server = ctx.obj['server']
+    checkpoint_manager = CheckpointManager()
+    
+    # List available checkpoints for the workflow
+    try:
+        checkpoints = checkpoint_manager.list_checkpoints(workflow_id)
+        
+        if not checkpoints:
+            stream_print(Panel.fit(f"[danger]No checkpoints found for workflow: {workflow_id}[/danger]", border_style="red"))
+            return
+        
+        # Display checkpoints table
+        table = Table(title=f"Checkpoints for workflow [highlight]{workflow_id}[/highlight]", 
+                      show_header=True, header_style="bold magenta", border_style="cyan")
+        table.add_column("Step", style="cyan")
+        table.add_column("Node Name", style="green")
+        table.add_column("Timestamp", style="yellow")
+        
+        for cp in checkpoints:
+            table.add_row(str(cp.get("step", "")), cp.get("node_name", ""), cp.get("timestamp", ""))
+        
+        stream_print(table)
+        
+        # If step is not provided, ask user to select
+        if step is None:
+            if len(checkpoints) == 1:
+                step = checkpoints[0].get("step")
+                stream_print(f"[info]Auto-selecting the only available checkpoint: step {step}[/info]")
+            else:
+                step_str = Prompt.ask(
+                    "Enter step number to resume from",
+                    choices=[str(cp.get("step")) for cp in checkpoints],
+                    show_choices=False
+                )
+                step = int(step_str)
+        
+        # Load the checkpoint to get the state
+        checkpoint = checkpoint_manager.load_checkpoint(workflow_id, step=step)
+        
+        stream_print(Panel.fit(
+            f"[highlight]Resuming from:[/highlight]\n"
+            f"  Step: {checkpoint.step}\n"
+            f"  Node: {checkpoint.node_name}\n"
+            f"  Next Node: {checkpoint.next_node}\n"
+            f"  Timestamp: {checkpoint.timestamp}",
+            title="Resume Checkpoint",
+            border_style="cyan"
+        ))
+        
+        if not Confirm.ask("Proceed with resume?"):
+            stream_print("[warning]Resume cancelled[/warning]")
+            return
+        
+        # Prepare the request using the checkpoint state
+        state = checkpoint.state
+        
+        request = AgentRequest(
+            user_id=user_id,
+            lang="en",
+            task_type="agent_workflow",
+            messages=state.get("messages", []),
+            debug=state.get("debug", False),
+            deep_thinking_mode=state.get("deep_thinking_mode", True),
+            search_before_planning=state.get("search_before_planning", False),
+            coor_agents=[],
+            workmode="production",
+            workflow_id=workflow_id
+        )
+        
+        console.print(Panel.fit("[highlight]Workflow execution started (resuming from step {})...[/highlight]".format(step), 
+                              title="CoorAgent", border_style="cyan"))
+        
+        current_content = ""
+        json_buffer = ""  
+        in_json_block = False
+        live_mode = True
+        
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            console=console,
+            transient=True,
+            refresh_per_second=2
+        ) as progress:
+            task = progress.add_task("[green]Processing request...", total=None)
+            
+            # Use the server's run workflow with resume_step
+            async for chunk in server._run_agent_workflow_with_resume(request, resume_step=step):
+                event_type = chunk.get("event")
+                data = chunk.get("data", {})
+                
+                if event_type == "start_of_agent":
+                    if current_content:
+                        console.print(current_content, end="", highlight=False)
+                        current_content = ""
+                    
+                    if in_json_block and json_buffer:
+                        try:
+                            parsed_json = json.loads(json_buffer)
+                            formatted_json = json.dumps(parsed_json, indent=2, ensure_ascii=False)
+                            console.print("\n")
+                            syntax = Syntax(formatted_json, "json", theme="monokai", line_numbers=False)
+                            console.print(syntax)
+                        except:
+                            console.print(f"\n{json_buffer}")
+                        json_buffer = ""
+                        in_json_block = False
+                    
+                    agent_name = data.get("agent_name", "")
+                    if agent_name:
+                        console.print("\n")
+                        progress.update(task, description=f"[green]Starting execution: {agent_name}...")
+                        console.print(f"[agent_name]>>> {agent_name} starting execution...[/agent_name]")
+                        console.print("")
+                        
+                elif event_type == "end_of_agent":
+                    flush_pending()
+
+                    if current_content:
+                        console.print(current_content, end="", highlight=False)
+                        current_content = ""
+                    
+                    if in_json_block and json_buffer:
+                        try:
+                            parsed_json = json.loads(json_buffer)
+                            formatted_json = json.dumps(parsed_json, indent=2, ensure_ascii=False)
+                            console.print("\n")  
+                            syntax = Syntax(formatted_json, "json", theme="monokai", line_numbers=False)
+                            console.print(syntax)
+                        except:
+                            console.print(f"\n{json_buffer}")
+                        json_buffer = ""
+                        in_json_block = False
+                    
+                    agent_name = data.get("agent_name", "")
+                    if agent_name:
+                        console.print("\n")
+                        progress.update(task, description=f"[green]Execution finished: {agent_name}...")
+                        console.print(f"[agent_name]<<< {agent_name} execution finished[/agent_name]")
+                        console.print("")
+                
+                elif event_type == "messages":
+                    delta = data.get("delta", {})
+                    content = delta.get("content", "")
+                    reasoning = delta.get("reasoning_content", "")
+                    agent_name = data.get("agent_name", "")
+
+                    if agent_name:
+                        console.print("\n")
+                        progress.update(task, description=f"[green]Executing: {agent_name}...")
+                        progress.update(task, description=f"[agent_name]>>> {agent_name} executing...[/agent_name]")
+                        console.print("")
+                    if content and (content.strip().startswith("{") or in_json_block):
+                        if not in_json_block:
+                            in_json_block = True
+                            json_buffer = ""
+                        
+                        json_buffer += content
+                        
+                        try:
+                            parsed_json = json.loads(json_buffer)
+                            formatted_json = json.dumps(parsed_json, indent=2, ensure_ascii=False)
+                            
+                            if current_content:
+                                console.print(current_content, end="", highlight=False)
+                                current_content = ""
+                            
+                            console.print("")
+                            syntax = Syntax(formatted_json, "json", theme="monokai", line_numbers=False)
+                            console.print(syntax)
+                            json_buffer = ""
+                            in_json_block = False
+                        except:
+                            pass
+                    elif content:
+                        if live_mode:
+                            if not content: 
+                                continue
+
+                            direct_print(content)
+
+                        else:
+                            current_content += content
+                    
+                    if reasoning:
+                        stream_print(f"\n[info]Thinking process: {reasoning}[/info]")
+
+
+                elif event_type == "new_agent_created":
+                    new_agent_name = data.get("new_agent_name", "")
+                    agent_obj = data.get("agent_obj", None)
+                    console.print(f"[new_agent_name]>>> {new_agent_name} created successfully...")
+                    console.print(f"[new_agent]>>> Configuration: ")
+                    syntax = Syntax(agent_obj, "json", theme="monokai", line_numbers=False)
+                    console.print(syntax)
+
+
+                elif event_type == "end_of_workflow":
+                    if current_content:
+                        console.print(current_content, end="", highlight=False)
+                        current_content = ""
+                    
+                    if in_json_block and json_buffer:
+                        try:
+                            parsed_json = json.loads(json_buffer)
+                            formatted_json = json.dumps(parsed_json, indent=2, ensure_ascii=False)
+                            console.print("\n")
+                            syntax = Syntax(formatted_json, "json", theme="monokai", line_numbers=False)
+                            console.print(syntax)
+                        except:
+                            console.print(f"\n{json_buffer}")
+                        json_buffer = ""
+                        in_json_block = False
+                    
+                    console.print("")
+                    progress.update(task, description="[success]Workflow execution finished!")
+                    console.print(Panel.fit("[success]Workflow execution finished![/success]", title="CoorAgent", border_style="green"))
+                    
+        console.print(Panel.fit("[success]Workflow execution finished![/success]", title="CoorAgent", border_style="green"))
+        
+    except FileNotFoundError as e:
+        stream_print(Panel.fit(f"[danger]Error: {str(e)}[/danger]", border_style="red"))
+    except Exception as e:
+        stream_print(Panel.fit(f"[danger]Error during resume: {str(e)}[/danger]", border_style="red"))
+        traceback.print_exc()
+
+
 @cli.command(name="remove-agent")
 @click.pass_context
 @click.option('--agent-name', '-n', required=True, help='Name of the Agent to remove')
@@ -1580,6 +1823,12 @@ def help():
     help_table.add_row("[Command] remove-agent", "Remove the specified Agent")
     help_table.add_row("  -n/--agent-name", "Agent name (required)")
     help_table.add_row("  -u/--user-id", "User ID (required)")
+    help_table.add_row()
+
+    help_table.add_row("[Command] resume", "Resume a workflow from a specific checkpoint step")
+    help_table.add_row("  -w/--workflow-id", "Workflow ID (required)")
+    help_table.add_row("  -s/--step", "Step number to resume from (optional, defaults to latest)")
+    help_table.add_row("  -u/--user-id", "User ID (default: test)")
     help_table.add_row()
 
     help_table.add_row("[Interactive Mode]", "Run cli.py directly to enter")

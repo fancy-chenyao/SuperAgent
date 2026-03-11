@@ -1,6 +1,7 @@
 from typing import Dict, List, AsyncGenerator, Optional
 from dotenv import load_dotenv
 import json
+from pydantic import BaseModel
 
 load_dotenv()
 import logging
@@ -73,6 +74,48 @@ class Server:
             except (TypeError, ValueError, json.JSONDecodeError) as e:
                 logging.error(f"Error serializing event: {e}", exc_info=True)
                 
+    async def _run_agent_workflow_with_resume(
+            self,
+            request: "AgentRequest",
+            resume_step: int = None
+    ) -> AsyncGenerator[str, None]:
+        """Run agent workflow with resume capability from a specific checkpoint step."""
+        if agent_manager is None:
+             logger.error("Agent workflow called before AgentManager was initialized.")
+
+        session = session_manager.get_session(request.user_id)
+        for message in request.messages:
+            session.add_message(message.role, message.content)
+        session_messages = session.history[-3:]
+
+        response_stream = run_agent_workflow(
+            user_id=request.user_id,
+            task_type=request.task_type,
+            user_input_messages=session_messages,
+            debug=request.debug,
+            deep_thinking_mode=request.deep_thinking_mode,
+            search_before_planning=request.search_before_planning,
+            coor_agents=request.coor_agents,
+            workmode=request.workmode,
+            workflow_id=request.workflow_id,
+            resume_step=resume_step,
+        )
+        async for res in response_stream:
+            try:
+                event_type = res.get("event")
+                # replace agent_obj with agent_json 
+                if event_type == "new_agent_created" and "data" in res and "agent_obj" in res["data"]:
+                    agent_obj: BaseModel = res["data"]["agent_obj"]
+                    agent_json = agent_obj.model_dump_json(indent=2) if agent_obj else None
+                    if agent_json:
+                        res["data"]["agent_obj"] = agent_json
+                    else:
+                        logger.warning("Could not serialize agent object for new_agent_created event.")
+                        if "agent_obj" in res["data"]: del res["data"]["agent_obj"]
+                yield res
+            except (TypeError, ValueError, json.JSONDecodeError) as e:
+                logging.error(f"Error serializing event: {e}", exc_info=True)
+
     @staticmethod
     async def _list_agents(
          request: "listAgentRequest"
