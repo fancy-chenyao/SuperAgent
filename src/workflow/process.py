@@ -12,6 +12,7 @@ from src.service.env import USE_BROWSER
 from src.workflow.cache import workflow_cache as cache
 from src.workflow.graph import CompiledWorkflow
 from src.interface.agent import WorkMode
+from src.robust.checkpoint import CheckpointManager
 
 logging.basicConfig(
     level=logging.INFO,
@@ -64,6 +65,7 @@ async def run_agent_workflow(
     workmode: WorkMode = "launch",
     workflow_id: str = None,
     polish_instruction: str = None,
+    resume_step: int = None,
 ):
     """Run the agent workflow with the given user input.
 
@@ -161,17 +163,21 @@ async def run_agent_workflow(
             "polish_instruction": polish_instruction,
             "initialized": False,
         },
+        resume_step=resume_step,
     ):
         yield event_data
 
 
 async def _process_workflow(
-    workflow: CompiledWorkflow, initial_state: dict[str, Any]
+    workflow: CompiledWorkflow, initial_state: dict[str, Any], resume_step: int = None
 ) -> AsyncGenerator[dict[str, Any], None]:
     """处理自定义工作流的事件流"""
     current_node = None
 
     workflow_id = initial_state["workflow_id"]
+    checkpoint_manager = CheckpointManager()
+    step_count = 0
+
     yield {
         "event": "start_of_workflow",
         "data": {"workflow_id": workflow_id, "input": initial_state["messages"]},
@@ -180,6 +186,27 @@ async def _process_workflow(
     try:
         current_node = workflow.start_node
         state = State(**initial_state)
+
+        # Resume logic: Check if we are in a mode that supports resuming or resume_step is specified
+        # This must be AFTER initializing current_node and state, so we can override them
+        should_resume = resume_step is not None or initial_state.get("workflow_mode") in [WorkMode.POLISH, WorkMode.PRODUCTION]
+        
+        if should_resume:
+            try:
+                # If resume_step is specified, load that specific checkpoint
+                # Otherwise, load the latest checkpoint
+                target_step = resume_step if resume_step is not None else None
+                checkpoint = checkpoint_manager.load_checkpoint(workflow_id, step=target_step)
+                if checkpoint:
+                    logger.info(f"Resuming workflow {workflow_id} from step {checkpoint.step}, node {checkpoint.node_name}")
+                    if checkpoint.next_node:
+                        current_node = checkpoint.next_node
+                        state = State(**checkpoint.state)
+                        step_count = checkpoint.step + 1
+                    else:
+                        logger.warning("Checkpoint missing next_node, starting from scratch")
+            except Exception as e:
+                logger.warning(f"Could not load checkpoint for resume, starting from scratch: {e}")
 
         while current_node != "__end__":
             agent_name = current_node
@@ -242,6 +269,21 @@ async def _process_workflow(
                             },
                         }
 
+            next_node = command.goto
+
+            # Save checkpoint after node execution and state update
+            try:
+                checkpoint_manager.save_checkpoint(
+                    workflow_id=workflow_id,
+                    step=step_count,
+                    node_name=agent_name,
+                    next_node=next_node,
+                    state=state
+                )
+                step_count += 1
+            except Exception as e:
+                logger.error(f"Failed to save checkpoint at step {step_count}: {e}")
+
             yield {
                 "event": "end_of_agent",
                 "data": {
@@ -250,7 +292,6 @@ async def _process_workflow(
                 },
             }
 
-            next_node = command.goto
             current_node = next_node
 
         yield {
