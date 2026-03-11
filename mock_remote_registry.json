@@ -1,0 +1,45 @@
+﻿{
+  "resources": [
+    {
+      "type": "agent",
+      "name": "RemoteWeatherAgent",
+      "version": "1.0.0",
+      "endpoint": "http://127.0.0.1:8010/agent",
+      "protocol": "http",
+      "server_id": "remote-demo",
+      "health_url": "http://127.0.0.1:8010/health",
+      "metadata": {
+        "description": "Remote weather agent for location queries",
+        "llm_type": "basic",
+        "prompt": "remote agent",
+        "selected_tools": [
+          {"name": "remote_weather_tool", "description": "Remote weather tool"}
+        ]
+      }
+    },
+    {
+      "type": "tool",
+      "name": "remote_weather_tool",
+      "version": "1.0.0",
+      "endpoint": "http://127.0.0.1:8011/tool",
+      "protocol": "http",
+      "server_id": "remote-demo",
+      "health_url": "http://127.0.0.1:8011/health",
+      "metadata": {
+        "description": "Remote weather lookup tool"
+      }
+    },
+    {
+      "type": "skill",
+      "name": "remote_summarize",
+      "version": "1.0.0",
+      "endpoint": "http://127.0.0.1:8011/skill",
+      "protocol": "http",
+      "server_id": "remote-demo",
+      "health_url": "http://127.0.0.1:8011/health",
+      "metadata": {
+        "description": "Remote summarization skill"
+      }
+    }
+  ]
+}

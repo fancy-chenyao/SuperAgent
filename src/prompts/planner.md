@@ -26,6 +26,10 @@ You can break down the main topic into subtopics and expand the depth and breadt
 
 <<TEAM_MEMBERS_DESCRIPTION>>
 
+## Available Resources (Agents/Tools/Skills)
+
+<<RESOURCE_CATALOG>>
+
 ## Plan Generation Execution Standards
 
 - First, restate the user's requirements in your own words as a `thought`, with some of your own thinking.

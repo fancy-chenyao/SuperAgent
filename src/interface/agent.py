@@ -164,6 +164,7 @@ class PromptBuilder(TypedDict):
 class State(MessagesState):
     TEAM_MEMBERS: list[str]
     TEAM_MEMBERS_DESCRIPTION: str
+    RESOURCE_CATALOG: str
     user_id: str
     next: str
     full_plan: str

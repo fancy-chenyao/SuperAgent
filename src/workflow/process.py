@@ -13,6 +13,7 @@ from src.workflow.cache import workflow_cache as cache
 from src.workflow.graph import CompiledWorkflow
 from src.interface.agent import WorkMode
 from src.manager.registry import ToolRegistry
+from src.manager.resource import get_resource_registry
 
 logging.basicConfig(
     level=logging.INFO,
@@ -73,7 +74,7 @@ async def _build_team_members(
         if should_include and agent.agent_name not in members:
             members.append(agent.agent_name)
 
-        if agent.user_id != "share":
+        if agent.user_id != "share" or getattr(agent, "source", None) == "remote":
             member_desc += "\n" + TEAM_MEMBERS_DESCRIPTION_TEMPLATE.format(
                 agent_name=agent.agent_name,
                 agent_description=agent.description,
@@ -85,6 +86,8 @@ async def _build_team_members(
 async def _build_tools_description() -> str:
     registry = await ToolRegistry.get_instance()
     tools = await registry.list_global_tools()
+    resource_registry = await get_resource_registry()
+    resource_tools = await resource_registry.list(type="tool")
     descriptions = []
 
     for meta in tools:
@@ -98,7 +101,36 @@ async def _build_tools_description() -> str:
                 tool_description=tool_desc,
             )
         )
+
+    for spec in resource_tools:
+        if spec.server_id == "local":
+            continue
+        tool_desc = (spec.metadata or {}).get("description", "")
+        suffix = f"(remote/{spec.protocol or 'http'} from {spec.server_id})"
+        descriptions.append(
+            TOOLS_DESCRIPTION_TEMPLATE.format(
+                tool_name=spec.name,
+                tool_description=f"{tool_desc} {suffix}".strip(),
+            )
+        )
     return "".join(descriptions)
+
+
+async def _build_resource_catalog() -> str:
+    registry = await get_resource_registry()
+    specs = await registry.list()
+    if not specs:
+        return ""
+
+    lines = []
+    for spec in sorted(specs, key=lambda s: (s.type, s.server_id, s.name)):
+        desc = (spec.metadata or {}).get("description", "")
+        proto = spec.protocol or "local"
+        location = "local" if spec.server_id == "local" else f"remote/{spec.server_id}"
+        lines.append(
+            f"- [{spec.type}] {spec.name} ({location}, protocol={proto}) {desc}".strip()
+        )
+    return "\n".join(lines)
 
 
 async def run_agent_workflow(
@@ -169,6 +201,7 @@ async def run_agent_workflow(
         coor_agents=coor_agents,
     )
     tools_description = await _build_tools_description()
+    resource_catalog = await _build_resource_catalog()
 
     global coordinator_cache
     coordinator_cache = []
@@ -182,6 +215,7 @@ async def run_agent_workflow(
             "TEAM_MEMBERS": team_members,
             "TEAM_MEMBERS_DESCRIPTION": team_members_description,
             "TOOLS": tools_description,
+            "RESOURCE_CATALOG": resource_catalog,
             "USER_QUERY": user_input_messages[-1]["content"],
             "messages": user_input_messages,
             "deep_thinking_mode": deep_thinking_mode,

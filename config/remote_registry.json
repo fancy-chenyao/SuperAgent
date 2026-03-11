@@ -1,0 +1,13 @@
+﻿{
+  "cache_ttl": 5,
+  "sources": [
+    {
+      "name": "remote-demo",
+      "base_url": "http://127.0.0.1:8012",
+      "server_id": "remote-demo",
+      "priority": 50,
+      "timeout": 5,
+      "health_check": true
+    }
+  ]
+}

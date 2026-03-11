@@ -23,6 +23,8 @@ from src.interface.serializer import AgentBuilder
 from src.manager.executor.base import ExecutionContext
 from src.manager.executor.factory import execute_agent
 from src.manager.registry import ToolRegistry
+from src.manager.resource import get_resource_registry
+from src.manager.executor.remote_tool_proxy import RemoteToolProxy
 
 try:
     from src.llm.llm import get_llm_by_type
@@ -54,6 +56,7 @@ logger = logging.getLogger(__name__)
 
 async def _resolve_tools_by_names(tool_names: list[str]) -> list:
     registry = await ToolRegistry.get_instance()
+    resource_registry = await get_resource_registry()
     global_tools = await registry.list_global_tools()
     tool_map = {
         getattr(meta.tool, "name", ""): meta.tool
@@ -65,8 +68,15 @@ async def _resolve_tools_by_names(tool_names: list[str]) -> list:
     for name in tool_names:
         if name in tool_map:
             resolved.append(tool_map[name])
-        else:
-            logger.warning("Tool (%s) is not available", name)
+            continue
+
+        specs = await resource_registry.list(type="tool")
+        matched = next((spec for spec in specs if spec.name == name), None)
+        if matched and matched.server_id != "local":
+            resolved.append(RemoteToolProxy(matched, registry))
+            continue
+
+        logger.warning("Tool (%s) is not available", name)
     return resolved
 
 

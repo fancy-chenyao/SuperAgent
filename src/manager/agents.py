@@ -8,6 +8,8 @@ from src.interface.agent import Agent
 from src.interface.mcp import Tool
 from src.manager.mcp import get_mcp_hot_reload_manager
 from src.manager.registry import AgentRegistry, ToolRegistry
+from src.manager.registry import sync_local_resources, sync_remote_agents
+from src.manager.resource import get_resource_registry, refresh_remote_resources, start_remote_registry_watch
 from src.service.env import USR_AGENT, USE_BROWSER, USE_MCP_TOOLS
 from src.skills import SkillsManager
 from src.utils.path_utils import get_project_root
@@ -54,6 +56,19 @@ class AgentManager:
             await self.load_tools()
             await self.skills_manager.initialize()
 
+            # Resource registry integration (Stage 3)
+            resource_registry = await get_resource_registry()
+            await sync_local_resources(
+                agent_registry=self.agent_registry,
+                tool_registry=await ToolRegistry.get_instance(),
+                skills_manager=self.skills_manager,
+                resource_registry=resource_registry,
+            )
+            await refresh_remote_resources()
+            await start_remote_registry_watch()
+            await sync_remote_agents(resource_registry, self.agent_registry)
+            await self._sync_agent_cache()
+
             self._initialized = True
             logger.info(
                 "AgentManager initialized: %s agents, %s tools, %s skills",
@@ -74,7 +89,10 @@ class AgentManager:
         await loader.load_builtin_tools()
         if USE_MCP_TOOLS:
             manager = await get_mcp_hot_reload_manager()
-            await manager.reload(force=True)
+            try:
+                await manager.reload(force=True)
+            except Exception as e:
+                logger.error("MCP reload failed during tool load: %s", e)
 
         global_tools = await registry.list_global_tools()
         self.available_tools = {
@@ -87,7 +105,10 @@ class AgentManager:
         await self.ensure_initialized()
         registry = await ToolRegistry.get_instance()
         manager = await get_mcp_hot_reload_manager()
-        await manager.reload(force=True)
+        try:
+            await manager.reload(force=True)
+        except Exception as e:
+            logger.error("MCP reload failed during MCP tool load: %s", e)
         global_tools = await registry.list_global_tools()
         self.available_tools = {
             meta.tool.name: meta.tool

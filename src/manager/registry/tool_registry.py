@@ -161,10 +161,24 @@ class ToolRegistry:
             merged_by_name: Dict[str, Any] = {}
 
             for identifier, metadata in self._global_tools.items():
+                if identifier.name in merged_by_name:
+                    logger.warning(
+                        "Tool name conflict: %s (server=%s) already registered, skipping",
+                        identifier.name,
+                        identifier.server,
+                    )
+                    continue
                 merged_by_name[identifier.name] = metadata.tool
 
             if agent_name in self._agent_tools:
                 for identifier, metadata in self._agent_tools[agent_name].items():
+                    if identifier.name in merged_by_name:
+                        logger.warning(
+                            "Tool name conflict: %s (server=%s) already registered, skipping",
+                            identifier.name,
+                            identifier.server,
+                        )
+                        continue
                     merged_by_name[identifier.name] = metadata.tool
 
             return list(merged_by_name.values())

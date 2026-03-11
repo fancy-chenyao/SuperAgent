@@ -1,4 +1,4 @@
-import asyncio
+﻿import asyncio
 import copy
 import hashlib
 import json
@@ -100,19 +100,53 @@ class MCPHotReloadManager:
         self._agent_mcp_configs.pop(agent_name, None)
 
     async def _load_config(self) -> Dict[str, Any]:
-        if not self.config_path.exists():
-            return {}
+        def _safe_load(path: Path) -> Dict[str, Any]:
+            try:
+                with path.open("r", encoding="utf-8-sig") as f:
+                    return json.load(f)
+            except Exception:
+                logger.error("Invalid MCP config JSON: %s", path)
+                return {}
 
-        try:
-            with self.config_path.open("r", encoding="utf-8") as f:
-                data = json.load(f)
-        except json.JSONDecodeError:
-            logger.error("Invalid MCP config JSON: %s", self.config_path)
-            return {}
+        def _merge_sources(data: Dict[str, Any], base_dir: Path) -> Dict[str, Any]:
+            merged: Dict[str, Any] = {}
+            for item in data.get("sources", []):
+                if not isinstance(item, dict):
+                    continue
+                file_path = item.get("file")
+                if not file_path:
+                    continue
+                path = Path(file_path)
+                if not path.is_absolute():
+                    path = base_dir / path
+                if not path.exists():
+                    continue
+                sub = _safe_load(path)
+                servers = sub.get("mcpServers")
+                if isinstance(servers, dict):
+                    merged.update(servers)
+            inline = data.get("mcpServers")
+            if isinstance(inline, dict):
+                merged.update(inline)
+            return merged
 
-        servers = data.get("mcpServers")
-        if isinstance(servers, dict):
-            return servers
+        if self.config_path.exists():
+            data = _safe_load(self.config_path)
+            if isinstance(data.get("sources"), list):
+                return _merge_sources(data, self.config_path.parent)
+            servers = data.get("mcpServers")
+            if isinstance(servers, dict):
+                return servers
+
+        sources_path = self.config_path.parent / "mcp_sources.json"
+        if sources_path.exists():
+            data = _safe_load(sources_path)
+            if isinstance(data.get("sources"), list):
+                return _merge_sources(data, sources_path.parent)
+            servers = data.get("mcpServers")
+            if isinstance(servers, dict):
+                return servers
+
         return {}
 
     def _build_client_config(self, servers: Dict[str, Any]) -> Dict[str, Any]:
@@ -178,11 +212,7 @@ class MCPHotReloadManager:
             server = tool_name.split("_")[0] if "_" in tool_name else "mcp"
             identifier = ToolIdentifier(scope=scope, server=server, name=tool_name)
             tool_metas.append(
-                ToolMetadata(
-                    identifier=identifier,
-                    tool=tool,
-                    description=getattr(tool, "description", "") or "",
-                )
+                ToolMetadata(identifier=identifier, tool=tool, description=getattr(tool, "description", "") or "", tags=[f"server:{server}"])
             )
 
         return tool_metas
@@ -196,14 +226,15 @@ class MCPHotReloadManager:
             return self._client_pool[config_hash]
 
     def _validate_tools(self, tools: List[ToolMetadata]) -> bool:
-        names = set()
+        names: Dict[str, str] = {}
         for meta in tools:
             name = meta.identifier.name
             if not name:
                 return False
-            if name in names:
+            server = meta.identifier.server
+            if name in names and names[name] == server:
                 return False
-            names.add(name)
+            names[name] = server
         return True
 
     def _agent_config_hash(self) -> str:
@@ -213,18 +244,74 @@ class MCPHotReloadManager:
     async def _has_changes(self, force: bool = False) -> bool:
         if force:
             return True
-
-        if not self.config_path.exists():
-            file_hash = ""
-            mtime = 0.0
-        else:
-            raw = self.config_path.read_bytes()
-            file_hash = hashlib.sha256(raw).hexdigest()
-            mtime = self.config_path.stat().st_mtime
+        file_hash, mtime = self._compute_fingerprint()
 
         agent_hash = self._agent_config_hash()
         changed = (file_hash != self._last_hash) or (mtime != self._last_mtime) or (agent_hash != self._last_agent_hash)
         return changed
+
+    def _compute_fingerprint(self) -> tuple[str, float]:
+        def _safe_load(path: Path) -> Dict[str, Any]:
+            try:
+                with path.open("r", encoding="utf-8-sig") as f:
+                    return json.load(f)
+            except Exception:
+                return {}
+
+        def _extract_sources(data: Dict[str, Any]) -> List[Path]:
+            files: List[Path] = []
+            for item in data.get("sources", []):
+                if not isinstance(item, dict):
+                    continue
+                file_path = item.get("file")
+                if not file_path:
+                    continue
+                path = Path(file_path)
+                if not path.is_absolute():
+                    path = base_dir / path
+                files.append(path)
+            return files
+
+        files: List[Path] = []
+        base_dir = self.config_path.parent
+        if self.config_path.exists():
+            files.append(self.config_path)
+            data = _safe_load(self.config_path)
+            if isinstance(data.get("sources"), list):
+                files.extend(_extract_sources(data))
+            elif not isinstance(data.get("mcpServers"), dict):
+                sources_path = base_dir / "mcp_sources.json"
+                if sources_path.exists():
+                    files.append(sources_path)
+                    data = _safe_load(sources_path)
+                    if isinstance(data.get("sources"), list):
+                        files.extend(_extract_sources(data))
+        else:
+            sources_path = base_dir / "mcp_sources.json"
+            if sources_path.exists():
+                files.append(sources_path)
+                data = _safe_load(sources_path)
+                if isinstance(data.get("sources"), list):
+                    files.extend(_extract_sources(data))
+
+        fingerprint: List[Dict[str, Any]] = []
+        max_mtime = 0.0
+        for path in files:
+            if not path.exists():
+                continue
+            raw = path.read_bytes()
+            mtime = path.stat().st_mtime
+            max_mtime = max(max_mtime, mtime)
+            fingerprint.append(
+                {
+                    "path": str(path),
+                    "hash": hashlib.sha256(raw).hexdigest(),
+                    "mtime": mtime,
+                }
+            )
+
+        payload = json.dumps(fingerprint, sort_keys=True, ensure_ascii=False).encode("utf-8")
+        return hashlib.sha256(payload).hexdigest(), max_mtime
 
     async def _capture_snapshot(self, config_hash: str, file_mtime: float, source_config: Dict[str, Any]) -> MCPVersionSnapshot:
         global_tools = await self.registry.list_global_tools()
@@ -298,13 +385,7 @@ class MCPHotReloadManager:
             if not await self._has_changes(force=force):
                 return False
 
-            if self.config_path.exists():
-                raw = self.config_path.read_bytes()
-                file_hash = hashlib.sha256(raw).hexdigest()
-                file_mtime = self.config_path.stat().st_mtime
-            else:
-                file_hash = ""
-                file_mtime = 0.0
+            file_hash, file_mtime = self._compute_fingerprint()
 
             source_config = await self._load_config()
             snapshot = await self._capture_snapshot(file_hash, file_mtime, source_config)
@@ -387,3 +468,4 @@ class MCPHotReloadManager:
 
 
 __all__ = ["MCPVersionSnapshot", "MCPHotReloadManager"]
+
