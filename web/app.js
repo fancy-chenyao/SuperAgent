@@ -32,7 +32,9 @@ const mermaidContainer = document.getElementById("mermaidContainer");
 
 let currentAbortController = null;
 let outputBlocks = new Map();
-let flowNodeMap = new Map();
+let flowSteps = [];
+let activeStepIndex = -1;
+const MAX_FLOW_STEPS = 40;
 let autoScrollEnabled = true;
 let selectedWorkflowId = null;
 
@@ -51,7 +53,8 @@ const resetSummary = () => {
   summaryHint.classList.add("hidden");
   summaryHint.classList.remove("error");
   summaryHint.textContent = "";
-  flowNodeMap = new Map();
+  flowSteps = [];
+  activeStepIndex = -1;
 };
 
 const showSummaryHint = (text, isError = false) => {
@@ -79,34 +82,57 @@ const flashButton = (btn, text) => {
   }, 1200);
 };
 
-const ensureFlowNode = (agentName) => {
-  if (flowNodeMap.has(agentName)) return flowNodeMap.get(agentName);
-  const node = document.createElement("span");
-  node.className = "flow-node new";
-  node.textContent = agentName;
-  if (summaryFlow.children.length > 0) {
-    const arrow = document.createElement("span");
-    arrow.className = "flow-arrow";
-    arrow.textContent = "->";
-    summaryFlow.appendChild(arrow);
+const renderFlowSteps = () => {
+  summaryFlow.innerHTML = "";
+  const frag = document.createDocumentFragment();
+
+  flowSteps.forEach((step, idx) => {
+    if (idx > 0) {
+      const arrow = document.createElement("span");
+      arrow.className = "flow-arrow";
+      arrow.textContent = "→";
+      frag.appendChild(arrow);
+    }
+    const node = document.createElement("span");
+    node.className = "flow-node";
+    if (step.state === "active") node.classList.add("active");
+    if (step.state === "done") node.classList.add("done");
+    if (step.state === "new") node.classList.add("new");
+    node.textContent = step.agent;
+    frag.appendChild(node);
+  });
+
+  summaryFlow.appendChild(frag);
+  summaryFlow.scrollLeft = summaryFlow.scrollWidth;
+};
+
+const finishActiveStep = () => {
+  if (activeStepIndex < 0) return;
+  if (flowSteps[activeStepIndex]) {
+    flowSteps[activeStepIndex].state = "done";
   }
-  summaryFlow.appendChild(node);
-  flowNodeMap.set(agentName, node);
-  setTimeout(() => node.classList.remove("new"), 800);
-  return node;
+  activeStepIndex = -1;
 };
 
-const setActiveFlowNode = (agentName) => {
-  flowNodeMap.forEach((node) => node.classList.remove("active"));
-  const node = ensureFlowNode(agentName);
-  node.classList.add("active");
-};
-
-const markFlowNodeDone = (agentName) => {
-  const node = flowNodeMap.get(agentName);
-  if (node) {
-    node.classList.remove("active");
-    node.classList.add("done");
+const pushFlowStep = (agentName) => {
+  finishActiveStep();
+  flowSteps.push({ agent: agentName, state: "new" });
+  activeStepIndex = flowSteps.length - 1;
+  if (flowSteps.length > MAX_FLOW_STEPS) {
+    const removeCount = flowSteps.length - MAX_FLOW_STEPS;
+    flowSteps.splice(0, removeCount);
+    activeStepIndex = activeStepIndex - removeCount;
+    if (activeStepIndex < 0) activeStepIndex = -1;
+  }
+  renderFlowSteps();
+  const current = flowSteps[activeStepIndex];
+  if (current) {
+    setTimeout(() => {
+      if (flowSteps[activeStepIndex] === current && current.state === "new") {
+        current.state = "active";
+        renderFlowSteps();
+      }
+    }, 800);
   }
 };
 
@@ -192,13 +218,14 @@ const handleEvent = (eventName, payload) => {
   }
   if (eventName === "start_of_agent") {
     const agentName = payload.data?.agent_name || payload.agent_name || "agent";
-    setActiveFlowNode(agentName);
+    pushFlowStep(agentName);
     appendOutput("system", `\n[start_of_agent] ${agentName}\n`);
     return;
   }
   if (eventName === "end_of_agent") {
     const agentName = payload.data?.agent_name || payload.agent_name || "agent";
-    markFlowNodeDone(agentName);
+    finishActiveStep();
+    renderFlowSteps();
     appendOutput("system", `\n[end_of_agent] ${agentName}\n`);
     return;
   }
