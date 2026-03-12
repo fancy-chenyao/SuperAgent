@@ -3,13 +3,10 @@ const tabs = document.querySelectorAll(".tab");
 const panels = document.querySelectorAll(".panel");
 
 const userIdInput = document.getElementById("userId");
-const langInput = document.getElementById("lang");
-const taskTypeInput = document.getElementById("taskType");
 const workModeInput = document.getElementById("workMode");
 const deepThinkingInput = document.getElementById("deepThinking");
 const searchBeforeInput = document.getElementById("searchBefore");
 const debugInput = document.getElementById("debugMode");
-const coorAgentsInput = document.getElementById("coorAgents");
 const workflowIdInput = document.getElementById("workflowId");
 const messageInput = document.getElementById("message");
 
@@ -17,8 +14,7 @@ const runBtn = document.getElementById("runBtn");
 const stopBtn = document.getElementById("stopBtn");
 const clearOutputBtn = document.getElementById("clearOutput");
 const autoScrollBtn = document.getElementById("autoScrollBtn");
-const pauseBtn = document.getElementById("pauseBtn");
-const copyOutputBtn = document.getElementById("copyOutputBtn");
+const exportTxtBtn = document.getElementById("exportTxtBtn");
 
 const streamOutput = document.getElementById("streamOutput");
 const summaryFlow = document.getElementById("summaryFlow");
@@ -38,8 +34,6 @@ let currentAbortController = null;
 let outputBlocks = new Map();
 let flowNodeMap = new Map();
 let autoScrollEnabled = true;
-let isPaused = false;
-let pendingOutputQueue = [];
 let selectedWorkflowId = null;
 
 mermaid.initialize({ startOnLoad: false, theme: "default" });
@@ -73,11 +67,6 @@ const showSummaryHint = (text, isError = false) => {
 const updateAutoScrollBtn = () => {
   autoScrollBtn.textContent = autoScrollEnabled ? "Auto-scroll: On" : "Auto-scroll: Off";
   autoScrollBtn.classList.toggle("active", autoScrollEnabled);
-};
-
-const updatePauseBtn = () => {
-  pauseBtn.textContent = isPaused ? "Resume" : "Pause";
-  pauseBtn.classList.toggle("active", isPaused);
 };
 
 const flashButton = (btn, text) => {
@@ -155,24 +144,12 @@ const appendOutputImmediate = (agentName, content) => {
 };
 
 const appendOutput = (agentName, content) => {
-  if (isPaused) {
-    pendingOutputQueue.push({ agentName: agentName || "system", content });
-    return;
-  }
   appendOutputImmediate(agentName, content);
-};
-
-const flushPendingOutput = () => {
-  if (!pendingOutputQueue.length) return;
-  const items = pendingOutputQueue.slice();
-  pendingOutputQueue = [];
-  items.forEach((item) => appendOutputImmediate(item.agentName, item.content));
 };
 
 const clearOutput = () => {
   streamOutput.innerHTML = "";
   outputBlocks = new Map();
-  pendingOutputQueue = [];
 };
 
 const parseSse = (buffer, onEvent) => {
@@ -259,21 +236,15 @@ const runWorkflow = async () => {
   runBtn.disabled = true;
   stopBtn.disabled = false;
 
-  const coorAgents = coorAgentsInput.value
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean);
-
   const payload = {
     user_id: userId,
-    lang: langInput.value,
-    task_type: taskTypeInput.value,
+    lang: "zh",
     workmode: workModeInput.value,
     messages: [{ role: "user", content: message }],
     debug: debugInput.checked,
     deep_thinking_mode: deepThinkingInput.checked,
     search_before_planning: searchBeforeInput.checked,
-    coor_agents: coorAgents.length ? coorAgents : null,
+    coor_agents: null,
     workflow_id: workflowIdInput.value.trim() || null,
   };
 
@@ -557,18 +528,9 @@ const toggleAutoScroll = () => {
   }
 };
 
-const togglePause = () => {
-  isPaused = !isPaused;
-  updatePauseBtn();
-  streamOutput.classList.toggle("paused", isPaused);
-  if (!isPaused) {
-    flushPendingOutput();
-  }
-};
-
-const copyAllOutput = async () => {
+const exportOutputTxt = () => {
   if (!outputBlocks.size) {
-    flashButton(copyOutputBtn, "Empty");
+    flashButton(exportTxtBtn, "Empty");
     return;
   }
 
@@ -579,38 +541,27 @@ const copyAllOutput = async () => {
     parts.push("");
   });
   const text = parts.join("\n");
-
-  try {
-    if (navigator.clipboard && window.isSecureContext) {
-      await navigator.clipboard.writeText(text);
-    } else {
-      const textarea = document.createElement("textarea");
-      textarea.value = text;
-      textarea.setAttribute("readonly", "");
-      textarea.style.position = "absolute";
-      textarea.style.left = "-9999px";
-      document.body.appendChild(textarea);
-      textarea.select();
-      document.execCommand("copy");
-      document.body.removeChild(textarea);
-    }
-    flashButton(copyOutputBtn, "Copied");
-  } catch (err) {
-    flashButton(copyOutputBtn, "Copy failed");
-  }
+  const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+  link.href = url;
+  link.download = `cooragent-output-${timestamp}.txt`;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
 };
 
 runBtn.addEventListener("click", runWorkflow);
 stopBtn.addEventListener("click", stopWorkflow);
 clearOutputBtn.addEventListener("click", clearOutput);
 autoScrollBtn.addEventListener("click", toggleAutoScroll);
-pauseBtn.addEventListener("click", togglePause);
-copyOutputBtn.addEventListener("click", copyAllOutput);
+exportTxtBtn.addEventListener("click", exportOutputTxt);
 
 refreshAgentsBtn.addEventListener("click", fetchAgents);
 refreshToolsBtn.addEventListener("click", fetchTools);
 refreshWorkflowsBtn.addEventListener("click", fetchWorkflows);
 
 updateAutoScrollBtn();
-updatePauseBtn();
 setStatus("Ready", true);

@@ -198,6 +198,7 @@ body {
 .run-grid {
   display: grid;
   grid-template-columns: minmax(260px, 360px) 1fr;
+  align-items: start;
   gap: 18px;
   margin-top: 16px;
 }
@@ -227,6 +228,10 @@ body {
   color: var(--muted);
 }
 
+.form-card .form-row:last-of-type {
+  margin-bottom: 8px;
+}
+
 .form-row input,
 .form-row select,
 .form-row textarea {
@@ -240,6 +245,8 @@ body {
 
 .form-row textarea {
   resize: vertical;
+  min-height: 160px;
+  line-height: 1.5;
 }
 
 .form-row.inline {
@@ -263,6 +270,7 @@ body {
 .form-actions {
   display: flex;
   gap: 12px;
+  margin-top: 4px;
 }
 
 button.primary,
@@ -317,11 +325,7 @@ button:disabled {
   overflow-y: auto;
   display: flex;
   flex-direction: column;
-  gap: 12px;
-}
-
-.output-body.paused {
-  opacity: 0.75;
+  gap: 8px;
 }
 
 .summary-card {
@@ -336,64 +340,9 @@ button:disabled {
   align-items: center;
 }
 
-.badge {
-  padding: 4px 10px;
-  border-radius: 999px;
-  font-size: 11px;
-  background: rgba(75, 227, 172, 0.15);
-  color: var(--accent);
-  border: 1px solid rgba(75, 227, 172, 0.4);
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-}
-
-.badge.error {
-  background: rgba(255, 106, 106, 0.2);
-  border-color: rgba(255, 106, 106, 0.6);
-  color: var(--danger);
-}
-
-.badge.completed {
-  background: rgba(47, 124, 255, 0.2);
-  border-color: rgba(47, 124, 255, 0.5);
-  color: #8eb7ff;
-}
-
-.summary-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
-}
-
-.summary-grid .label,
-.summary-feed .label,
 .summary-flow .label {
   font-size: 11px;
   color: var(--muted);
-}
-
-.summary-grid .value {
-  font-size: 13px;
-  font-weight: 600;
-  margin-top: 4px;
-}
-
-.summary-feed ul {
-  list-style: none;
-  padding: 0;
-  margin: 8px 0 0;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.summary-feed li {
-  font-size: 12px;
-  color: var(--text);
-  background: rgba(245, 247, 252, 0.95);
-  padding: 8px 10px;
-  border-radius: 10px;
-  border: 1px solid rgba(20, 24, 40, 0.08);
 }
 
 .summary-flow .flow-track {
@@ -450,7 +399,7 @@ button:disabled {
 .output-block {
   background: rgba(245, 247, 252, 0.95);
   border-radius: 12px;
-  padding: 12px;
+  padding: 10px 12px;
   border: 1px solid rgba(20, 24, 40, 0.08);
 }
 
@@ -466,6 +415,7 @@ button:disabled {
   font-size: 12px;
   white-space: pre-wrap;
   color: #30354a;
+  line-height: 1.5;
 }
 
 .panel-actions {
