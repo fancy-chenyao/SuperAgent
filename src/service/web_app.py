@@ -14,6 +14,7 @@ from pydantic import BaseModel
 from src.interface.agent import AgentRequest
 from src.manager import agent_manager
 from src.manager.registry import ToolRegistry
+from src.manager.mcp import mcp_client_config, mcp_config_fingerprint
 from src.service.server import Server
 from src.utils.path_utils import get_project_root
 from src.workflow.cache import workflow_cache
@@ -93,6 +94,67 @@ def _format_datetime(dt: Optional[datetime]) -> Optional[str]:
         return dt.isoformat()
     except Exception:
         return None
+
+
+def _extract_tool_name(tool_entry: Any) -> str:
+    if isinstance(tool_entry, str):
+        return tool_entry
+    if isinstance(tool_entry, dict):
+        name = tool_entry.get("name") or tool_entry.get("tool") or tool_entry.get("tool_name")
+        if name:
+            return str(name)
+        config = tool_entry.get("config") or {}
+        if isinstance(config, dict):
+            name = config.get("name") or config.get("tool") or config.get("tool_name")
+            if name:
+                return str(name)
+    return ""
+
+
+def _extract_tools_from_node(node: Any) -> list[str]:
+    if not isinstance(node, dict):
+        return []
+    config = node.get("config") or {}
+    tools = None
+    if isinstance(config, dict):
+        tools = config.get("tools")
+    if tools is None:
+        tools = node.get("tools")
+    if not isinstance(tools, list):
+        return []
+    names: list[str] = []
+    for tool in tools:
+        name = _extract_tool_name(tool)
+        if name:
+            names.append(name)
+    return names
+
+
+def _extract_tools_from_workflow(workflow: dict) -> list[str]:
+    names: list[str] = []
+    graph = workflow.get("graph")
+    if isinstance(graph, list):
+        for node in graph:
+            names.extend(_extract_tools_from_node(node))
+    nodes = workflow.get("nodes")
+    if isinstance(nodes, dict):
+        for node in nodes.values():
+            names.extend(_extract_tools_from_node(node))
+    return names
+
+
+def _get_args_schema(tool: Any) -> Optional[dict[str, Any]]:
+    args_schema = getattr(tool, "args_schema", None)
+    if args_schema is None:
+        return None
+    try:
+        if hasattr(args_schema, "model_json_schema"):
+            return args_schema.model_json_schema()
+        if hasattr(args_schema, "schema"):
+            return args_schema.schema()
+    except Exception:
+        return None
+    return None
 
 
 def _build_health_fallback(endpoint: str) -> Optional[str]:
@@ -303,12 +365,114 @@ def create_app() -> FastAPI:
         tools = await registry.list_global_tools()
         return [
             {
-                "name": getattr(meta.tool, "name", ""),
+                "name": meta.identifier.name or getattr(meta.tool, "name", ""),
                 "description": meta.description or getattr(meta.tool, "description", ""),
+                "scope": meta.identifier.scope,
+                "server": meta.identifier.server,
+                "version": meta.version,
+                "tags": meta.tags,
+                "is_mcp": meta.identifier.is_mcp,
             }
             for meta in tools
-            if getattr(meta.tool, "name", "")
+            if meta.identifier.name or getattr(meta.tool, "name", "")
         ]
+
+    @app.get("/api/tools/{tool_name}")
+    async def get_tool_detail(tool_name: str):
+        await agent_manager.ensure_initialized()
+        registry = await ToolRegistry.get_instance()
+        tools = await registry.list_all_tools()
+        matches = []
+        for meta in tools:
+            identifier_name = meta.identifier.name
+            runtime_name = getattr(meta.tool, "name", "")
+            if identifier_name == tool_name or runtime_name == tool_name:
+                matches.append(meta)
+        if not matches:
+            raise HTTPException(status_code=404, detail="tool not found")
+
+        matches.sort(
+            key=lambda m: (
+                m.identifier.scope != "global",
+                m.identifier.server != "builtin",
+            )
+        )
+        meta = matches[0]
+        tool_obj = meta.tool
+        return {
+            "name": meta.identifier.name or getattr(tool_obj, "name", ""),
+            "description": meta.description or getattr(tool_obj, "description", ""),
+            "identifier": {
+                "scope": meta.identifier.scope,
+                "server": meta.identifier.server,
+                "name": meta.identifier.name,
+                "is_mcp": meta.identifier.is_mcp,
+            },
+            "scope": meta.identifier.scope,
+            "server": meta.identifier.server,
+            "version": meta.version,
+            "tags": meta.tags,
+            "is_mcp": meta.identifier.is_mcp,
+            "args_schema": _get_args_schema(tool_obj),
+        }
+
+    @app.get("/api/tools/stats")
+    async def get_tools_stats(user_id: Optional[str] = None, include_share: bool = True):
+        project_root = get_project_root()
+        workflows_dir = project_root / "store" / "workflows"
+        users: list[str] = []
+        if user_id:
+            users.append(user_id)
+        if include_share or not users:
+            if "share" not in users:
+                users.append("share")
+
+        stats: dict[str, dict[str, Any]] = {}
+        workflows_scanned = 0
+        for uid in users:
+            for workflow_path in _collect_workflow_files(workflows_dir, uid):
+                try:
+                    workflow = json.loads(workflow_path.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                workflows_scanned += 1
+                workflow_last = _workflow_last_used(workflow)
+                tool_names = set(_extract_tools_from_workflow(workflow))
+                for tool_name in tool_names:
+                    slot = stats.setdefault(tool_name, {"workflows": 0, "last_used": None})
+                    slot["workflows"] += 1
+                    if workflow_last:
+                        prev = slot["last_used"]
+                        if prev is None or workflow_last > prev:
+                            slot["last_used"] = workflow_last
+
+        payload = {
+            name: {
+                "workflows": slot["workflows"],
+                "last_used": _format_datetime(slot["last_used"]),
+            }
+            for name, slot in stats.items()
+        }
+        return {"tools": payload, "scope": {"users": users, "workflows_scanned": workflows_scanned}}
+
+    @app.get("/api/tools/mcp")
+    async def get_mcp_tools_config():
+        config = mcp_client_config()
+        fingerprint = mcp_config_fingerprint()
+        servers = []
+        for name, cfg in config.items():
+            if not isinstance(cfg, dict):
+                continue
+            servers.append(
+                {
+                    "name": name,
+                    "transport": cfg.get("transport"),
+                    "url": cfg.get("url"),
+                    "command": cfg.get("command"),
+                    "args": cfg.get("args"),
+                }
+            )
+        return {"servers": servers, "fingerprint": fingerprint}
 
     @app.get("/api/workflows")
     async def list_workflows(user_id: Optional[str] = None, match: Optional[str] = None):

@@ -23,6 +23,14 @@ const summaryHint = document.getElementById("summaryHint");
 const refreshAgentsBtn = document.getElementById("refreshAgents");
 const refreshToolsBtn = document.getElementById("refreshTools");
 const refreshWorkflowsBtn = document.getElementById("refreshWorkflows");
+const toolsSearchInput = document.getElementById("toolsSearch");
+const toolsSearchBtn = document.getElementById("toolsSearchBtn");
+const toolsSourceFilter = document.getElementById("toolsSourceFilter");
+const toolsScopeFilter = document.getElementById("toolsScopeFilter");
+const toolsSortSelect = document.getElementById("toolsSort");
+const toolsCountTotal = document.getElementById("toolsCountTotal");
+const toolsCountBuiltin = document.getElementById("toolsCountBuiltin");
+const toolsCountMcp = document.getElementById("toolsCountMcp");
 
 const agentsList = document.getElementById("agentsList");
 const agentsSearchInput = document.getElementById("agentsSearch");
@@ -33,6 +41,9 @@ const clearCoorBtn = document.getElementById("clearCoorBtn");
 const healthCheckSelectedBtn = document.getElementById("healthCheckSelected");
 const agentDetail = document.getElementById("agentDetail");
 const toolsList = document.getElementById("toolsList");
+const toolDetail = document.getElementById("toolDetail");
+const mcpList = document.getElementById("mcpList");
+const mcpSummary = document.getElementById("mcpSummary");
 const workflowsList = document.getElementById("workflowsList");
 const workflowDetail = document.getElementById("workflowDetail");
 const mermaidContainer = document.getElementById("mermaidContainer");
@@ -50,6 +61,10 @@ let latestAgents = [];
 let agentFilter = "all";
 let agentHealth = {};
 let agentStats = {};
+let latestTools = [];
+let toolStats = {};
+let selectedToolName = null;
+let mcpConfig = null;
 
 mermaid.initialize({ startOnLoad: false, theme: "default" });
 
@@ -378,6 +393,13 @@ const buildStatsUrl = (userId) => {
   return `/api/agents/stats?${params.toString()}`;
 };
 
+const buildToolsStatsUrl = (userId) => {
+  const params = new URLSearchParams();
+  if (userId) params.set("user_id", userId);
+  params.set("include_share", "true");
+  return `/api/tools/stats?${params.toString()}`;
+};
+
 const formatDate = (iso) => {
   if (!iso) return "";
   if (iso.includes("T")) return iso.split("T")[0];
@@ -503,6 +525,306 @@ const renderAgentDetail = (agent) => {
   agentDetail.appendChild(mcpPre);
   agentDetail.appendChild(promptTitle);
   agentDetail.appendChild(promptPre);
+};
+
+const setToolDetailEmpty = (text) => {
+  if (!toolDetail) return;
+  toolDetail.textContent = "";
+  const empty = document.createElement("div");
+  empty.className = "tool-detail-empty";
+  empty.textContent = text;
+  toolDetail.appendChild(empty);
+};
+
+const formatSchemaType = (schema) => {
+  if (!schema || typeof schema !== "object") return "unknown";
+  if (schema.type) {
+    if (schema.type === "array" && schema.items) {
+      const itemType = formatSchemaType(schema.items);
+      return `array<${itemType}>`;
+    }
+    return schema.type;
+  }
+  const variants = schema.anyOf || schema.oneOf || schema.allOf;
+  if (Array.isArray(variants)) {
+    return variants.map((item) => formatSchemaType(item)).join(" | ");
+  }
+  return schema.title || "unknown";
+};
+
+const renderSchemaTable = (schema) => {
+  if (!schema || !schema.properties) return null;
+  const table = document.createElement("table");
+  table.className = "schema-table";
+
+  const thead = document.createElement("thead");
+  const headRow = document.createElement("tr");
+  ["字段", "类型", "必填", "描述"].forEach((label) => {
+    const th = document.createElement("th");
+    th.textContent = label;
+    headRow.appendChild(th);
+  });
+  thead.appendChild(headRow);
+  table.appendChild(thead);
+
+  const tbody = document.createElement("tbody");
+  const required = new Set(schema.required || []);
+  Object.entries(schema.properties).forEach(([key, value]) => {
+    const row = document.createElement("tr");
+    const nameCell = document.createElement("td");
+    nameCell.textContent = key;
+    const typeCell = document.createElement("td");
+    typeCell.textContent = formatSchemaType(value);
+    const reqCell = document.createElement("td");
+    reqCell.textContent = required.has(key) ? "Yes" : "No";
+    const descCell = document.createElement("td");
+    descCell.textContent = value?.description || value?.title || "";
+    row.appendChild(nameCell);
+    row.appendChild(typeCell);
+    row.appendChild(reqCell);
+    row.appendChild(descCell);
+    tbody.appendChild(row);
+  });
+  table.appendChild(tbody);
+  return table;
+};
+
+const renderToolDetail = (tool) => {
+  if (!toolDetail) return;
+  if (!tool) {
+    setToolDetailEmpty("选择一个 Tool 查看详情");
+    return;
+  }
+
+  toolDetail.textContent = "";
+  const title = document.createElement("h3");
+  title.textContent = tool.name || "tool";
+
+  const sub = document.createElement("div");
+  sub.className = "agent-sub";
+  const scope = tool.scope || tool.identifier?.scope || "n/a";
+  const server = tool.server || tool.identifier?.server || "n/a";
+  sub.textContent = `scope: ${scope} · server: ${server}`;
+
+  const tagRow = document.createElement("div");
+  tagRow.className = "tag-row";
+  if (tool.is_mcp) {
+    tagRow.appendChild(createTag("mcp", "warn"));
+  } else {
+    tagRow.appendChild(createTag("builtin", "accent"));
+  }
+  if (tool.version) {
+    tagRow.appendChild(createTag(`v${tool.version}`));
+  }
+  if (Array.isArray(tool.tags)) {
+    tool.tags.forEach((tag) => {
+      if (tag) tagRow.appendChild(createTag(tag));
+    });
+  }
+
+  const descTitle = document.createElement("h4");
+  descTitle.textContent = "描述";
+  const desc = document.createElement("p");
+  desc.textContent = tool.description || "暂无描述";
+
+  const usageTitle = document.createElement("h4");
+  usageTitle.textContent = "Usage";
+  const usageRow = document.createElement("p");
+  const stats = toolStats[tool.name] || {};
+  const parts = [];
+  if (stats.workflows !== undefined) parts.push(`workflows: ${stats.workflows}`);
+  if (stats.last_used) parts.push(`last: ${stats.last_used}`);
+  usageRow.textContent = parts.length ? parts.join(" · ") : "n/a";
+
+  const schemaTitle = document.createElement("h4");
+  schemaTitle.textContent = "Args Schema";
+  const schemaActions = document.createElement("div");
+  schemaActions.className = "panel-actions";
+  const copyBtn = document.createElement("button");
+  copyBtn.className = "ghost";
+  copyBtn.textContent = "Copy schema";
+  copyBtn.addEventListener("click", () => {
+    if (!tool.args_schema) return;
+    const text = JSON.stringify(tool.args_schema, null, 2);
+    navigator.clipboard.writeText(text).then(() => flashButton(copyBtn, "Copied"));
+  });
+  schemaActions.appendChild(copyBtn);
+
+  const schemaContent = tool.args_schema ? renderSchemaTable(tool.args_schema) : null;
+  const schemaEmpty = document.createElement("p");
+  schemaEmpty.textContent = tool.args_schema ? "" : "No schema available.";
+
+  toolDetail.appendChild(title);
+  toolDetail.appendChild(sub);
+  toolDetail.appendChild(tagRow);
+  toolDetail.appendChild(descTitle);
+  toolDetail.appendChild(desc);
+  toolDetail.appendChild(usageTitle);
+  toolDetail.appendChild(usageRow);
+  toolDetail.appendChild(schemaTitle);
+  if (tool.args_schema) {
+    toolDetail.appendChild(schemaActions);
+    if (schemaContent) {
+      toolDetail.appendChild(schemaContent);
+    } else {
+      schemaEmpty.textContent = "Schema format unsupported.";
+      toolDetail.appendChild(schemaEmpty);
+    }
+  } else {
+    toolDetail.appendChild(schemaEmpty);
+  }
+};
+
+const renderMcpConfig = () => {
+  if (!mcpList || !mcpSummary) return;
+  mcpList.textContent = "";
+  mcpSummary.textContent = "";
+  if (!mcpConfig) {
+    mcpSummary.appendChild(createTag("MCP config unavailable", "warn"));
+    return;
+  }
+  const servers = Array.isArray(mcpConfig.servers) ? mcpConfig.servers : [];
+  const hash = mcpConfig.fingerprint?.hash ? mcpConfig.fingerprint.hash.slice(0, 8) : "";
+  const mtime = mcpConfig.fingerprint?.mtime ? new Date(mcpConfig.fingerprint.mtime * 1000).toLocaleString() : "";
+
+  mcpSummary.appendChild(createTag(`servers: ${servers.length}`, "accent"));
+  if (hash) mcpSummary.appendChild(createTag(`hash: ${hash}`));
+  if (mtime) mcpSummary.appendChild(createTag(`mtime: ${mtime}`));
+
+  if (!servers.length) {
+    mcpList.appendChild(createStateCard("No MCP servers configured.", "empty"));
+    return;
+  }
+
+  servers.forEach((server) => {
+    const item = document.createElement("div");
+    item.className = "list-item";
+    const title = document.createElement("strong");
+    title.textContent = server.name || "mcp";
+    const meta = document.createElement("div");
+    meta.className = "agent-sub";
+    const parts = [];
+    if (server.transport) parts.push(`transport: ${server.transport}`);
+    if (server.url) parts.push(`url: ${server.url}`);
+    if (server.command) parts.push(`command: ${server.command}`);
+    meta.textContent = parts.join(" · ");
+    item.appendChild(title);
+    item.appendChild(meta);
+    mcpList.appendChild(item);
+  });
+
+  const mcpCount = latestTools.filter((tool) => tool.is_mcp).length;
+  if (servers.length && mcpCount === 0) {
+    mcpList.appendChild(createStateCard("MCP servers configured, but no MCP tools loaded.", "error"));
+  }
+};
+
+const updateToolsCounts = (tools) => {
+  if (!toolsCountTotal || !toolsCountBuiltin || !toolsCountMcp) return;
+  const total = tools.length;
+  const builtin = tools.filter((tool) => tool.server === "builtin").length;
+  const mcp = tools.filter((tool) => tool.is_mcp).length;
+  toolsCountTotal.textContent = `Total: ${total}`;
+  toolsCountBuiltin.textContent = `Builtin: ${builtin}`;
+  toolsCountMcp.textContent = `MCP: ${mcp}`;
+};
+
+const applyToolsFilters = (tools) => {
+  const search = toolsSearchInput ? toolsSearchInput.value.trim().toLowerCase() : "";
+  const sourceFilter = toolsSourceFilter ? toolsSourceFilter.value : "all";
+  const scopeFilter = toolsScopeFilter ? toolsScopeFilter.value : "all";
+  const filtered = tools.filter((tool) => {
+    if (sourceFilter === "builtin" && tool.server !== "builtin") return false;
+    if (sourceFilter === "mcp" && !tool.is_mcp) return false;
+    if (scopeFilter !== "all" && tool.scope !== scopeFilter) return false;
+    if (search) {
+      const hay = `${tool.name} ${tool.description || ""}`.toLowerCase();
+      if (!hay.includes(search)) return false;
+    }
+    return true;
+  });
+
+  const sortKey = toolsSortSelect ? toolsSortSelect.value : "name";
+  if (sortKey === "last_used") {
+    filtered.sort((a, b) => {
+      const aTs = Date.parse(toolStats[a.name]?.last_used || "");
+      const bTs = Date.parse(toolStats[b.name]?.last_used || "");
+      if (Number.isNaN(aTs) && Number.isNaN(bTs)) return 0;
+      if (Number.isNaN(aTs)) return 1;
+      if (Number.isNaN(bTs)) return -1;
+      return bTs - aTs;
+    });
+  } else {
+    filtered.sort((a, b) => a.name.localeCompare(b.name));
+  }
+  return filtered;
+};
+
+const renderTools = () => {
+  if (!toolsList) return;
+  if (!latestTools.length) {
+    setListState(toolsList, "No tools found.", "empty");
+    return;
+  }
+  const filtered = applyToolsFilters(latestTools);
+  if (!filtered.length) {
+    setListState(toolsList, "No tools match current filter.", "empty");
+    return;
+  }
+
+  toolsList.textContent = "";
+  filtered.forEach((tool) => {
+    const card = document.createElement("div");
+    card.className = "card tool-card";
+    card.dataset.toolName = tool.name;
+    if (tool.name === selectedToolName) {
+      card.classList.add("active");
+    }
+
+    const title = document.createElement("h4");
+    title.textContent = tool.name;
+    const desc = document.createElement("p");
+    desc.textContent = tool.description || "";
+
+    const tagRow = document.createElement("div");
+    tagRow.className = "tag-row";
+    tagRow.appendChild(createTag(tool.scope || "global"));
+    tagRow.appendChild(createTag(tool.server || "builtin", tool.is_mcp ? "warn" : "accent"));
+
+    const stats = toolStats[tool.name] || {};
+    const meta = document.createElement("div");
+    meta.className = "tool-meta";
+    const metaParts = [];
+    if (stats.workflows !== undefined) metaParts.push(`workflows: ${stats.workflows}`);
+    if (stats.last_used) metaParts.push(`last: ${formatDate(stats.last_used)}`);
+    meta.textContent = metaParts.length ? metaParts.join(" · ") : "workflows: 0";
+
+    card.appendChild(title);
+    card.appendChild(desc);
+    card.appendChild(tagRow);
+    card.appendChild(meta);
+
+    card.addEventListener("click", () => selectTool(tool));
+    toolsList.appendChild(card);
+  });
+};
+
+const selectTool = async (tool) => {
+  selectedToolName = tool.name;
+  document.querySelectorAll(".tool-card").forEach((card) => {
+    card.classList.toggle("active", card.dataset.toolName === tool.name);
+  });
+  setToolDetailEmpty("Loading...");
+  try {
+    const res = await fetch(`/api/tools/${encodeURIComponent(tool.name)}`);
+    if (!res.ok) {
+      throw new Error("request failed");
+    }
+    const detail = await res.json();
+    renderToolDetail(detail);
+  } catch (err) {
+    setToolDetailEmpty("加载失败");
+  }
 };
 
 const applyAgentFilter = (agents) => {
@@ -670,28 +992,45 @@ const fetchAgents = async () => {
 
 const fetchTools = async () => {
   setListState(toolsList, "Loading...", "loading");
+  setToolDetailEmpty("选择一个 Tool 查看详情");
   try {
-    const res = await fetch("/api/tools");
-    if (!res.ok) {
+    const userId = userIdInput ? userIdInput.value.trim() : "";
+    const statsUrl = buildToolsStatsUrl(userId);
+    const results = await Promise.allSettled([
+      fetch("/api/tools"),
+      fetch(statsUrl),
+      fetch("/api/tools/mcp"),
+    ]);
+
+    const toolsRes = results[0].status === "fulfilled" ? results[0].value : null;
+    const statsRes = results[1].status === "fulfilled" ? results[1].value : null;
+    const mcpRes = results[2].status === "fulfilled" ? results[2].value : null;
+
+    if (!toolsRes || !toolsRes.ok) {
       throw new Error("request failed");
     }
-    const tools = await res.json();
-    if (!tools.length) {
+    latestTools = await toolsRes.json();
+    if (!Array.isArray(latestTools) || !latestTools.length) {
       setListState(toolsList, "No tools found.", "empty");
       return;
     }
-    toolsList.textContent = "";
-    tools.forEach((tool) => {
-      const card = document.createElement("div");
-      card.className = "card";
-      const title = document.createElement("h4");
-      title.textContent = tool.name;
-      const desc = document.createElement("p");
-      desc.textContent = tool.description || "";
-      card.appendChild(title);
-      card.appendChild(desc);
-      toolsList.appendChild(card);
-    });
+
+    if (statsRes && statsRes.ok) {
+      const statsJson = await statsRes.json();
+      toolStats = statsJson?.tools || {};
+    } else {
+      toolStats = {};
+    }
+
+    if (mcpRes && mcpRes.ok) {
+      mcpConfig = await mcpRes.json();
+    } else {
+      mcpConfig = null;
+    }
+
+    updateToolsCounts(latestTools);
+    renderTools();
+    renderMcpConfig();
   } catch (err) {
     setListState(toolsList, "Failed to load tools.", "error");
   }
@@ -935,6 +1274,30 @@ if (agentsSearchInput) {
       fetchAgents();
     }
   });
+}
+
+if (toolsSearchBtn) {
+  toolsSearchBtn.addEventListener("click", renderTools);
+}
+if (toolsSearchInput) {
+  toolsSearchInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      renderTools();
+    }
+  });
+  toolsSearchInput.addEventListener("input", () => {
+    renderTools();
+  });
+}
+if (toolsSourceFilter) {
+  toolsSourceFilter.addEventListener("change", renderTools);
+}
+if (toolsScopeFilter) {
+  toolsScopeFilter.addEventListener("change", renderTools);
+}
+if (toolsSortSelect) {
+  toolsSortSelect.addEventListener("change", renderTools);
 }
 
 agentFilterButtons.forEach((btn) => {

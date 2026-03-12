@@ -162,11 +162,48 @@
               <h2>Tools</h2>
               <p>全局工具列表。</p>
             </div>
-            <div class="panel-body">
-              <div class="panel-actions">
-                <button id="refreshTools" class="primary">Refresh</button>
+            <div class="panel-body tools-body">
+              <div class="panel-actions tools-toolbar">
+                <div class="tools-search">
+                  <input id="toolsSearch" type="text" placeholder="Search tool name or description..." />
+                  <button id="toolsSearchBtn" class="ghost">Search</button>
+                </div>
+                <div class="tools-filters">
+                  <select id="toolsSourceFilter">
+                    <option value="all">All sources</option>
+                    <option value="builtin">Builtin</option>
+                    <option value="mcp">MCP</option>
+                  </select>
+                  <select id="toolsScopeFilter">
+                    <option value="all">All scopes</option>
+                    <option value="global">Global</option>
+                    <option value="agent">Agent</option>
+                  </select>
+                  <select id="toolsSort">
+                    <option value="name">Sort: name</option>
+                    <option value="last_used">Sort: last used</option>
+                  </select>
+                </div>
+                <div class="tools-meta">
+                  <span id="toolsCountTotal" class="meta-pill">Total: 0</span>
+                  <span id="toolsCountBuiltin" class="meta-pill">Builtin: 0</span>
+                  <span id="toolsCountMcp" class="meta-pill">MCP: 0</span>
+                  <button id="refreshTools" class="primary">Refresh</button>
+                </div>
               </div>
-              <div id="toolsList" class="card-grid" aria-live="polite"></div>
+              <div class="tools-layout">
+                <div>
+                  <div id="toolsList" class="card-grid" aria-live="polite"></div>
+                </div>
+                <aside class="tool-detail" id="toolDetail">
+                  <div class="tool-detail-empty">选择一个 Tool 查看详情</div>
+                </aside>
+              </div>
+              <div class="detail-card mcp-card">
+                <h3>MCP Servers</h3>
+                <div id="mcpSummary" class="meta-row"></div>
+                <div id="mcpList" class="list"></div>
+              </div>
             </div>
           </section>
 
