@@ -6,6 +6,7 @@ from typing import Any, AsyncGenerator, Optional
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 
 from src.interface.agent import AgentRequest
 from src.manager import agent_manager
@@ -13,6 +14,8 @@ from src.manager.registry import ToolRegistry
 from src.service.server import Server
 from src.utils.path_utils import get_project_root
 from src.workflow.cache import workflow_cache
+from src.robust.checkpoint import CheckpointManager
+from src.robust.task_logger import TaskLogger
 
 
 def _sse_format(event: str, data: dict[str, Any]) -> str:
@@ -145,7 +148,108 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail="mermaid block not found")
         return PlainTextResponse(mermaid, media_type="text/plain")
 
+    # ---- Tasks (task execution instances) API ----
+
+    @app.get("/api/tasks")
+    async def list_tasks(workflow_id: Optional[str] = None):
+        """List all task execution instances, optionally filtered by workflow_id."""
+        return TaskLogger.list_tasks(workflow_id=workflow_id)
+
+    @app.get("/api/tasks/{task_id}/log")
+    async def get_task_log(task_id: str):
+        """Get the full structured log for a task execution."""
+        task_log = TaskLogger.load(task_id)
+        if task_log is None:
+            raise HTTPException(status_code=404, detail="Task log not found")
+        return task_log.to_dict()
+
+    @app.get("/api/tasks/{task_id}/checkpoints")
+    async def list_task_checkpoints(task_id: str):
+        """List all checkpoints saved for a task execution."""
+        checkpoint_manager = CheckpointManager()
+        checkpoints = checkpoint_manager.list_checkpoints(task_id=task_id)
+        return checkpoints
+
+    @app.get("/api/tasks/{task_id}/checkpoints/{step}")
+    async def get_checkpoint_detail(task_id: str, step: int):
+        """Get the full checkpoint data for a specific step."""
+        checkpoint_manager = CheckpointManager()
+        try:
+            checkpoint = checkpoint_manager.load_checkpoint(task_id=task_id, step=step)
+            return checkpoint.to_dict()
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail=f"Checkpoint not found for step {step}")
+
+    @app.post("/api/tasks/resume")
+    async def resume_task(request: Request, body: "ResumeRequest"):
+        """
+        Resume a task execution from a specific checkpoint step.
+        Streams SSE events like the normal run endpoint.
+        """
+        from src.robust.task_logger import TaskLogger as TL
+        from src.interface.agent import AgentMessage
+
+        # Load original messages from task log to reconstruct context
+        task_log = TL.load(body.task_id)
+        messages = []
+        if task_log:
+            # Extract initial user message from history
+            for entry in task_log.history:
+                if entry.get("event") == "workflow_start":
+                    q = task_log.user_query
+                    if q:
+                        messages = [{"role": "user", "content": q}]
+                    break
+        if not messages:
+            messages = [{"role": "user", "content": "(resume)"}]
+
+        agent_request = AgentRequest(
+            user_id=body.user_id,
+            task_type=body.task_type,
+            workmode=body.workmode,
+            messages=[AgentMessage(role=m["role"], content=m["content"]) for m in messages],
+            debug=body.debug,
+            deep_thinking_mode=body.deep_thinking_mode,
+            search_before_planning=body.search_before_planning,
+            coor_agents=body.coor_agents,
+            workflow_id=body.workflow_id,
+        )
+
+        server = Server()
+
+        async def event_stream() -> AsyncGenerator[str, None]:
+            try:
+                async for event in server._run_agent_workflow_with_resume(
+                    agent_request, resume_step=body.resume_step
+                ):
+                    if await request.is_disconnected():
+                        break
+                    event_type = event.get("event", "message")
+                    yield _sse_format(event_type, event)
+            except asyncio.CancelledError:
+                return
+
+        return StreamingResponse(
+            event_stream(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+        )
+
     return app
+
+
+# ---- Tasks API request models ----
+class ResumeRequest(BaseModel):
+    task_id: str
+    resume_step: int
+    workflow_id: Optional[str] = None
+    user_id: str = "test"
+    task_type: str = "agent_workflow"
+    workmode: str = "launch"
+    debug: bool = False
+    deep_thinking_mode: bool = True
+    search_before_planning: bool = False
+    coor_agents: Optional[list] = None
 
 
 app = create_app()

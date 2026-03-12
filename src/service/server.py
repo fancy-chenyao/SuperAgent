@@ -83,10 +83,13 @@ class Server:
         if agent_manager is None:
              logger.error("Agent workflow called before AgentManager was initialized.")
 
-        session = session_manager.get_session(request.user_id)
-        for message in request.messages:
-            session.add_message(message.role, message.content)
-        session_messages = session.history[-3:]
+        await agent_manager.ensure_initialized()
+        await Server._trigger_mcp_reload(force=False)
+
+        # Resume场景：直接使用request.messages（来自step=0 checkpoint）
+        # 不依赖session，因为resume可能在很久之后执行，session已过期
+        # request.messages是AgentMessage列表，需要转换为dict列表
+        session_messages = [{"role": m.role, "content": m.content} for m in request.messages]
 
         response_stream = run_agent_workflow(
             user_id=request.user_id,

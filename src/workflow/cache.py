@@ -719,7 +719,7 @@ class WorkflowCache:
             for node in self.cache[workflow_id]["graph"]:
                 if node["config"]["node_type"] == "execution_agent":
                     agent_path = agents_dir / f"{node["config"]["node_name"]}.json"
-                    with open(agent_path, "r") as f:
+                    with open(agent_path, "r", encoding="utf-8") as f:
                         json_str = f.read()
                         _agent = Agent.model_validate_json(json_str)
                     agents.append(_agent)

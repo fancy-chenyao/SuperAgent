@@ -614,3 +614,427 @@ refreshWorkflowsBtn.addEventListener("click", fetchWorkflows);
 updateAutoScrollBtn();
 updatePauseBtn();
 setStatus("Ready", true);
+
+// ============================================================
+// Tasks panel
+// ============================================================
+const refreshTasksBtn = document.getElementById("refreshTasks");
+const tasksList = document.getElementById("tasksList");
+const checkpointPanel = document.getElementById("checkpointPanel");
+const checkpointTaskIdBadge = document.getElementById("checkpointTaskId");
+const checkpointsList = document.getElementById("checkpointsList");
+const logPanel = document.getElementById("logPanel");
+const logMeta = document.getElementById("logMeta");
+const logHistory = document.getElementById("logHistory");
+const copyLogBtn = document.getElementById("copyLogBtn");
+const resumePanel = document.getElementById("resumePanel");
+const resumeTaskIdInput = document.getElementById("resumeTaskId");
+const resumeWorkflowIdInput = document.getElementById("resumeWorkflowId");
+const resumeStepInput = document.getElementById("resumeStep");
+const resumeUserIdInput = document.getElementById("resumeUserId");
+const resumeBtn = document.getElementById("resumeBtn");
+const resumeStopBtn = document.getElementById("resumeStopBtn");
+const resumeOutput = document.getElementById("resumeOutput");
+const clearResumeOutputBtn = document.getElementById("clearResumeOutput");
+
+let selectedTaskId = null;
+let resumeAbortController = null;
+
+const formatDateTime = (isoStr) => {
+  if (!isoStr) return "";
+  try {
+    const d = new Date(isoStr);
+    return d.toLocaleString();
+  } catch (_) {
+    return isoStr;
+  }
+};
+
+const statusBadgeClass = (status) => {
+  if (status === "completed") return "badge-success";
+  if (status === "failed") return "badge-error";
+  if (status === "running") return "badge-info";
+  return "badge-muted";
+};
+
+const fetchTasks = async () => {
+  setListState(tasksList, "Loading...", "loading");
+  try {
+    const res = await fetch("/api/tasks");
+    if (!res.ok) throw new Error("request failed");
+    const tasks = await res.json();
+    if (!tasks.length) {
+      setListState(tasksList, "No tasks found.", "empty");
+      return;
+    }
+    tasksList.textContent = "";
+    tasks.forEach((task) => {
+      const item = document.createElement("div");
+      item.className = "task-item";
+      if (task.task_id === selectedTaskId) item.classList.add("active");
+      item.dataset.taskId = task.task_id;
+      item.setAttribute("role", "button");
+      item.tabIndex = 0;
+
+      const header = document.createElement("div");
+      header.className = "task-item-header";
+
+      const titleEl = document.createElement("strong");
+      titleEl.textContent = task.user_query
+        ? task.user_query.slice(0, 60) + (task.user_query.length > 60 ? "..." : "")
+        : task.task_id;
+
+      const badge = document.createElement("span");
+      badge.className = `status-badge ${statusBadgeClass(task.status)}`;
+      badge.textContent = task.status;
+
+      header.appendChild(titleEl);
+      header.appendChild(badge);
+
+      const meta = document.createElement("div");
+      meta.className = "task-item-meta";
+      meta.textContent = `${formatDateTime(task.created_at)} · ${task.step_count} steps`;
+
+      const wfId = document.createElement("div");
+      wfId.className = "task-item-wfid";
+      wfId.textContent = `workflow: ${task.workflow_id || "-"}`;
+
+      item.appendChild(header);
+      item.appendChild(meta);
+      item.appendChild(wfId);
+
+      item.addEventListener("click", () => selectTask(task));
+      item.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          selectTask(task);
+        }
+      });
+      tasksList.appendChild(item);
+    });
+  } catch (err) {
+    setListState(tasksList, "Failed to load tasks.", "error");
+  }
+};
+
+const selectTask = async (task) => {
+  selectedTaskId = task.task_id;
+  document.querySelectorAll(".task-item").forEach((el) => {
+    el.classList.toggle("active", el.dataset.taskId === task.task_id);
+  });
+
+  // Populate resume panel
+  resumePanel.style.display = "";
+  resumeTaskIdInput.value = task.task_id;
+  resumeWorkflowIdInput.value = task.workflow_id || "";
+  resumeUserIdInput.value = userIdInput.value || "test";
+
+  // Load checkpoints
+  await loadTaskCheckpoints(task.task_id);
+  // Load log
+  await loadTaskLog(task.task_id);
+};
+
+const loadTaskCheckpoints = async (taskId) => {
+  checkpointPanel.style.display = "";
+  checkpointTaskIdBadge.textContent = taskId;
+  checkpointsList.textContent = "Loading...";
+  try {
+    const res = await fetch(`/api/tasks/${encodeURIComponent(taskId)}/checkpoints`);
+    if (!res.ok) throw new Error("request failed");
+    const checkpoints = await res.json();
+    if (!checkpoints.length) {
+      checkpointsList.textContent = "No checkpoints found.";
+      return;
+    }
+    checkpointsList.textContent = "";
+    checkpoints.forEach((cp) => {
+      const row = document.createElement("div");
+      row.className = "checkpoint-row";
+      row.dataset.checkpointId = cp.checkpoint_id;
+      row.dataset.taskId = selectedTaskId;
+      row.dataset.step = cp.step;
+
+      const stepBadge = document.createElement("span");
+      stepBadge.className = "step-badge";
+      stepBadge.textContent = `Step ${cp.step}`;
+
+      const nodeEl = document.createElement("span");
+      nodeEl.className = "checkpoint-node";
+      nodeEl.textContent = cp.node_name;
+
+      const nextEl = document.createElement("span");
+      nextEl.className = "checkpoint-next";
+      nextEl.textContent = cp.next_node ? `→ ${cp.next_node}` : "";
+
+      const tsEl = document.createElement("span");
+      tsEl.className = "checkpoint-ts";
+      tsEl.textContent = formatDateTime(cp.timestamp);
+
+      const resumeFromBtn = document.createElement("button");
+      resumeFromBtn.className = "ghost small";
+      resumeFromBtn.textContent = "Resume from here";
+      resumeFromBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        resumeStepInput.value = cp.step;
+        resumePanel.scrollIntoView({ behavior: "smooth" });
+      });
+
+      // Collapse toggle
+      const cpCollapseToggle = document.createElement("span");
+      cpCollapseToggle.className = "cp-collapse-toggle";
+      cpCollapseToggle.innerHTML = '<span class="icon">▼</span> JSON';
+
+      // Details panel - initially empty, will load on expand
+      const detailsDiv = document.createElement("div");
+      detailsDiv.className = "checkpoint-details";
+      detailsDiv.innerHTML = '<div style="color:var(--muted);font-size:0.8rem">Click to load JSON...</div>';
+
+      row.appendChild(stepBadge);
+      row.appendChild(nodeEl);
+      row.appendChild(nextEl);
+      row.appendChild(tsEl);
+      row.appendChild(resumeFromBtn);
+      row.appendChild(cpCollapseToggle);
+      row.appendChild(detailsDiv);
+
+      // Click to toggle expand/collapse and load JSON
+      let loaded = false;
+      row.addEventListener("click", async () => {
+        const isExpanding = !row.classList.contains("expanded");
+        row.classList.toggle("expanded");
+
+        if (isExpanding && !loaded) {
+          // Load full checkpoint JSON
+          try {
+            const res = await fetch(`/api/tasks/${encodeURIComponent(selectedTaskId)}/checkpoints/${cp.step}`);
+            if (res.ok) {
+              const data = await res.json();
+              detailsDiv.innerHTML = `<pre class="checkpoint-json">${JSON.stringify(data, null, 2)}</pre>`;
+              loaded = true;
+            } else {
+              detailsDiv.innerHTML = '<div style="color:var(--danger)">Failed to load checkpoint data</div>';
+            }
+          } catch (err) {
+            detailsDiv.innerHTML = `<div style="color:var(--danger)">Error: ${err.message}</div>`;
+          }
+        }
+      });
+
+      checkpointsList.appendChild(row);
+    });
+  } catch (err) {
+    checkpointsList.textContent = "Failed to load checkpoints.";
+  }
+};
+
+const loadTaskLog = async (taskId) => {
+  logPanel.style.display = "";
+  logMeta.textContent = "Loading...";
+  logHistory.textContent = "";
+  try {
+    const res = await fetch(`/api/tasks/${encodeURIComponent(taskId)}/log`);
+    if (!res.ok) throw new Error("request failed");
+    const log = await res.json();
+
+    logMeta.innerHTML = `
+      <div class="log-meta-item"><b>Task ID</b><span>${log.task_id}</span></div>
+      <div class="log-meta-item"><b>Status</b><span class="status-badge ${statusBadgeClass(log.status)}">${log.status}</span></div>
+      <div class="log-meta-item"><b>Created</b><span>${formatDateTime(log.created_at)}</span></div>
+      <div class="log-meta-item"><b>Finished</b><span>${formatDateTime(log.finished_at) || "-"}</span></div>
+      ${log.error ? `<div class="log-meta-item error-text"><b>Error</b><span>${log.error}</span></div>` : ""}
+    `;
+
+    if (!log.history || !log.history.length) {
+      logHistory.textContent = "No log entries.";
+      return;
+    }
+
+    logHistory.textContent = "";
+    log.history.forEach((entry, index) => {
+      const entryEl = document.createElement("div");
+      entryEl.className = `log-entry log-event-${entry.event || "message"}`;
+      entryEl.dataset.agent = entry.role || entry.node_name || "";
+
+      const headerEl = document.createElement("div");
+      headerEl.className = "log-entry-header";
+      // 点击整个 header 切换展开/折叠
+      headerEl.addEventListener("click", () => {
+        entryEl.classList.toggle("expanded");
+      });
+
+      // Collapse toggle icon
+      const collapseIcon = document.createElement("span");
+      collapseIcon.className = "collapse-icon";
+      collapseIcon.textContent = "▼";
+
+      const stepSpan = document.createElement("span");
+      stepSpan.className = "step-badge";
+      stepSpan.textContent = `Step ${entry.step}`;
+
+      const roleSpan = document.createElement("span");
+      roleSpan.className = "log-role";
+      // Display agent_proxy with sub_agent_name as: agent_proxy【researcher】
+      if (entry.node_name === "agent_proxy" && entry.sub_agent_name) {
+        roleSpan.textContent = `${entry.node_name}【${entry.sub_agent_name}】`;
+      } else {
+        roleSpan.textContent = entry.role || entry.node_name;
+      }
+
+      const eventSpan = document.createElement("span");
+      eventSpan.className = "log-event-tag";
+      eventSpan.textContent = entry.event || "";
+
+      const tsSpan = document.createElement("span");
+      tsSpan.className = "log-ts";
+      tsSpan.textContent = formatDateTime(entry.timestamp);
+
+      headerEl.appendChild(collapseIcon);
+      headerEl.appendChild(stepSpan);
+      headerEl.appendChild(roleSpan);
+      headerEl.appendChild(eventSpan);
+      headerEl.appendChild(tsSpan);
+
+      const contentEl = document.createElement("pre");
+      contentEl.className = "log-content";
+      contentEl.textContent = entry.content || "";
+
+      entryEl.appendChild(headerEl);
+      entryEl.appendChild(contentEl);
+      
+      // 默认全部折叠（不添加 expanded 类）
+      // 不需要任何额外操作，CSS 默认 display:none
+      
+      logHistory.appendChild(entryEl);
+    });
+  } catch (err) {
+    logMeta.textContent = "Failed to load log.";
+  }
+};
+
+const copyTaskLog = async () => {
+  const text = logHistory.innerText || logHistory.textContent || "";
+  if (!text) {
+    flashButton(copyLogBtn, "Empty");
+    return;
+  }
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+    } else {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.setAttribute("readonly", "");
+      ta.style.position = "absolute";
+      ta.style.left = "-9999px";
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      document.body.removeChild(ta);
+    }
+    flashButton(copyLogBtn, "Copied");
+  } catch (_) {
+    flashButton(copyLogBtn, "Failed");
+  }
+};
+
+const resumeTask = async () => {
+  const taskId = resumeTaskIdInput.value.trim();
+  const workflowId = resumeWorkflowIdInput.value.trim();
+  const resumeStep = parseInt(resumeStepInput.value, 10);
+  const userId = resumeUserIdInput.value.trim() || "test";
+
+  if (!taskId) {
+    alert("Please select a task first.");
+    return;
+  }
+
+  resumeOutput.textContent = "";
+  resumeBtn.disabled = true;
+  resumeStopBtn.disabled = false;
+
+  const payload = {
+    task_id: taskId,
+    resume_step: isNaN(resumeStep) ? 0 : resumeStep,
+    workflow_id: workflowId || null,
+    user_id: userId,
+    task_type: "agent_workflow",
+    workmode: "launch",
+    debug: false,
+    deep_thinking_mode: true,
+    search_before_planning: false,
+    coor_agents: null,
+  };
+
+  resumeAbortController = new AbortController();
+  try {
+    const response = await fetch("/api/tasks/resume", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      signal: resumeAbortController.signal,
+    });
+    if (!response.ok || !response.body) throw new Error(`HTTP ${response.status}`);
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    const appendResume = (text) => {
+      resumeOutput.textContent += text;
+      resumeOutput.scrollTop = resumeOutput.scrollHeight;
+    };
+
+    const handleResumeEvent = (eventName, payload) => {
+      if (eventName === "messages") {
+        const content = payload.data?.delta?.content || payload.data?.message || "";
+        appendResume(content);
+        return;
+      }
+      if (eventName === "start_of_agent") {
+        appendResume(`\n[start] ${payload.data?.agent_name || ""}\n`);
+        return;
+      }
+      if (eventName === "end_of_agent") {
+        appendResume(`\n[end] ${payload.data?.agent_name || ""}\n`);
+        return;
+      }
+      if (eventName === "end_of_workflow") {
+        appendResume("\n[workflow completed]\n");
+        return;
+      }
+      if (eventName === "error") {
+        appendResume(`\n[error] ${payload.data?.error || "unknown error"}\n`);
+        return;
+      }
+      appendResume(`\n[${eventName}] ${JSON.stringify(payload)}\n`);
+    };
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      buffer = parseSse(buffer, handleResumeEvent);
+    }
+  } catch (err) {
+    resumeOutput.textContent += `\n[error] ${err.message || err}\n`;
+  } finally {
+    resumeBtn.disabled = false;
+    resumeStopBtn.disabled = true;
+    resumeAbortController = null;
+  }
+};
+
+const stopResume = () => {
+  if (resumeAbortController) {
+    resumeAbortController.abort();
+  }
+};
+
+refreshTasksBtn.addEventListener("click", fetchTasks);
+copyLogBtn.addEventListener("click", copyTaskLog);
+resumeBtn.addEventListener("click", resumeTask);
+resumeStopBtn.addEventListener("click", stopResume);
+clearResumeOutputBtn.addEventListener("click", () => {
+  resumeOutput.textContent = "";
+});

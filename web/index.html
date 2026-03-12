@@ -35,6 +35,7 @@
           <button class="tab" data-tab="agents">Agents</button>
           <button class="tab" data-tab="tools">Tools</button>
           <button class="tab" data-tab="workflows">Workflows</button>
+          <button class="tab" data-tab="tasks">Task History</button>
         </aside>
 
         <section class="content">
@@ -187,6 +188,73 @@
                 <div class="detail-card">
                   <h3>Mermaid</h3>
                   <div id="mermaidContainer" class="mermaid-box">暂无可视化</div>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section class="panel" id="panel-tasks">
+            <div class="panel-header">
+              <h2>Task History</h2>
+              <p>任务执行历史，支持日志查看、Checkpoint 浏览与断点恢复。</p>
+            </div>
+            <div class="panel-body tasks-layout">
+              <div class="tasks-left">
+                <div class="panel-actions">
+                  <button id="refreshTasks" class="primary">Refresh</button>
+                </div>
+                <div id="tasksList" class="list" aria-live="polite"></div>
+              </div>
+              <div class="tasks-right">
+                <!-- Checkpoint panel -->
+                <div class="detail-card" id="checkpointPanel" style="display:none">
+                  <div class="tasks-detail-header">
+                    <h3>Checkpoints</h3>
+                    <span id="checkpointTaskId" class="task-id-badge"></span>
+                  </div>
+                  <div id="checkpointsList" class="checkpoints-list"></div>
+                </div>
+                <!-- Log panel -->
+                <div class="detail-card" id="logPanel" style="display:none">
+                  <div class="tasks-detail-header">
+                    <h3>Task Log</h3>
+                    <div class="log-actions">
+                      <button id="copyLogBtn" class="ghost">Copy</button>
+                    </div>
+                  </div>
+                  <div class="log-meta" id="logMeta"></div>
+                  <div id="logHistory" class="log-history"></div>
+                </div>
+                <!-- Resume panel -->
+                <div class="detail-card" id="resumePanel" style="display:none">
+                  <h3>Resume Execution</h3>
+                  <div class="form-row">
+                    <label for="resumeTaskId">Task ID</label>
+                    <input id="resumeTaskId" type="text" readonly />
+                  </div>
+                  <div class="form-row">
+                    <label for="resumeWorkflowId">Workflow ID</label>
+                    <input id="resumeWorkflowId" type="text" readonly />
+                  </div>
+                  <div class="form-row">
+                    <label for="resumeStep">Resume from Step</label>
+                    <input id="resumeStep" type="number" min="0" value="0" />
+                  </div>
+                  <div class="form-row">
+                    <label for="resumeUserId">User ID</label>
+                    <input id="resumeUserId" type="text" value="test" />
+                  </div>
+                  <div class="form-actions">
+                    <button id="resumeBtn" class="primary">Resume</button>
+                    <button id="resumeStopBtn" class="ghost" disabled>Stop</button>
+                  </div>
+                  <div class="output-card" style="margin-top:12px">
+                    <div class="output-header">
+                      <h3>Resume Output</h3>
+                      <button id="clearResumeOutput" class="ghost">Clear</button>
+                    </div>
+                    <div id="resumeOutput" class="output-body"></div>
+                  </div>
                 </div>
               </div>
             </div>

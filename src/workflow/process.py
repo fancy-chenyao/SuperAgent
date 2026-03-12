@@ -14,6 +14,7 @@ from src.workflow.graph import CompiledWorkflow
 from src.interface.agent import WorkMode
 from src.manager.registry import ToolRegistry
 from src.robust.checkpoint import CheckpointManager
+from src.robust.task_logger import TaskLogger
 from src.manager.resource import get_resource_registry
 
 logging.basicConfig(
@@ -148,6 +149,7 @@ async def run_agent_workflow(
     workflow_id: str = None,
     polish_instruction: str = None,
     resume_step: int = None,
+    task_id: str = None,
 ):
     """Run the agent workflow with the given user input.
 
@@ -185,6 +187,10 @@ async def run_agent_workflow(
         search_before_planning=search_before_planning,
         coor_agents=coor_agents,
     )
+
+    # Generate a unique task_id for this execution instance if not provided
+    if not task_id:
+        task_id = CheckpointManager.generate_task_id(workflow_id)
 
     if task_type == TaskType.AGENT_FACTORY:
         graph = agent_factory_graph()
@@ -228,12 +234,13 @@ async def run_agent_workflow(
             "initialized": False,
         },
         resume_step=resume_step,
+        task_id=task_id,
     ):
         yield event_data
 
 
 async def _process_workflow(
-    workflow: CompiledWorkflow, initial_state: dict[str, Any], resume_step: int = None
+    workflow: CompiledWorkflow, initial_state: dict[str, Any], resume_step: int = None, task_id: str = None
 ) -> AsyncGenerator[dict[str, Any], None]:
     """处理自定义工作流的事件流"""
     current_node = None
@@ -242,9 +249,15 @@ async def _process_workflow(
     checkpoint_manager = CheckpointManager()
     step_count = 0
 
+    # Initialize TaskLogger for this execution
+    user_query = initial_state.get("USER_QUERY", "")
+    if not task_id:
+        task_id = CheckpointManager.generate_task_id(workflow_id)
+    task_logger = TaskLogger(task_id=task_id, workflow_id=workflow_id, user_query=user_query)
+
     yield {
         "event": "start_of_workflow",
-        "data": {"workflow_id": workflow_id, "input": initial_state["messages"]},
+        "data": {"workflow_id": workflow_id, "task_id": task_id, "input": initial_state["messages"]},
     }
 
     try:
@@ -260,9 +273,9 @@ async def _process_workflow(
                 # If resume_step is specified, load that specific checkpoint
                 # Otherwise, load the latest checkpoint
                 target_step = resume_step if resume_step is not None else None
-                checkpoint = checkpoint_manager.load_checkpoint(workflow_id, step=target_step)
+                checkpoint = checkpoint_manager.load_checkpoint(workflow_id=workflow_id, task_id=task_id, step=target_step)
                 if checkpoint:
-                    logger.info(f"Resuming workflow {workflow_id} from step {checkpoint.step}, node {checkpoint.node_name}")
+                    logger.info(f"Resuming workflow {workflow_id} (task {task_id}) from step {checkpoint.step}, node {checkpoint.node_name}")
                     if checkpoint.next_node:
                         current_node = checkpoint.next_node
                         state = State(**checkpoint.state)
@@ -272,15 +285,28 @@ async def _process_workflow(
             except Exception as e:
                 logger.warning(f"Could not load checkpoint for resume, starting from scratch: {e}")
 
+        task_logger.log_workflow_start(user_query=user_query)
+
         while current_node != "__end__":
             agent_name = current_node
             logger.info(f"Started node: {agent_name}")
 
+            # Store original node name to avoid being overwritten in message loop
+            original_node_name = agent_name
+
+            # For agent_proxy, get the actual sub-agent name from state["next"]
+            # Note: state["next"] is set by publisher in the previous iteration
+            sub_agent_name = state.get("next") if agent_name == "agent_proxy" else None
+            task_logger.log_agent_start(node_name=original_node_name, step=step_count, sub_agent_name=sub_agent_name)
+
+            # Display name for frontend: agent_proxy【researcher】 format
+            display_name = f"{agent_name}【{sub_agent_name}】" if sub_agent_name else agent_name
             yield {
                 "event": "start_of_agent",
                 "data": {
-                    "agent_name": agent_name,
+                    "agent_name": display_name,
                     "agent_id": f"{workflow_id}_{agent_name}_1",
+                    "sub_agent_name": sub_agent_name,
                 },
             }
             node_func = workflow.nodes[current_node]
@@ -307,23 +333,25 @@ async def _process_workflow(
                                     continue
                             if agent_name in ["planner", "coordinator", "agent_proxy"]:
                                 content = last_message["content"]
+                                # Log agent message to task log
+                                task_logger.log_message(node_name=original_node_name, content=content, step=step_count)
                                 chunk_size = 10  # send 10 words for each chunk
                                 for i in range(0, len(content), chunk_size):
                                     chunk = content[i : i + chunk_size]
-                                    if "processing_agent_name" in state:
-                                        agent_name = state["processing_agent_name"]
+                                    # Use sub_agent_name for display if available
+                                    msg_display_name = f"{original_node_name}【{state.get('processing_agent_name')}】" if original_node_name == "agent_proxy" and "processing_agent_name" in state else original_node_name
 
                                     yield {
                                         "event": "messages",
-                                        "agent_name": agent_name,
+                                        "agent_name": msg_display_name,
                                         "data": {
-                                            "message_id": f"{workflow_id}_{agent_name}_msg_{i}",
+                                            "message_id": f"{workflow_id}_{msg_display_name}_msg_{i}",
                                             "delta": {"content": chunk},
                                         },
                                     }
                                     await asyncio.sleep(0.01)
 
-                    if agent_name == "agent_factory" and key == "new_agent_name":
+                    if original_node_name == "agent_factory" and key == "new_agent_name":
                         new_agent = await agent_manager.agent_registry.get(value)
                         yield {
                             "event": "new_agent_created",
@@ -336,12 +364,18 @@ async def _process_workflow(
 
             next_node = command.goto
 
+            # For agent_proxy, get the actual sub-agent name from state["processing_agent_name"]
+            # Use original_node_name to ensure correct identification
+            sub_agent_name = state.get("processing_agent_name") if original_node_name == "agent_proxy" else None
+            task_logger.log_agent_end(node_name=original_node_name, next_node=next_node, step=step_count, sub_agent_name=sub_agent_name)
+
             # Save checkpoint after node execution and state update
             try:
                 checkpoint_manager.save_checkpoint(
                     workflow_id=workflow_id,
+                    task_id=task_id,
                     step=step_count,
-                    node_name=agent_name,
+                    node_name=original_node_name,
                     next_node=next_node,
                     state=state
                 )
@@ -349,20 +383,26 @@ async def _process_workflow(
             except Exception as e:
                 logger.error(f"Failed to save checkpoint at step {step_count}: {e}")
 
+            # Use sub_agent_name for display in end_of_agent event
+            end_display_name = f"{original_node_name}【{sub_agent_name}】" if sub_agent_name else original_node_name
             yield {
                 "event": "end_of_agent",
                 "data": {
-                    "agent_name": agent_name,
-                    "agent_id": f"{workflow_id}_{agent_name}_1",
+                    "agent_name": end_display_name,
+                    "agent_id": f"{workflow_id}_{original_node_name}_1",
+                    "sub_agent_name": sub_agent_name,
                 },
             }
 
             current_node = next_node
 
+        task_logger.log_workflow_end()
+
         yield {
             "event": "end_of_workflow",
             "data": {
                 "workflow_id": workflow_id,
+                "task_id": task_id,
                 "messages": [{"role": "user", "content": "workflow completed"}],
             },
         }
@@ -374,10 +414,12 @@ async def _process_workflow(
 
         traceback.print_exc()
         logger.error("Error in Agent workflow: %s", str(e))
+        task_logger.log_error(error=str(e), node_name=current_node or "system", step=step_count)
         yield {
             "event": "error",
             "data": {
                 "workflow_id": workflow_id,
+                "task_id": task_id,
                 "error": str(e),
             },
         }
