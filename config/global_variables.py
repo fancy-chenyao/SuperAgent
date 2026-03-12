@@ -6,6 +6,7 @@ tools_dir = get_project_root() / "store" / "tools"
 agents_dir = get_project_root() / "store" / "agents"
 prompts_dir = get_project_root() / "store" / "prompts"
 workflows_dir = get_project_root() / "store" / "workflows"
+checkpoints_dir = get_project_root() / "store" / "checkpoints"
 
 context_variables = {
     "has_lauched": False

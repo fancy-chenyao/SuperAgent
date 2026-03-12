@@ -30,6 +30,7 @@ config/mcp.json
 
 # Log files
 blackd.log
+/log
 
 # mypy
 .mypy_cache/

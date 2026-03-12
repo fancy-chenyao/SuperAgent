@@ -188,6 +188,17 @@ class RemoteExecutor(AgentExecutor):
         if getattr(agent, "prompt", None):
             request["prompt"] = agent.prompt
 
+        selected_tools = getattr(agent, "selected_tools", None)
+        if selected_tools:
+            request["tools"] = [
+                {
+                    "name": getattr(t, "name", ""),
+                    "description": getattr(t, "description", ""),
+                }
+                for t in selected_tools
+                if getattr(t, "name", "")
+            ]
+
         return request
 
     async def _build_headers(self, agent: Any) -> Dict[str, str]:

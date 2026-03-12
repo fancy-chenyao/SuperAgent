@@ -16,6 +16,7 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 CONFIG_FILE_PATH = str(get_project_root() / "config" / "mcp.json")
+SOURCES_FILE_PATH = str(get_project_root() / "config" / "mcp_sources.json")
 _HOT_RELOAD_MANAGER = None
 _HOT_RELOAD_MANAGER_LOCK = asyncio.Lock()
 
@@ -73,7 +74,7 @@ def load_mcp_servers_from_file(config_path: str = CONFIG_FILE_PATH) -> Dict[str,
         return {}
 
     try:
-        with path.open("r", encoding="utf-8") as f:
+        with path.open("r", encoding="utf-8-sig") as f:
             data = json.load(f)
     except json.JSONDecodeError:
         logger.error("Error decoding MCP JSON from %s", config_path)
@@ -87,8 +88,40 @@ def load_mcp_servers_from_file(config_path: str = CONFIG_FILE_PATH) -> Dict[str,
     return servers
 
 
+def load_mcp_servers_from_sources(config_path: str = SOURCES_FILE_PATH) -> Dict[str, Any]:
+    path = Path(config_path)
+    if not path.exists():
+        return {}
+
+    try:
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
+    except json.JSONDecodeError:
+        logger.error("Error decoding MCP sources JSON from %s", config_path)
+        return {}
+
+    merged: Dict[str, Any] = {}
+    for item in data.get("sources", []):
+        if not isinstance(item, dict):
+            continue
+        file_path = item.get("file")
+        if not file_path:
+            continue
+        source_path = Path(file_path)
+        if not source_path.is_absolute():
+            source_path = path.parent / source_path
+        merged.update(load_mcp_servers_from_file(str(source_path)))
+
+    # allow inline mcpServers override
+    inline = data.get("mcpServers")
+    if isinstance(inline, dict):
+        merged.update(inline)
+    return merged
+
+
 def mcp_client_config(config_path: str = CONFIG_FILE_PATH) -> Dict[str, Any]:
     servers = load_mcp_servers_from_file(config_path)
+    if not servers:
+        servers = load_mcp_servers_from_sources(SOURCES_FILE_PATH)
     return normalize_mcp_servers(servers)
 
 
