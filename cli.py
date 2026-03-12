@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python
+#!/usr/bin/env python
 import os
 import json
 import asyncio
@@ -482,6 +482,15 @@ def cli(ctx):
             except Exception as e:
                 console.print(f"[danger]Error: {str(e)}[/]")
         return
+
+
+@cli.command(name="web")
+@click.option("--host", default="0.0.0.0", help="Web UI host")
+@click.option("--port", default=8001, type=int, help="Web UI port")
+def web(host, port):
+    """Start the Web UI server"""
+    import uvicorn
+    uvicorn.run("src.service.web_app:app", host=host, port=port, log_level="info")
 
 
 @cli.command(name="run-l")
