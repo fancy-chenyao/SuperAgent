@@ -3,9 +3,8 @@ import hashlib
 import asyncio
 from typing import Any
 from collections.abc import AsyncGenerator
-from src.workflow import build_graph, agent_factory_graph
+from src.workflow import build_graph
 from src.manager import agent_manager
-from src.interface.agent import TaskType
 from rich.console import Console
 from src.interface.agent import State
 from src.service.env import USE_BROWSER
@@ -37,14 +36,14 @@ if USE_BROWSER:
         - **`coder`**: Executes Python or Bash commands, performs mathematical calculations, and outputs a Markdown report. Must be used for all mathematical computations.
         - **`browser`**: Directly interacts with web pages, performing complex operations and interactions. You can also leverage `browser` to perform in-domain search, like Facebook, Instagram, Github, etc.
         - **`reporter`**: Write a professional report based on the result of each step.
-        - **`agent_factory`**: Create a new agent based on the user's requirement.
+        
         """
 else:
     DEFAULT_TEAM_MEMBERS_DESCRIPTION = """
         - **`researcher`**: Uses search engines and web crawlers to gather information from the internet. Outputs a Markdown report summarizing findings. Researcher can not do math or programming.
         - **`coder`**: Executes Python or Bash commands, performs mathematical calculations, and outputs a Markdown report. Must be used for all mathematical computations.
         - **`reporter`**: Write a professional report based on the result of each step.
-        - **`agent_factory`**: Create a new agent based on the user's requirement.
+        
         """
 
 TEAM_MEMBERS_DESCRIPTION_TEMPLATE = """
@@ -64,7 +63,7 @@ async def _build_team_members(
 ) -> tuple[list[str], str]:
     coor_agents = coor_agents or []
     member_desc = DEFAULT_TEAM_MEMBERS_DESCRIPTION
-    members = ["agent_factory"]
+    members = []
 
     agents = await agent_manager.agent_registry.list()
     for agent in agents:
@@ -137,7 +136,6 @@ async def _build_resource_catalog() -> str:
 
 async def run_agent_workflow(
     user_id: str,
-    task_type: str,
     user_input_messages: list,
     debug: bool = False,
     deep_thinking_mode: bool = False,
@@ -163,7 +161,7 @@ async def run_agent_workflow(
     if not workflow_id:
         if not polish_id:
             if workmode == "launch":
-                msg = f"{user_id}_{task_type}_{user_input_messages}_{deep_thinking_mode}_{search_before_planning}_{coor_agents}"
+                msg = f"{user_id}_{user_input_messages}_{deep_thinking_mode}_{search_before_planning}_{coor_agents}"
                 polish_id = hashlib.md5(msg.encode("utf-8")).hexdigest()
             else:
                 polish_id = cache.get_latest_polish_id(user_id)
@@ -192,10 +190,7 @@ async def run_agent_workflow(
     if not task_id:
         task_id = CheckpointManager.generate_task_id(workflow_id)
 
-    if task_type == TaskType.AGENT_FACTORY:
-        graph = agent_factory_graph()
-    else:
-        graph = build_graph()
+    graph = build_graph()
     if not user_input_messages:
         raise ValueError("Input could not be empty")
 
@@ -350,17 +345,6 @@ async def _process_workflow(
                                         },
                                     }
                                     await asyncio.sleep(0.01)
-
-                    if original_node_name == "agent_factory" and key == "new_agent_name":
-                        new_agent = await agent_manager.agent_registry.get(value)
-                        yield {
-                            "event": "new_agent_created",
-                            "agent_name": value,
-                            "data": {
-                                "new_agent_name": value,
-                                "agent_obj": new_agent,
-                            },
-                        }
 
             next_node = command.goto
 

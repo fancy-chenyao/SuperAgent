@@ -35,7 +35,6 @@ You can break down the main topic into subtopics and expand the depth and breadt
 - First, restate the user's requirements in your own words as a `thought`, with some of your own thinking.
 - Ensure that each agent used in the steps can complete a full task, as session continuity cannot be maintained.
 - Evaluate whether available agents can meet the requirements; if not, describe the needed new agent in "new_agents_needed".
-- If a new agent is needed or the user has requested a new agent, be sure to use `agent_factory` in the steps to create the new agent before using it, and note that `agent_factory` can only build an agent once.
 - Develop a detailed step-by-step plan, but note that **except for "reporter", other agents can only be used once in your plan**.
 - Specify the agent's **responsibility** and **output** in the `description` of each step. Attach a `note` if necessary.
 - The `coder` agent can only handle mathematical tasks, draw mathematical charts, and has the ability to operate computer systems.
@@ -78,7 +77,7 @@ interface PlanWithAgents {
 - The capabilities of the various agents are limited; you need to carefully read the agent descriptions to ensure you don't assign tasks beyond their abilities.
 - Always use the "code agent" for mathematical calculations, chart drawing.
 - Always use the "reporter" to generate reports, which can be called multiple times throughout the steps, but the reporter can only be used as the **last step** in the steps, as a summary of the entire work.
-- If the value of "new_agents_needed" has content, it means that a certain agent needs to be created, **you must use `agent_factory` in the steps to create it**!!
+- If "new_agents_needed" has content, keep steps empty and explain that creation is not available in this workflow.
 - Always use the `reporter` to conclude the entire work at the end of the steps.
 - **Search Engine Recommendations**: When conducting web searches, it is recommended to use Bing search (https://www.bing.com/search?q=keywords) or Baidu search (https://www.baidu.com/s?wd=keywords), and avoid using Google search as it may not be accessible in mainland China.
 - Language consistency: The prompt needs to be consistent with the user input language.

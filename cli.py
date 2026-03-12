@@ -40,7 +40,7 @@ from src.manager.registry import ToolRegistry
 from src.robust.checkpoint import CheckpointManager
 
 def _configure_windows_event_loop_policy() -> None:
-    """在 Windows 下切换为 SelectorEventLoopPolicy，规避 Proactor 管道析构时的 closed pipe 异常。"""
+    """Use SelectorEventLoopPolicy on Windows to avoid Proactor closed pipe errors."""
     if platform.system() == "Windows":
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
@@ -373,28 +373,35 @@ HISTORY_FILE = os.path.expanduser("~/.cooragent_history")
 
 def _init_readline():
     try:
-        readline.parse_and_bind(r'"\C-?": backward-kill-word') 
-        readline.parse_and_bind(r'"\e[3~": delete-char')        
-        readline.parse_and_bind('set editing-mode emacs') 
-        readline.parse_and_bind('set horizontal-scroll-mode on')
-        readline.parse_and_bind('set bell-style none')
-        
+        def _safe_parse_and_bind(command: str) -> None:
+            try:
+                readline.parse_and_bind(command)
+            except Exception:
+                pass
+
+        _safe_parse_and_bind(r'"\\C-?": backward-kill-word')
+        if platform.system() != "Windows":
+            _safe_parse_and_bind(r'"\\e[3~": delete-char')
+        _safe_parse_and_bind('set editing-mode emacs')
+        _safe_parse_and_bind('set horizontal-scroll-mode on')
+        _safe_parse_and_bind('set bell-style none')
+
         history_dir = os.path.dirname(HISTORY_FILE)
         if not os.path.exists(history_dir):
             os.makedirs(history_dir, exist_ok=True)
-        
+
         if not os.path.exists(HISTORY_FILE):
             with open(HISTORY_FILE, 'w', encoding='utf-8') as f:
                 pass
-        
+
         try:
             readline.read_history_file(HISTORY_FILE)
         except:
             pass
-        
+
         readline.set_history_length(1000)
         atexit.register(_save_history)
-        
+
     except Exception as e:
         console.print(f"[warning]Failed to initialize command history: {str(e)}[/warning]")
 
@@ -408,19 +415,14 @@ def _save_history():
 
 def print_banner():
     banner = """
-							    ╔═══════════════════════════════════════════════════════════════════════════════╗
-							    ║                                                                               ║
-							    ║        ██████╗ ██████╗  ██████╗ ██████╗  █████╗  ██████╗ ███████╗███╗   ██╗████████╗    
-							    ║       ██╔════╝██╔═══██╗██╔═══██╗██╔══██╗██╔══██╗██╔════╝ ██╔════╝████╗  ██║╚══██╔══╝    
-							    ║       ██║     ██║   ██║██║   ██║██████╔╝███████║██║  ███╗█████╗  ██╔██╗ ██║   ██║       
-							    ║       ██║     ██║   ██║██║   ██║██╔══██╗██╔══██║██║   ██║██╔══╝  ██║╚██╗██║   ██║       
-							    ║       ╚██████╗╚██████╔╝╚██████╔╝██║  ██║██║  ██║╚██████╔╝███████╗██║ ╚████║   ██║       
-							    ║        ╚═════╝ ╚═════╝  ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═══╝   ╚═╝       
-							    ║                                                                               ║
-							    ╚═══════════════════════════════════════════════════════════════════════════════╝
-    """
+   ____                    _                    _
+  / ___|___  _ __ ___  __ _| |_ ___  _ __ ___  | |
+ | |   / _ \\| '__/ _ \\/ _` | __/ _ \\| '__/ _ \\ | |
+ | |__| (_) | | |  __/ (_| | || (_) | | |  __/ |_|
+  \\____\\___/|_|  \\___|\\__,_|\\__\\___/|_|  \\___| (_)
+"""
     console.print(Panel(Text(banner, style="bold cyan"), border_style="green"))
-    console.print("Welcome to [highlight]CoorAgent[/highlight]! CoorAgent is an AI agent collaboration community. Here, you can create specific agents with a single sentence and collaborate with other agents to complete complex tasks. Agents can be combined freely, creating infinite possibilities. You can also publish your agents to the community and share them to anyone!\n", justify="center")
+    console.print("Welcome to [highlight]CoorAgent[/highlight]! CoorAgent is an AI agent collaboration community. Here, you can create specific agents with a single sentence and collaborate with other agents to complete complex tasks. Agents can be combined freely, creating infinite possibilities. You can also publish your agents to the community and share them to anyone!\\n", justify="center")
 
 
 def async_command(f):
@@ -443,7 +445,7 @@ def init_server(ctx):
             print_banner()
             ctx.obj['server'] = Server()
             ctx.obj['_initialized'] = True
-        console.print("[success]✓ Server initialized successfully[/]")
+        console.print("[success]Server initialized successfully[/]")
 
 @click.group(invoke_without_command=True)
 @click.pass_context
@@ -494,16 +496,13 @@ def web(host, port):
 @cli.command(name="run-l")
 @click.pass_context
 @click.option('--user-id', '-u', default="test", help='User ID')
-@click.option('--task-type', '-t', required=True, 
-              type=click.Choice([task_type.value for task_type in TaskType]), 
-              help='Task type (options: agent_factory, agent_workflow)')
 @click.option('--message', '-m', required=True, multiple=True, help='Message content (use multiple times for multiple messages)')
 @click.option('--debug/--no-debug', default=False, help='Enable debug mode')
 @click.option('--deep-thinking/--no-deep-thinking', default=True, help='Enable deep thinking mode')
 @click.option('--search-before-planning/--no-search-before-planning', default=False, help='Enable search before planning')
 @click.option('--agents', '-a', multiple=True, help='List of collaborating Agents (use multiple times to add multiple Agents)')
 @async_command
-async def run_launch(ctx, user_id, task_type, message, debug, deep_thinking, search_before_planning, agents,):
+async def run_launch(ctx, user_id, message, debug, deep_thinking, search_before_planning, agents,):
     """Run the agent workflow"""
     server: Server = ctx.obj['server']
     
@@ -511,10 +510,9 @@ async def run_launch(ctx, user_id, task_type, message, debug, deep_thinking, sea
     config_table.add_column("Parameter", style="cyan")
     config_table.add_column("Value", style="green")
     config_table.add_row("User ID", user_id)
-    config_table.add_row("Task Type", task_type)
-    config_table.add_row("Debug Mode", "✅ Enabled" if debug else "❌ Disabled")
-    config_table.add_row("Deep Thinking", "✅ Enabled" if deep_thinking else "❌ Disabled")
-    config_table.add_row("Search Before Planning", "✅ Enabled" if search_before_planning else "❌ Disabled")
+    config_table.add_row("Debug Mode", "Enabled" if debug else "Disabled")
+    config_table.add_row("Deep Thinking", "Enabled" if deep_thinking else "Disabled")
+    config_table.add_row("Search Before Planning", "Enabled" if search_before_planning else "Disabled")
     console.print(config_table)
     
     msg_table = Table(title="Message History", show_header=True, header_style="bold magenta")
@@ -534,7 +532,6 @@ async def run_launch(ctx, user_id, task_type, message, debug, deep_thinking, sea
     request = AgentRequest(
         user_id=user_id,
         lang="en",
-        task_type=task_type,
         messages=messages,
         debug=debug,
         deep_thinking_mode=deep_thinking,
@@ -781,7 +778,6 @@ async def run_production(ctx, user_id, messages, workflow_id):
     request = AgentRequest(
         user_id=user_id,
         lang="en",
-        task_type="agent_workflow",
         messages=input_messages,
         debug=False,
         deep_thinking_mode=True,
@@ -1356,7 +1352,6 @@ async def run_polish(ctx, user_id, match, interactive):
                         request = AgentRequest(
                             user_id=user_id,
                             lang="en",
-                            task_type="agent_workflow",
                             messages=_input_messages,
                             debug=True,
                             deep_thinking_mode=True,
@@ -1781,9 +1776,9 @@ async def remove_agent(ctx, agent_name, user_id):
         async for result_json in server._remove_agent(request):
             result = json.loads(result_json)
             if result.get("result") == "success":
-                stream_print(Panel.fit(f"[success]✅ {result.get('message', 'Agent deleted successfully!')}[/success]", border_style="green"))
+                stream_print(Panel.fit(f"[success]{result.get('message', 'Agent deleted successfully!')}[/success]", border_style="green"))
             else:
-                stream_print(Panel.fit(f"[danger]❌ {result.get('message', 'Agent deletion failed!')}[/danger]", border_style="red"))
+                stream_print(Panel.fit(f"[danger]{result.get('message', 'Agent deletion failed!')}[/danger]", border_style="red"))
     except Exception as e:
         stream_print(Panel.fit(f"[danger]Error occurred during deletion: {str(e)}[/danger]", border_style="red"))
 
@@ -1797,7 +1792,6 @@ def help():
     
     help_table.add_row("[Command] run-l (launch)", "Launch the agent workflow in launch mode")
     help_table.add_row("  -u/--user-id", "User ID (default: test)")
-    help_table.add_row("  -t/--task-type", "Task type (required, options: agent_factory, agent_workflow)")
     help_table.add_row("  -m/--message", "Message content (required, use multiple times for multiple messages)")
     help_table.add_row("  --debug/--no-debug", "Enable/disable debug mode (default: disabled)")
     help_table.add_row("  --deep-thinking/--no-deep-thinking", "Enable/disable deep thinking mode (default: enabled)")

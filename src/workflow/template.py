@@ -1,4 +1,4 @@
-WORKFLOW_TEMPLATE = {
+﻿WORKFLOW_TEMPLATE = {
     "workflow_id": "<user_id>:<polish_id>-<lap>",
     "mode": "agent_workflow",
     "version": 1,
@@ -51,17 +51,6 @@ WORKFLOW_TEMPLATE = {
             "config": {
                 "type": "system_agent",
                 "name": "publisher",
-            },
-        },
-        "agent_factory": {
-            "component_type": "agent",
-            "label": "system_agent",
-            "type": "system_agent",
-            "name": "agent_factory",
-            "description": "Agent factory node that create the agent.",
-            "config": {
-                "type": "system_agent",
-                "name": "agent_factory",
             },
         },
         "researcher": {

@@ -46,8 +46,6 @@
 
 5. `Agent Factory`（可选）
 - 责任：根据需求动态创建新 Agent
-- 文件：`src/workflow/coor_task.py` → `agent_factory_node`
-- 专用流程：`src/workflow/agent_factory.py`
 
 6. `Workflow Graph`（流程骨架）
 - 责任：串联节点、驱动执行顺序
@@ -173,8 +171,6 @@ sequenceDiagram
   participant FS as Filesystem
 
   U->>C: 创建 Agent 请求
-  C->>WF: agent_factory_graph
-  WF->>AF: agent_factory_node
   AF->>AM: _create_agent_by_prebuilt()
   AM->>AR: register()
   AR->>FS: 写入 store/agents & store/prompts

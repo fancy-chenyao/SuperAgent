@@ -3,13 +3,10 @@ const tabs = document.querySelectorAll(".tab");
 const panels = document.querySelectorAll(".panel");
 
 const userIdInput = document.getElementById("userId");
-const langInput = document.getElementById("lang");
-const taskTypeInput = document.getElementById("taskType");
 const workModeInput = document.getElementById("workMode");
 const deepThinkingInput = document.getElementById("deepThinking");
 const searchBeforeInput = document.getElementById("searchBefore");
 const debugInput = document.getElementById("debugMode");
-const coorAgentsInput = document.getElementById("coorAgents");
 const workflowIdInput = document.getElementById("workflowId");
 const messageInput = document.getElementById("message");
 
@@ -17,8 +14,7 @@ const runBtn = document.getElementById("runBtn");
 const stopBtn = document.getElementById("stopBtn");
 const clearOutputBtn = document.getElementById("clearOutput");
 const autoScrollBtn = document.getElementById("autoScrollBtn");
-const pauseBtn = document.getElementById("pauseBtn");
-const copyOutputBtn = document.getElementById("copyOutputBtn");
+const exportTxtBtn = document.getElementById("exportTxtBtn");
 
 const streamOutput = document.getElementById("streamOutput");
 const summaryFlow = document.getElementById("summaryFlow");
@@ -36,10 +32,10 @@ const mermaidContainer = document.getElementById("mermaidContainer");
 
 let currentAbortController = null;
 let outputBlocks = new Map();
-let flowNodeMap = new Map();
+let flowSteps = [];
+let activeStepIndex = -1;
+const MAX_FLOW_STEPS = 40;
 let autoScrollEnabled = true;
-let isPaused = false;
-let pendingOutputQueue = [];
 let selectedWorkflowId = null;
 
 mermaid.initialize({ startOnLoad: false, theme: "default" });
@@ -57,7 +53,8 @@ const resetSummary = () => {
   summaryHint.classList.add("hidden");
   summaryHint.classList.remove("error");
   summaryHint.textContent = "";
-  flowNodeMap = new Map();
+  flowSteps = [];
+  activeStepIndex = -1;
 };
 
 const showSummaryHint = (text, isError = false) => {
@@ -75,11 +72,6 @@ const updateAutoScrollBtn = () => {
   autoScrollBtn.classList.toggle("active", autoScrollEnabled);
 };
 
-const updatePauseBtn = () => {
-  pauseBtn.textContent = isPaused ? "Resume" : "Pause";
-  pauseBtn.classList.toggle("active", isPaused);
-};
-
 const flashButton = (btn, text) => {
   const prevText = btn.textContent;
   btn.textContent = text;
@@ -90,34 +82,57 @@ const flashButton = (btn, text) => {
   }, 1200);
 };
 
-const ensureFlowNode = (agentName) => {
-  if (flowNodeMap.has(agentName)) return flowNodeMap.get(agentName);
-  const node = document.createElement("span");
-  node.className = "flow-node new";
-  node.textContent = agentName;
-  if (summaryFlow.children.length > 0) {
-    const arrow = document.createElement("span");
-    arrow.className = "flow-arrow";
-    arrow.textContent = "->";
-    summaryFlow.appendChild(arrow);
+const renderFlowSteps = () => {
+  summaryFlow.innerHTML = "";
+  const frag = document.createDocumentFragment();
+
+  flowSteps.forEach((step, idx) => {
+    if (idx > 0) {
+      const arrow = document.createElement("span");
+      arrow.className = "flow-arrow";
+      arrow.textContent = "→";
+      frag.appendChild(arrow);
+    }
+    const node = document.createElement("span");
+    node.className = "flow-node";
+    if (step.state === "active") node.classList.add("active");
+    if (step.state === "done") node.classList.add("done");
+    if (step.state === "new") node.classList.add("new");
+    node.textContent = step.agent;
+    frag.appendChild(node);
+  });
+
+  summaryFlow.appendChild(frag);
+  summaryFlow.scrollLeft = summaryFlow.scrollWidth;
+};
+
+const finishActiveStep = () => {
+  if (activeStepIndex < 0) return;
+  if (flowSteps[activeStepIndex]) {
+    flowSteps[activeStepIndex].state = "done";
   }
-  summaryFlow.appendChild(node);
-  flowNodeMap.set(agentName, node);
-  setTimeout(() => node.classList.remove("new"), 800);
-  return node;
+  activeStepIndex = -1;
 };
 
-const setActiveFlowNode = (agentName) => {
-  flowNodeMap.forEach((node) => node.classList.remove("active"));
-  const node = ensureFlowNode(agentName);
-  node.classList.add("active");
-};
-
-const markFlowNodeDone = (agentName) => {
-  const node = flowNodeMap.get(agentName);
-  if (node) {
-    node.classList.remove("active");
-    node.classList.add("done");
+const pushFlowStep = (agentName) => {
+  finishActiveStep();
+  flowSteps.push({ agent: agentName, state: "new" });
+  activeStepIndex = flowSteps.length - 1;
+  if (flowSteps.length > MAX_FLOW_STEPS) {
+    const removeCount = flowSteps.length - MAX_FLOW_STEPS;
+    flowSteps.splice(0, removeCount);
+    activeStepIndex = activeStepIndex - removeCount;
+    if (activeStepIndex < 0) activeStepIndex = -1;
+  }
+  renderFlowSteps();
+  const current = flowSteps[activeStepIndex];
+  if (current) {
+    setTimeout(() => {
+      if (flowSteps[activeStepIndex] === current && current.state === "new") {
+        current.state = "active";
+        renderFlowSteps();
+      }
+    }, 800);
   }
 };
 
@@ -155,24 +170,12 @@ const appendOutputImmediate = (agentName, content) => {
 };
 
 const appendOutput = (agentName, content) => {
-  if (isPaused) {
-    pendingOutputQueue.push({ agentName: agentName || "system", content });
-    return;
-  }
   appendOutputImmediate(agentName, content);
-};
-
-const flushPendingOutput = () => {
-  if (!pendingOutputQueue.length) return;
-  const items = pendingOutputQueue.slice();
-  pendingOutputQueue = [];
-  items.forEach((item) => appendOutputImmediate(item.agentName, item.content));
 };
 
 const clearOutput = () => {
   streamOutput.innerHTML = "";
   outputBlocks = new Map();
-  pendingOutputQueue = [];
 };
 
 const parseSse = (buffer, onEvent) => {
@@ -215,13 +218,14 @@ const handleEvent = (eventName, payload) => {
   }
   if (eventName === "start_of_agent") {
     const agentName = payload.data?.agent_name || payload.agent_name || "agent";
-    setActiveFlowNode(agentName);
+    pushFlowStep(agentName);
     appendOutput("system", `\n[start_of_agent] ${agentName}\n`);
     return;
   }
   if (eventName === "end_of_agent") {
     const agentName = payload.data?.agent_name || payload.agent_name || "agent";
-    markFlowNodeDone(agentName);
+    finishActiveStep();
+    renderFlowSteps();
     appendOutput("system", `\n[end_of_agent] ${agentName}\n`);
     return;
   }
@@ -259,21 +263,15 @@ const runWorkflow = async () => {
   runBtn.disabled = true;
   stopBtn.disabled = false;
 
-  const coorAgents = coorAgentsInput.value
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean);
-
   const payload = {
     user_id: userId,
-    lang: langInput.value,
-    task_type: taskTypeInput.value,
+    lang: "zh",
     workmode: workModeInput.value,
     messages: [{ role: "user", content: message }],
     debug: debugInput.checked,
     deep_thinking_mode: deepThinkingInput.checked,
     search_before_planning: searchBeforeInput.checked,
-    coor_agents: coorAgents.length ? coorAgents : null,
+    coor_agents: null,
     workflow_id: workflowIdInput.value.trim() || null,
   };
 
@@ -557,18 +555,9 @@ const toggleAutoScroll = () => {
   }
 };
 
-const togglePause = () => {
-  isPaused = !isPaused;
-  updatePauseBtn();
-  streamOutput.classList.toggle("paused", isPaused);
-  if (!isPaused) {
-    flushPendingOutput();
-  }
-};
-
-const copyAllOutput = async () => {
+const exportOutputTxt = () => {
   if (!outputBlocks.size) {
-    flashButton(copyOutputBtn, "Empty");
+    flashButton(exportTxtBtn, "Empty");
     return;
   }
 
@@ -579,40 +568,29 @@ const copyAllOutput = async () => {
     parts.push("");
   });
   const text = parts.join("\n");
-
-  try {
-    if (navigator.clipboard && window.isSecureContext) {
-      await navigator.clipboard.writeText(text);
-    } else {
-      const textarea = document.createElement("textarea");
-      textarea.value = text;
-      textarea.setAttribute("readonly", "");
-      textarea.style.position = "absolute";
-      textarea.style.left = "-9999px";
-      document.body.appendChild(textarea);
-      textarea.select();
-      document.execCommand("copy");
-      document.body.removeChild(textarea);
-    }
-    flashButton(copyOutputBtn, "Copied");
-  } catch (err) {
-    flashButton(copyOutputBtn, "Copy failed");
-  }
+  const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+  link.href = url;
+  link.download = `cooragent-output-${timestamp}.txt`;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
 };
 
 runBtn.addEventListener("click", runWorkflow);
 stopBtn.addEventListener("click", stopWorkflow);
 clearOutputBtn.addEventListener("click", clearOutput);
 autoScrollBtn.addEventListener("click", toggleAutoScroll);
-pauseBtn.addEventListener("click", togglePause);
-copyOutputBtn.addEventListener("click", copyAllOutput);
+exportTxtBtn.addEventListener("click", exportOutputTxt);
 
 refreshAgentsBtn.addEventListener("click", fetchAgents);
 refreshToolsBtn.addEventListener("click", fetchTools);
 refreshWorkflowsBtn.addEventListener("click", fetchWorkflows);
 
 updateAutoScrollBtn();
-updatePauseBtn();
 setStatus("Ready", true);
 
 // ============================================================

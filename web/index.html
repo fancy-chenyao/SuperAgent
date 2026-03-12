@@ -51,23 +51,6 @@
                   <input id="userId" type="text" value="test" />
                 </div>
                 <div class="form-row">
-                  <label for="lang">Language</label>
-                  <select id="lang">
-                    <option value="zh">zh</option>
-                    <option value="en">en</option>
-                    <option value="jp">jp</option>
-                    <option value="sp">sp</option>
-                    <option value="de">de</option>
-                  </select>
-                </div>
-                <div class="form-row">
-                  <label for="taskType">Task Type</label>
-                  <select id="taskType">
-                    <option value="agent_workflow">agent_workflow</option>
-                    <option value="agent_factory">agent_factory</option>
-                  </select>
-                </div>
-                <div class="form-row">
                   <label for="workMode">Work Mode</label>
                   <select id="workMode">
                     <option value="launch">launch</option>
@@ -89,10 +72,6 @@
                     <input type="checkbox" id="debugMode" />
                     <label for="debugMode">Debug</label>
                   </div>
-                </div>
-                <div class="form-row">
-                  <label for="coorAgents">Collaborating Agents</label>
-                  <input id="coorAgents" type="text" placeholder="agent_a, agent_b" />
                 </div>
                 <div class="form-row">
                   <label for="workflowId">Workflow ID (optional)</label>
@@ -125,8 +104,7 @@
                     <h3>Stream Output</h3>
                     <div class="output-actions">
                       <button id="autoScrollBtn" class="ghost">Auto-scroll: On</button>
-                      <button id="pauseBtn" class="ghost">Pause</button>
-                      <button id="copyOutputBtn" class="ghost">Copy All</button>
+                      <button id="exportTxtBtn" class="ghost">Export .txt</button>
                       <button id="clearOutput" class="ghost">Clear</button>
                     </div>
                   </div>
