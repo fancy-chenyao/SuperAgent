@@ -1154,7 +1154,7 @@ async def run_polish(ctx, user_id, match, interactive):
                     agent_path = agents_dir / f"{agent_to_edit}.json"
                     if not agent_path.exists():
                         raise FileNotFoundError(f"agent {agent_to_edit} not found.")
-                    with open(agent_path, "r") as f:
+                    with open(agent_path, "r", encoding="utf-8") as f:
                         json_str = f.read()
                         _agent = Agent.model_validate_json(json_str)
                         config = json.loads(json_str)
@@ -1562,7 +1562,7 @@ async def resume_workflow(ctx, workflow_id, step, user_id):
                 )
                 step = int(step_str)
         
-        # Load the checkpoint to get the state
+        # Load the target checkpoint to get the state and display info
         checkpoint = checkpoint_manager.load_checkpoint(workflow_id, step=step)
         
         stream_print(Panel.fit(
@@ -1579,16 +1579,20 @@ async def resume_workflow(ctx, workflow_id, step, user_id):
             stream_print("[warning]Resume cancelled[/warning]")
             return
         
-        # Prepare the request using the checkpoint state
-        state = checkpoint.state
+        # Load step=0 checkpoint to get initial messages for fallback scenario
+        # If checkpoint loading fails in _process_workflow, it will fallback to initial_state
+        # which should contain the original user input messages (step=0)
+        checkpoint_0 = checkpoint_manager.load_checkpoint(workflow_id, step=0)
+        initial_messages = checkpoint_0.state.get("messages", [])
         
         request = AgentRequest(
             user_id=user_id,
             lang="en",
-            messages=state.get("messages", []),
-            debug=state.get("debug", False),
-            deep_thinking_mode=state.get("deep_thinking_mode", True),
-            search_before_planning=state.get("search_before_planning", False),
+            task_type="agent_workflow",
+            messages=initial_messages,
+            debug=checkpoint.state.get("debug", False),
+            deep_thinking_mode=checkpoint.state.get("deep_thinking_mode", True),
+            search_before_planning=checkpoint.state.get("search_before_planning", False),
             coor_agents=[],
             workmode="production",
             workflow_id=workflow_id
