@@ -1,0 +1,200 @@
+﻿<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>CoorAgent Web Studio</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  </head>
+  <body>
+    <div class="page">
+      <div class="backdrop">
+        <div class="glow glow-a"></div>
+        <div class="glow glow-b"></div>
+        <div class="grid"></div>
+      </div>
+
+      <header class="topbar">
+        <div class="brand">
+          <div class="logo">CA</div>
+          <div>
+            <div class="title">CoorAgent Web Studio</div>
+            <div class="subtitle">SSE Streaming Control Panel</div>
+          </div>
+        </div>
+        <div class="status" id="statusIndicator">
+          <span class="dot"></span>
+          <span class="label">Ready</span>
+        </div>
+      </header>
+
+      <main class="layout">
+        <aside class="sidebar">
+          <button class="tab active" data-tab="run">Run</button>
+          <button class="tab" data-tab="agents">Agents</button>
+          <button class="tab" data-tab="tools">Tools</button>
+          <button class="tab" data-tab="workflows">Workflows</button>
+        </aside>
+
+        <section class="content">
+          <section class="panel active" id="panel-run">
+            <div class="panel-header">
+              <h2>Run Workflow</h2>
+              <p>发起任务并实时查看输出。</p>
+            </div>
+            <div class="panel-body run-grid">
+              <div class="form-card">
+                <div class="form-row">
+                  <label for="userId">User ID</label>
+                  <input id="userId" type="text" value="test" />
+                </div>
+                <div class="form-row">
+                  <label for="lang">Language</label>
+                  <select id="lang">
+                    <option value="zh">zh</option>
+                    <option value="en">en</option>
+                    <option value="jp">jp</option>
+                    <option value="sp">sp</option>
+                    <option value="de">de</option>
+                  </select>
+                </div>
+                <div class="form-row">
+                  <label for="taskType">Task Type</label>
+                  <select id="taskType">
+                    <option value="agent_workflow">agent_workflow</option>
+                    <option value="agent_factory">agent_factory</option>
+                  </select>
+                </div>
+                <div class="form-row">
+                  <label for="workMode">Work Mode</label>
+                  <select id="workMode">
+                    <option value="launch">launch</option>
+                    <option value="polish">polish</option>
+                    <option value="production">production</option>
+                    <option value="auto">auto</option>
+                  </select>
+                </div>
+                <div class="form-row inline">
+                  <div class="checkbox">
+                    <input type="checkbox" id="deepThinking" checked />
+                    <label for="deepThinking">Deep Thinking</label>
+                  </div>
+                  <div class="checkbox">
+                    <input type="checkbox" id="searchBefore" />
+                    <label for="searchBefore">Search Before Planning</label>
+                  </div>
+                  <div class="checkbox">
+                    <input type="checkbox" id="debugMode" />
+                    <label for="debugMode">Debug</label>
+                  </div>
+                </div>
+                <div class="form-row">
+                  <label for="coorAgents">Collaborating Agents</label>
+                  <input id="coorAgents" type="text" placeholder="agent_a, agent_b" />
+                </div>
+                <div class="form-row">
+                  <label for="workflowId">Workflow ID (optional)</label>
+                  <input id="workflowId" type="text" placeholder="user:polish_id" />
+                </div>
+                <div class="form-row">
+                  <label for="message">Message</label>
+                  <textarea id="message" rows="6" placeholder="输入任务描述..."></textarea>
+                </div>
+                <div class="form-actions">
+                  <button id="runBtn" class="primary">Run</button>
+                  <button id="stopBtn" class="ghost" disabled>Stop</button>
+                </div>
+              </div>
+
+              <div class="right-stack">
+                <div class="summary-card">
+                  <div class="summary-header">
+                    <h3>Execution Summary</h3>
+                  </div>
+                  <div class="summary-flow">
+                    <div class="label">Live Flow</div>
+                    <div id="summaryFlow" class="flow-track"></div>
+                    <div id="summaryHint" class="summary-hint hidden">Workflow completed.</div>
+                  </div>
+                </div>
+
+                <div class="output-card">
+                  <div class="output-header">
+                    <h3>Stream Output</h3>
+                    <div class="output-actions">
+                      <button id="autoScrollBtn" class="ghost">Auto-scroll: On</button>
+                      <button id="pauseBtn" class="ghost">Pause</button>
+                      <button id="copyOutputBtn" class="ghost">Copy All</button>
+                      <button id="clearOutput" class="ghost">Clear</button>
+                    </div>
+                  </div>
+                  <div
+                    id="streamOutput"
+                    class="output-body"
+                    role="log"
+                    aria-live="polite"
+                    aria-relevant="additions"
+                  ></div>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section class="panel" id="panel-agents">
+            <div class="panel-header">
+              <h2>Agents</h2>
+              <p>默认 + 用户自定义代理。</p>
+            </div>
+            <div class="panel-body">
+              <div class="panel-actions">
+                <button id="refreshAgents" class="primary">Refresh</button>
+              </div>
+              <div id="agentsList" class="card-grid" aria-live="polite"></div>
+            </div>
+          </section>
+
+          <section class="panel" id="panel-tools">
+            <div class="panel-header">
+              <h2>Tools</h2>
+              <p>全局工具列表。</p>
+            </div>
+            <div class="panel-body">
+              <div class="panel-actions">
+                <button id="refreshTools" class="primary">Refresh</button>
+              </div>
+              <div id="toolsList" class="card-grid" aria-live="polite"></div>
+            </div>
+          </section>
+
+          <section class="panel" id="panel-workflows">
+            <div class="panel-header">
+              <h2>Workflows</h2>
+              <p>工作流列表与可视化。</p>
+            </div>
+            <div class="panel-body workflow-grid">
+              <div class="workflow-list">
+                <div class="panel-actions">
+                  <button id="refreshWorkflows" class="primary">Refresh</button>
+                </div>
+                <div id="workflowsList" class="list" aria-live="polite"></div>
+              </div>
+              <div class="workflow-detail">
+                <div class="detail-card">
+                  <h3>Workflow Detail</h3>
+                  <pre id="workflowDetail" class="code-block">请选择一个 workflow</pre>
+                </div>
+                <div class="detail-card">
+                  <h3>Mermaid</h3>
+                  <div id="mermaidContainer" class="mermaid-box">暂无可视化</div>
+                </div>
+              </div>
+            </div>
+          </section>
+        </section>
+      </main>
+    </div>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>

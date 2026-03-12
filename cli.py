@@ -474,6 +474,15 @@ def cli(ctx):
         return
 
 
+@cli.command(name="web")
+@click.option("--host", default="0.0.0.0", help="Web UI host")
+@click.option("--port", default=8001, type=int, help="Web UI port")
+def web(host, port):
+    """Start the Web UI server"""
+    import uvicorn
+    uvicorn.run("src.service.web_app:app", host=host, port=port, log_level="info")
+
+
 @cli.command(name="run-l")
 @click.pass_context
 @click.option('--user-id', '-u', default="test", help='User ID')
