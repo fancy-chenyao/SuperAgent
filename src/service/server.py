@@ -49,7 +49,6 @@ class Server:
 
         response_stream = run_agent_workflow(
             user_id=request.user_id,
-            task_type=request.task_type,
             user_input_messages=session_messages,
             debug=request.debug,
             deep_thinking_mode=request.deep_thinking_mode,
@@ -90,7 +89,6 @@ class Server:
 
         response_stream = run_agent_workflow(
             user_id=request.user_id,
-            task_type=request.task_type,
             user_input_messages=session_messages,
             debug=request.debug,
             deep_thinking_mode=request.deep_thinking_mode,

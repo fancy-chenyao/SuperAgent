@@ -72,20 +72,6 @@ PUBLISHER = Component(
     config={"type": "system_agent", "name": "publisher"},
 )
 
-AGENT_FACTORY = Component(
-    component_type="agent",
-    label="system_agent",
-    name="agent_factory",
-    description="Agent factory node that create the agent.",
-    config={"type": "system_agent", "name": "agent_factory"},
-)
-
-
-class TaskType(str, Enum):
-    AGENT_FACTORY = "agent_factory"
-    AGENT_WORKFLOW = "agent_workflow"
-
-
 class WorkMode(str, Enum):
     LAUNCH = "launch"
     POLISH = "polish"
@@ -136,7 +122,6 @@ class AgentRequest(BaseModel):
     debug: bool
     deep_thinking_mode: bool
     search_before_planning: bool
-    task_type: TaskType
     coor_agents: Optional[list[str]]
     workmode: WorkMode
     workflow_id: Optional[str] = None

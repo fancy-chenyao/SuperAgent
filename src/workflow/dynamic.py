@@ -9,7 +9,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from langgraph.prebuilt import create_react_agent
 from src.prompts.template import apply_prompt
 from src.workflow.graph import AgentWorkflow
-from src.workflow.coor_task import coordinator_node, planner_node, publisher_node, agent_factory_node, agent_proxy_node
+from src.workflow.coor_task import coordinator_node, planner_node, publisher_node, agent_proxy_node
 import asyncio
 import logging
 from config.global_functions import func_map
@@ -21,7 +21,6 @@ system_agent_nodes ={
     "coordinator_node": coordinator_node,
     "planner_node": planner_node,
     "publisher_node": publisher_node,
-    "agent_factory_node": agent_factory_node,
     "agent_proxy_node": agent_proxy_node,
 }
 

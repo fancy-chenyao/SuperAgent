@@ -32,9 +32,4 @@ system_agents = {
             "name": "publisher",
             "description": "Publisher node that publish the task."
         },
-        "agent_factory": {
-            "type": "system_agent",
-            "name": "agent_factory",
-            "description": "Agent factory node that create the agent."
-        },
 }

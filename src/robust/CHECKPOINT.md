@@ -51,7 +51,7 @@ store/checkpoints/
   "next_node": "publisher",
   "state": {
     "user_id": "test",
-    "TEAM_MEMBERS": ["agent_factory", "researcher", "coder", "reporter"],
+    "TEAM_MEMBERS": ["researcher", "coder", "reporter"],
     "messages": [...],
     "full_plan": "{...}",
     "next": "reporter",
