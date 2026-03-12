@@ -1,11 +1,14 @@
 import asyncio
 import json
+import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any, AsyncGenerator, Optional
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+import httpx
 
 from src.interface.agent import AgentRequest
 from src.manager import agent_manager
@@ -45,6 +48,61 @@ def _read_mermaid_from_md(md_text: str) -> Optional[str]:
     if end_idx == -1:
         return None
     return md_text[start_idx:end_idx].strip()
+
+
+def _parse_timestamp(raw: Any) -> Optional[datetime]:
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        return datetime.fromisoformat(text)
+    except Exception:
+        return None
+
+
+def _collect_workflow_files(base_dir: Path, user_id: str) -> list[Path]:
+    user_dir = base_dir / user_id
+    if not user_dir.exists():
+        return []
+    return [p for p in user_dir.glob("*.json") if p.is_file()]
+
+
+def _workflow_last_used(workflow: dict) -> Optional[datetime]:
+    messages = workflow.get("user_input_messages", []) or []
+    latest = None
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        ts = _parse_timestamp(msg.get("timestamp"))
+        if ts and (latest is None or ts > latest):
+            latest = ts
+    return latest
+
+
+def _format_datetime(dt: Optional[datetime]) -> Optional[str]:
+    if dt is None:
+        return None
+    try:
+        return dt.isoformat()
+    except Exception:
+        return None
+
+
+def _build_health_fallback(endpoint: str) -> Optional[str]:
+    try:
+        url = httpx.URL(endpoint)
+    except Exception:
+        return None
+    if not url.scheme or not url.host:
+        return None
+    base = f"{url.scheme}://{url.host}"
+    if url.port:
+        base = f"{base}:{url.port}"
+    return f"{base}/health"
 
 
 def create_app() -> FastAPI:
@@ -95,6 +153,145 @@ def create_app() -> FastAPI:
         await agent_manager.ensure_initialized()
         agents = await agent_manager.agent_registry.list(user_id="share")
         return [agent.model_dump() for agent in agents]
+
+    @app.get("/api/agents/health")
+    async def get_agents_health(
+        user_id: Optional[str] = None,
+        include_share: bool = True,
+        agent_names: Optional[str] = None,
+    ):
+        await agent_manager.ensure_initialized()
+        users = []
+        if user_id:
+            users.append(user_id)
+        if include_share or not users:
+            if "share" not in users:
+                users.append("share")
+
+        agents = []
+        for uid in users:
+            agents.extend(await agent_manager.agent_registry.list(user_id=uid))
+        if agent_names:
+            wanted = {name.strip() for name in agent_names.split(",") if name.strip()}
+            if wanted:
+                agents = [agent for agent in agents if agent.agent_name in wanted]
+
+        async def _probe(agent, client: httpx.AsyncClient):
+            if getattr(agent, "source", None) != "remote":
+                return agent.agent_name, {"status": "local", "latency_ms": None, "error": None}
+            endpoint = getattr(agent, "endpoint", None)
+            if not endpoint:
+                return agent.agent_name, {"status": "unknown", "latency_ms": None, "error": "missing endpoint"}
+
+            async def _check_url(url: str):
+                check_start = time.perf_counter()
+                resp = await client.get(url)
+                latency = int((time.perf_counter() - check_start) * 1000)
+                return resp, latency
+
+            start = time.perf_counter()
+            try:
+                resp, latency = await _check_url(endpoint)
+                if 200 <= resp.status_code < 300:
+                    return agent.agent_name, {"status": "ok", "latency_ms": latency, "error": None}
+
+                if resp.status_code in {404, 405}:
+                    fallback = _build_health_fallback(endpoint)
+                    if fallback:
+                        try:
+                            fallback_resp, fallback_latency = await _check_url(fallback)
+                            if 200 <= fallback_resp.status_code < 300:
+                                return agent.agent_name, {
+                                    "status": "ok",
+                                    "latency_ms": fallback_latency,
+                                    "error": None,
+                                }
+                            return agent.agent_name, {
+                                "status": "fail",
+                                "latency_ms": fallback_latency,
+                                "error": f"HTTP {resp.status_code} @ endpoint, HTTP {fallback_resp.status_code} @ /health",
+                            }
+                        except Exception as exc:
+                            latency = int((time.perf_counter() - start) * 1000)
+                            return agent.agent_name, {
+                                "status": "fail",
+                                "latency_ms": latency,
+                                "error": f"HTTP {resp.status_code} @ endpoint, fallback error: {exc}",
+                            }
+
+                return agent.agent_name, {
+                    "status": "fail",
+                    "latency_ms": latency,
+                    "error": f"HTTP {resp.status_code}",
+                }
+            except Exception as exc:
+                fallback = _build_health_fallback(endpoint)
+                if fallback:
+                    try:
+                        fallback_resp, fallback_latency = await _check_url(fallback)
+                        if 200 <= fallback_resp.status_code < 300:
+                            return agent.agent_name, {
+                                "status": "ok",
+                                "latency_ms": fallback_latency,
+                                "error": None,
+                            }
+                        return agent.agent_name, {
+                            "status": "fail",
+                            "latency_ms": fallback_latency,
+                            "error": f"endpoint error: {exc}, HTTP {fallback_resp.status_code} @ /health",
+                        }
+                    except Exception:
+                        pass
+                latency = int((time.perf_counter() - start) * 1000)
+                return agent.agent_name, {"status": "fail", "latency_ms": latency, "error": str(exc)}
+
+        async with httpx.AsyncClient(timeout=2.0, follow_redirects=True) as client:
+            results = await asyncio.gather(*[_probe(agent, client) for agent in agents])
+        payload = {name: info for name, info in results}
+        return {"agents": payload, "scope": {"users": users}}
+
+    @app.get("/api/agents/stats")
+    async def get_agents_stats(user_id: Optional[str] = None, include_share: bool = True):
+        project_root = get_project_root()
+        workflows_dir = project_root / "store" / "workflows"
+        users = []
+        if user_id:
+            users.append(user_id)
+        if include_share or not users:
+            if "share" not in users:
+                users.append("share")
+
+        stats: dict[str, dict[str, Any]] = {}
+        workflows_scanned = 0
+        for uid in users:
+            for workflow_path in _collect_workflow_files(workflows_dir, uid):
+                try:
+                    workflow = json.loads(workflow_path.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                workflows_scanned += 1
+                workflow_last = _workflow_last_used(workflow)
+                graph = workflow.get("graph", []) or []
+                for node in graph:
+                    if not isinstance(node, dict):
+                        continue
+                    config = node.get("config") or {}
+                    if config.get("node_type") != "execution_agent":
+                        continue
+                    agent_name = node.get("name") or config.get("node_name")
+                    if not agent_name:
+                        continue
+                    slot = stats.setdefault(agent_name, {"runs": 0, "last_used": None})
+                    slot["runs"] += 1
+                    if workflow_last:
+                        prev = _parse_timestamp(slot["last_used"])
+                        if prev is None or workflow_last > prev:
+                            slot["last_used"] = _format_datetime(workflow_last)
+
+        return {
+            "agents": stats,
+            "scope": {"users": users, "workflows_scanned": workflows_scanned},
+        }
 
     @app.get("/api/tools")
     async def list_tools():

@@ -25,6 +25,13 @@ const refreshToolsBtn = document.getElementById("refreshTools");
 const refreshWorkflowsBtn = document.getElementById("refreshWorkflows");
 
 const agentsList = document.getElementById("agentsList");
+const agentsSearchInput = document.getElementById("agentsSearch");
+const agentsSearchBtn = document.getElementById("agentsSearchBtn");
+const agentFilterButtons = document.querySelectorAll(".agent-filter");
+const coorCount = document.getElementById("coorCount");
+const clearCoorBtn = document.getElementById("clearCoorBtn");
+const healthCheckSelectedBtn = document.getElementById("healthCheckSelected");
+const agentDetail = document.getElementById("agentDetail");
 const toolsList = document.getElementById("toolsList");
 const workflowsList = document.getElementById("workflowsList");
 const workflowDetail = document.getElementById("workflowDetail");
@@ -37,6 +44,12 @@ let activeStepIndex = -1;
 const MAX_FLOW_STEPS = 40;
 let autoScrollEnabled = true;
 let selectedWorkflowId = null;
+let selectedAgentName = null;
+let selectedCoorAgents = new Set();
+let latestAgents = [];
+let agentFilter = "all";
+let agentHealth = {};
+let agentStats = {};
 
 mermaid.initialize({ startOnLoad: false, theme: "default" });
 
@@ -271,7 +284,7 @@ const runWorkflow = async () => {
     debug: debugInput.checked,
     deep_thinking_mode: deepThinkingInput.checked,
     search_before_planning: searchBeforeInput.checked,
-    coor_agents: null,
+    coor_agents: selectedCoorAgents.size ? Array.from(selectedCoorAgents) : null,
     workflow_id: workflowIdInput.value.trim() || null,
   };
 
@@ -329,13 +342,295 @@ const setListState = (container, text, variant) => {
   container.appendChild(createStateCard(text, variant));
 };
 
+const updateCoorCount = () => {
+  if (!coorCount) return;
+  coorCount.textContent = `已选协同代理: ${selectedCoorAgents.size}`;
+  if (clearCoorBtn) {
+    clearCoorBtn.disabled = selectedCoorAgents.size === 0;
+  }
+  if (healthCheckSelectedBtn) {
+    healthCheckSelectedBtn.disabled = selectedCoorAgents.size === 0;
+  }
+};
+
+const getMatchValue = () => (agentsSearchInput ? agentsSearchInput.value.trim() : "");
+
+const buildAgentsUrl = (userId, match) => {
+  let url = `/api/agents?user_id=${encodeURIComponent(userId)}`;
+  if (match) {
+    url += `&match=${encodeURIComponent(match)}`;
+  }
+  return url;
+};
+
+const buildHealthUrl = (userId, agentNames = []) => {
+  const params = new URLSearchParams();
+  if (userId) params.set("user_id", userId);
+  params.set("include_share", "true");
+  if (agentNames.length) params.set("agent_names", agentNames.join(","));
+  return `/api/agents/health?${params.toString()}`;
+};
+
+const buildStatsUrl = (userId) => {
+  const params = new URLSearchParams();
+  if (userId) params.set("user_id", userId);
+  params.set("include_share", "true");
+  return `/api/agents/stats?${params.toString()}`;
+};
+
+const formatDate = (iso) => {
+  if (!iso) return "";
+  if (iso.includes("T")) return iso.split("T")[0];
+  return iso.slice(0, 10);
+};
+
+const createTag = (text, variant = "") => {
+  const tag = document.createElement("span");
+  tag.className = `tag ${variant}`.trim();
+  tag.textContent = text;
+  return tag;
+};
+
+const setAgentDetailEmpty = (text) => {
+  if (!agentDetail) return;
+  agentDetail.textContent = "";
+  const empty = document.createElement("div");
+  empty.className = "agent-detail-empty";
+  empty.textContent = text;
+  agentDetail.appendChild(empty);
+};
+
+const renderAgentDetail = (agent) => {
+  if (!agentDetail) return;
+  if (!agent) {
+    setAgentDetailEmpty("选择一个 Agent 查看详情");
+    return;
+  }
+
+  agentDetail.textContent = "";
+  const title = document.createElement("h3");
+  title.textContent = agent.agent_name || "agent";
+
+  const sub = document.createElement("div");
+  sub.className = "agent-sub";
+  const userLabel = agent.user_id === "share" ? "default" : "user";
+  const sourceLabel = agent.source ? ` · ${agent.source}` : "";
+  const nick = agent.nick_name ? `${agent.nick_name} · ` : "";
+  sub.textContent = `${nick}${userLabel}${sourceLabel}`;
+
+  const tagRow = document.createElement("div");
+  tagRow.className = "tag-row";
+  if (agent.llm_type) {
+    tagRow.appendChild(createTag(`llm: ${agent.llm_type}`, "accent"));
+  }
+  if (agent.source) {
+    tagRow.appendChild(createTag(`source: ${agent.source}`, agent.source === "remote" ? "warn" : ""));
+  }
+
+  const descTitle = document.createElement("h4");
+  descTitle.textContent = "描述";
+  const desc = document.createElement("p");
+  desc.textContent = agent.description || "暂无描述";
+
+  const toolsTitle = document.createElement("h4");
+  toolsTitle.textContent = "Tools";
+  const toolsRow = document.createElement("div");
+  toolsRow.className = "tag-row";
+  const tools = Array.isArray(agent.selected_tools) ? agent.selected_tools : [];
+  if (tools.length) {
+    tools.forEach((tool) => {
+      const name = tool?.name || "";
+      if (name) toolsRow.appendChild(createTag(name, "accent"));
+    });
+  } else {
+    const emptyTools = document.createElement("p");
+    emptyTools.textContent = "无";
+    toolsRow.appendChild(emptyTools);
+  }
+
+  const healthTitle = document.createElement("h4");
+  healthTitle.textContent = "Health";
+  const health = agentHealth[agent.agent_name] || {};
+  const healthRow = document.createElement("p");
+  const healthParts = [];
+  if (health.status) healthParts.push(`status: ${health.status}`);
+  if (health.latency_ms !== null && health.latency_ms !== undefined) {
+    healthParts.push(`latency: ${health.latency_ms}ms`);
+  }
+  if (health.error) healthParts.push(`error: ${health.error}`);
+  healthRow.textContent = healthParts.length ? healthParts.join(" · ") : "n/a";
+
+  const statsTitle = document.createElement("h4");
+  statsTitle.textContent = "Usage";
+  const stats = agentStats[agent.agent_name] || {};
+  const statsRow = document.createElement("p");
+  const statsParts = [];
+  if (stats.runs !== undefined) statsParts.push(`runs: ${stats.runs}`);
+  if (stats.last_used) statsParts.push(`last: ${stats.last_used}`);
+  statsRow.textContent = statsParts.length ? statsParts.join(" · ") : "n/a";
+
+  const endpointTitle = document.createElement("h4");
+  endpointTitle.textContent = "Endpoint";
+  const endpoint = document.createElement("p");
+  endpoint.textContent = agent.endpoint || "n/a";
+
+  const mcpTitle = document.createElement("h4");
+  mcpTitle.textContent = "MCP Config";
+  const mcpPre = document.createElement("pre");
+  mcpPre.className = "code-block compact";
+  mcpPre.textContent = JSON.stringify(agent.mcp_config || agent.mcp_servers || null, null, 2);
+
+  const promptTitle = document.createElement("h4");
+  promptTitle.textContent = "Prompt";
+  const promptPre = document.createElement("pre");
+  promptPre.className = "code-block compact";
+  promptPre.textContent = agent.prompt || "";
+
+  agentDetail.appendChild(title);
+  agentDetail.appendChild(sub);
+  agentDetail.appendChild(tagRow);
+  agentDetail.appendChild(descTitle);
+  agentDetail.appendChild(desc);
+  agentDetail.appendChild(toolsTitle);
+  agentDetail.appendChild(toolsRow);
+  agentDetail.appendChild(healthTitle);
+  agentDetail.appendChild(healthRow);
+  agentDetail.appendChild(statsTitle);
+  agentDetail.appendChild(statsRow);
+  agentDetail.appendChild(endpointTitle);
+  agentDetail.appendChild(endpoint);
+  agentDetail.appendChild(mcpTitle);
+  agentDetail.appendChild(mcpPre);
+  agentDetail.appendChild(promptTitle);
+  agentDetail.appendChild(promptPre);
+};
+
+const applyAgentFilter = (agents) => {
+  if (!Array.isArray(agents)) return [];
+  if (agentFilter === "default") {
+    return agents.filter((agent) => agent.user_id === "share");
+  }
+  if (agentFilter === "user") {
+    return agents.filter((agent) => agent.user_id !== "share");
+  }
+  if (agentFilter === "remote") {
+    return agents.filter((agent) => agent.source === "remote");
+  }
+  return agents;
+};
+
+const renderAgents = (agents) => {
+  const filtered = applyAgentFilter(agents);
+  if (!filtered.length) {
+    setListState(agentsList, "No agents match current filter.", "empty");
+    return;
+  }
+
+  agentsList.textContent = "";
+  filtered.forEach((agent) => {
+    const card = document.createElement("div");
+    card.className = "card agent-card";
+    if (selectedCoorAgents.has(agent.agent_name)) {
+      card.classList.add("selected");
+    }
+
+    const head = document.createElement("div");
+    head.className = "agent-card-head";
+
+    const titleWrap = document.createElement("div");
+    const title = document.createElement("div");
+    title.className = "agent-name";
+    title.textContent = agent.agent_name || "agent";
+    const sub = document.createElement("div");
+    sub.className = "agent-sub";
+    const userLabel = agent.user_id === "share" ? "default" : "user";
+    const sourceLabel = agent.source ? ` · ${agent.source}` : "";
+    const nick = agent.nick_name ? `${agent.nick_name} · ` : "";
+    sub.textContent = `${nick}${userLabel}${sourceLabel}`;
+    titleWrap.appendChild(title);
+    titleWrap.appendChild(sub);
+
+    const selectBtn = document.createElement("button");
+    selectBtn.className = "select-toggle";
+    const isSelected = selectedCoorAgents.has(agent.agent_name);
+    selectBtn.textContent = isSelected ? "Selected" : "Select";
+    if (isSelected) selectBtn.classList.add("active");
+    selectBtn.addEventListener("click", (event) => {
+      event.stopPropagation();
+      if (selectedCoorAgents.has(agent.agent_name)) {
+        selectedCoorAgents.delete(agent.agent_name);
+      } else {
+        selectedCoorAgents.add(agent.agent_name);
+      }
+      updateCoorCount();
+      renderAgents(latestAgents);
+      if (selectedAgentName) {
+        const active = latestAgents.find((item) => item.agent_name === selectedAgentName);
+        if (active) renderAgentDetail(active);
+      }
+    });
+
+    head.appendChild(titleWrap);
+    head.appendChild(selectBtn);
+
+    const desc = document.createElement("p");
+    desc.textContent = agent.description || "";
+
+    const tags = document.createElement("div");
+    tags.className = "tag-row";
+    if (agent.llm_type) {
+      tags.appendChild(createTag(`llm: ${agent.llm_type}`, "accent"));
+    }
+    if (agent.source) {
+      tags.appendChild(createTag(`source: ${agent.source}`, agent.source === "remote" ? "warn" : ""));
+    }
+
+    const health = agentHealth[agent.agent_name];
+    if (health && health.status) {
+      const variant = health.status === "ok" ? "accent" : health.status === "fail" ? "warn" : "";
+      tags.appendChild(createTag(`health: ${health.status}`, variant));
+    }
+
+    const stats = agentStats[agent.agent_name];
+    if (stats) {
+      if (stats.runs !== undefined) {
+        tags.appendChild(createTag(`runs: ${stats.runs}`, "accent"));
+      }
+      if (stats.last_used) {
+        tags.appendChild(createTag(`last: ${formatDate(stats.last_used)}`));
+      }
+    }
+
+    const tools = Array.isArray(agent.selected_tools) ? agent.selected_tools : [];
+    const toolNames = tools.map((tool) => tool?.name).filter(Boolean);
+    toolNames.slice(0, 3).forEach((name) => tags.appendChild(createTag(name)));
+    if (toolNames.length > 3) {
+      tags.appendChild(createTag(`+${toolNames.length - 3}`));
+    }
+
+    card.appendChild(head);
+    card.appendChild(desc);
+    card.appendChild(tags);
+
+    card.addEventListener("click", () => {
+      selectedAgentName = agent.agent_name;
+      renderAgentDetail(agent);
+    });
+
+    agentsList.appendChild(card);
+  });
+};
+
 const fetchAgents = async () => {
   setListState(agentsList, "Loading...", "loading");
   try {
     const userId = userIdInput.value.trim();
-    const [defaultRes, userRes] = await Promise.all([
-      fetch("/api/agents/default"),
-      userId ? fetch(`/api/agents?user_id=${encodeURIComponent(userId)}`) : Promise.resolve(null),
+    const match = getMatchValue();
+    const [defaultRes, userRes, healthRes, statsRes] = await Promise.all([
+      fetch(buildAgentsUrl("share", match)),
+      userId ? fetch(buildAgentsUrl(userId, match)) : Promise.resolve(null),
+      fetch(buildHealthUrl(userId)),
+      fetch(buildStatsUrl(userId)),
     ]);
 
     if (!defaultRes.ok || (userRes && !userRes.ok)) {
@@ -344,27 +639,32 @@ const fetchAgents = async () => {
 
     const defaults = await defaultRes.json();
     const users = userRes ? await userRes.json() : [];
+    try {
+      const healthJson = healthRes.ok ? await healthRes.json() : null;
+      agentHealth = healthJson?.agents || {};
+    } catch (err) {
+      agentHealth = {};
+    }
+
+    try {
+      const statsJson = statsRes.ok ? await statsRes.json() : null;
+      agentStats = statsJson?.agents || {};
+    } catch (err) {
+      agentStats = {};
+    }
 
     const combined = [...defaults, ...users];
+    latestAgents = combined;
     if (!combined.length) {
       setListState(agentsList, "No agents found.", "empty");
+      setAgentDetailEmpty("暂无 Agent 详情");
       return;
     }
 
-    agentsList.textContent = "";
-    combined.forEach((agent) => {
-      const card = document.createElement("div");
-      card.className = "card";
-      const title = document.createElement("h4");
-      title.textContent = agent.agent_name;
-      const desc = document.createElement("p");
-      desc.textContent = agent.description || "";
-      card.appendChild(title);
-      card.appendChild(desc);
-      agentsList.appendChild(card);
-    });
+    renderAgents(combined);
   } catch (err) {
     setListState(agentsList, "Failed to load agents.", "error");
+    setAgentDetailEmpty("加载失败");
   }
 };
 
@@ -580,6 +880,41 @@ const exportOutputTxt = () => {
   URL.revokeObjectURL(url);
 };
 
+const runSelectedHealthCheck = async () => {
+  const names = Array.from(selectedCoorAgents);
+  if (!names.length) {
+    flashButton(healthCheckSelectedBtn, "Select agents");
+    return;
+  }
+  const prevText = healthCheckSelectedBtn.textContent;
+  healthCheckSelectedBtn.textContent = "Checking...";
+  healthCheckSelectedBtn.disabled = true;
+  const userId = userIdInput.value.trim();
+  try {
+    const res = await fetch(buildHealthUrl(userId, names));
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}`);
+    }
+    const healthJson = await res.json();
+    const updates = healthJson?.agents || {};
+    Object.keys(updates).forEach((key) => {
+      agentHealth[key] = updates[key];
+    });
+    if (latestAgents.length) {
+      renderAgents(latestAgents);
+      if (selectedAgentName) {
+        const active = latestAgents.find((item) => item.agent_name === selectedAgentName);
+        if (active) renderAgentDetail(active);
+      }
+    }
+  } catch (err) {
+    setStatus("Health check failed", false);
+  } finally {
+    healthCheckSelectedBtn.textContent = prevText;
+    healthCheckSelectedBtn.disabled = false;
+  }
+};
+
 runBtn.addEventListener("click", runWorkflow);
 stopBtn.addEventListener("click", stopWorkflow);
 clearOutputBtn.addEventListener("click", clearOutput);
@@ -590,5 +925,45 @@ refreshAgentsBtn.addEventListener("click", fetchAgents);
 refreshToolsBtn.addEventListener("click", fetchTools);
 refreshWorkflowsBtn.addEventListener("click", fetchWorkflows);
 
+if (agentsSearchBtn) {
+  agentsSearchBtn.addEventListener("click", fetchAgents);
+}
+if (agentsSearchInput) {
+  agentsSearchInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      fetchAgents();
+    }
+  });
+}
+
+agentFilterButtons.forEach((btn) => {
+  btn.addEventListener("click", () => {
+    agentFilter = btn.dataset.filter || "all";
+    agentFilterButtons.forEach((item) =>
+      item.classList.toggle("active", item.dataset.filter === agentFilter)
+    );
+    if (latestAgents.length) {
+      renderAgents(latestAgents);
+    }
+  });
+});
+
+if (clearCoorBtn) {
+  clearCoorBtn.addEventListener("click", () => {
+    selectedCoorAgents.clear();
+    updateCoorCount();
+    if (latestAgents.length) {
+      renderAgents(latestAgents);
+    }
+  });
+}
+
+if (healthCheckSelectedBtn) {
+  healthCheckSelectedBtn.addEventListener("click", runSelectedHealthCheck);
+}
+
 updateAutoScrollBtn();
 setStatus("Ready", true);
+updateCoorCount();
+setAgentDetailEmpty("选择一个 Agent 查看详情");
