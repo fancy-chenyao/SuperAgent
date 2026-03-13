@@ -19,7 +19,6 @@ const exportTxtBtn = document.getElementById("exportTxtBtn");
 const streamOutput = document.getElementById("streamOutput");
 const summaryFlow = document.getElementById("summaryFlow");
 const summaryHint = document.getElementById("summaryHint");
-
 const refreshAgentsBtn = document.getElementById("refreshAgents");
 const refreshToolsBtn = document.getElementById("refreshTools");
 const refreshWorkflowsBtn = document.getElementById("refreshWorkflows");
@@ -47,6 +46,21 @@ const mcpSummary = document.getElementById("mcpSummary");
 const workflowsList = document.getElementById("workflowsList");
 const workflowDetail = document.getElementById("workflowDetail");
 const mermaidContainer = document.getElementById("mermaidContainer");
+const planSummary = document.getElementById("planSummary");
+const planHint = document.getElementById("planHint");
+const planEditorList = document.getElementById("planEditorList");
+const planValidationHint = document.getElementById("planValidationHint");
+const addPlanStepBtn = document.getElementById("addPlanStep");
+const validatePlanBtn = document.getElementById("validatePlan");
+const nlPlanEditBtn = document.getElementById("nlPlanEdit");
+const confirmExecuteBtn = document.getElementById("confirmExecute");
+const retryPlanBtn = document.getElementById("retryPlan");
+const planModal = document.getElementById("planModal");
+const closePlanModalBtn = document.getElementById("closePlanModal");
+const cancelPlanNlBtn = document.getElementById("cancelPlanNl");
+const applyPlanNlBtn = document.getElementById("applyPlanNl");
+const planNlInput = document.getElementById("planNlInput");
+const planNlHint = document.getElementById("planNlHint");
 
 let currentAbortController = null;
 let outputBlocks = new Map();
@@ -65,6 +79,15 @@ let latestTools = [];
 let toolStats = {};
 let selectedToolName = null;
 let mcpConfig = null;
+let plannerBuffer = "";
+let plannerCollecting = false;
+let planSteps = [];
+let plannerOnlyMode = false;
+let plannerOnlyController = null;
+let plannerOnlyTimeoutId = null;
+let plannerOnlyStepsUpdated = false;
+let instructionHistory = [];
+const PLANNER_ONLY_TIMEOUT_MS = 50000;
 
 mermaid.initialize({ startOnLoad: false, theme: "default" });
 
@@ -85,6 +108,25 @@ const resetSummary = () => {
   activeStepIndex = -1;
 };
 
+const resetPlan = () => {
+  if (planSummary) planSummary.innerHTML = "";
+  if (planHint) {
+    planHint.classList.add("hidden");
+    planHint.classList.remove("error");
+    planHint.textContent = "";
+  }
+  if (planEditorList) planEditorList.innerHTML = "";
+  if (planValidationHint) {
+    planValidationHint.classList.add("hidden");
+    planValidationHint.classList.remove("error");
+    planValidationHint.textContent = "";
+  }
+  planSteps = [];
+  plannerBuffer = "";
+  plannerCollecting = false;
+  updateConfirmExecuteState();
+};
+
 const showSummaryHint = (text, isError = false) => {
   summaryHint.textContent = text;
   summaryHint.classList.remove("hidden");
@@ -92,6 +134,66 @@ const showSummaryHint = (text, isError = false) => {
     summaryHint.classList.add("error");
   } else {
     summaryHint.classList.remove("error");
+  }
+};
+
+const showPlanHint = (text, isError = false) => {
+  if (!planHint) return;
+  planHint.textContent = text;
+  planHint.classList.remove("hidden");
+  if (isError) {
+    planHint.classList.add("error");
+  } else {
+    planHint.classList.remove("error");
+  }
+};
+
+const showPlanValidationHint = (text, isError = false) => {
+  if (!planValidationHint) return;
+  planValidationHint.textContent = text;
+  planValidationHint.classList.remove("hidden");
+  if (isError) {
+    planValidationHint.classList.add("error");
+  } else {
+    planValidationHint.classList.remove("error");
+  }
+};
+
+const updateConfirmExecuteState = () => {
+  if (!confirmExecuteBtn) return;
+  const hasPlan = planSteps.length > 0;
+  const hasWorkflowId = workflowIdInput && workflowIdInput.value.trim();
+  confirmExecuteBtn.disabled = !(hasPlan && hasWorkflowId);
+  if (retryPlanBtn) {
+    retryPlanBtn.disabled = !instructionHistory.length;
+  }
+};
+
+const showPlanNlHint = (text, isError = false) => {
+  if (!planNlHint) return;
+  planNlHint.textContent = text;
+  planNlHint.classList.remove("hidden");
+  if (isError) {
+    planNlHint.classList.add("error");
+  } else {
+    planNlHint.classList.remove("error");
+  }
+};
+
+const openPlanModal = () => {
+  if (!planModal) return;
+  planModal.classList.remove("hidden");
+  if (planNlInput) planNlInput.value = "";
+  showPlanNlHint("请输入修改指令。");
+};
+
+const closePlanModal = () => {
+  if (!planModal) return;
+  planModal.classList.add("hidden");
+  if (planNlHint) {
+    planNlHint.classList.add("hidden");
+    planNlHint.classList.remove("error");
+    planNlHint.textContent = "";
   }
 };
 
@@ -161,6 +263,296 @@ const pushFlowStep = (agentName) => {
         renderFlowSteps();
       }
     }, 800);
+  }
+};
+
+const extractJsonFromText = (text) => {
+  const trimmed = (text || "").trim();
+  if (!trimmed) return null;
+
+  const tryParse = (value) => {
+    try {
+      return JSON.parse(value);
+    } catch {
+      return null;
+    }
+  };
+
+  let parsed = tryParse(trimmed);
+  if (parsed) return parsed;
+
+  const firstObj = trimmed.indexOf("{");
+  const lastObj = trimmed.lastIndexOf("}");
+  if (firstObj >= 0 && lastObj > firstObj) {
+    parsed = tryParse(trimmed.slice(firstObj, lastObj + 1));
+    if (parsed) return parsed;
+  }
+
+  const firstArr = trimmed.indexOf("[");
+  const lastArr = trimmed.lastIndexOf("]");
+  if (firstArr >= 0 && lastArr > firstArr) {
+    parsed = tryParse(trimmed.slice(firstArr, lastArr + 1));
+    if (parsed) return parsed;
+  }
+
+  return null;
+};
+
+const normalizePlanSteps = (payload) => {
+  if (!payload) return [];
+  if (Array.isArray(payload)) return payload;
+  if (Array.isArray(payload.steps)) return payload.steps;
+  if (Array.isArray(payload.planning_steps)) return payload.planning_steps;
+  return [];
+};
+
+const normalizeStep = (step = {}) => ({
+  title: step.title || "",
+  description: step.description || "",
+  agent_name: step.agent_name || "",
+  note: step.note || "",
+});
+
+const renderPlanSummary = (steps) => {
+  if (!planSummary) return;
+  planSummary.innerHTML = "";
+  if (!steps || !steps.length) {
+    showPlanHint("No plan steps detected.", true);
+    return;
+  }
+
+  const frag = document.createDocumentFragment();
+  steps.forEach((step, index) => {
+    const card = document.createElement("div");
+    card.className = "plan-card";
+
+    const title = document.createElement("div");
+    title.className = "plan-title";
+    const rawTitle = step?.title || step?.agent_name || `Step ${index + 1}`;
+    title.textContent = `${index + 1}. ${rawTitle}`;
+
+    const chip = document.createElement("div");
+    chip.className = "plan-chip";
+    const agentName = step?.agent_name || "auto";
+    chip.textContent = `role: ${agentName}`;
+
+    const desc = document.createElement("div");
+    desc.className = "plan-desc";
+    desc.textContent = step?.description || "No description provided.";
+
+    const meta = document.createElement("div");
+    meta.className = "plan-meta";
+    const note = step?.note || "";
+    meta.textContent = note ? `note: ${note}` : "note: n/a";
+
+    card.appendChild(title);
+    card.appendChild(chip);
+    card.appendChild(desc);
+    card.appendChild(meta);
+    frag.appendChild(card);
+  });
+
+  planSummary.appendChild(frag);
+  showPlanHint(`Plan loaded: ${steps.length} step(s).`);
+  updateConfirmExecuteState();
+};
+
+const renderPlanEditor = (errorsByIndex = {}) => {
+  if (!planEditorList) return;
+  planEditorList.innerHTML = "";
+
+  if (!planSteps.length) {
+    showPlanValidationHint("暂无计划步骤。", true);
+    return;
+  }
+
+  const frag = document.createDocumentFragment();
+  planSteps.forEach((step, index) => {
+    const item = document.createElement("div");
+    item.className = "plan-editor-item";
+    if (errorsByIndex[index]) item.classList.add("invalid");
+
+    const head = document.createElement("div");
+    head.className = "plan-editor-head";
+    const title = document.createElement("div");
+    title.className = "plan-editor-title";
+    title.textContent = `Step ${index + 1}`;
+    head.appendChild(title);
+
+    const content = document.createElement("div");
+    content.className = "plan-editor-content";
+    const titleLine = document.createElement("div");
+    titleLine.textContent = step.title || "未命名步骤";
+    const descLine = document.createElement("div");
+    descLine.textContent = step.description || "无描述";
+    const metaLine = document.createElement("div");
+    metaLine.className = "meta";
+    const roleText = step.agent_name ? `角色: ${step.agent_name}` : "角色: 自动";
+    const noteText = step.note ? `备注: ${step.note}` : "备注: 无";
+    metaLine.textContent = `${roleText} · ${noteText}`;
+
+    content.appendChild(titleLine);
+    content.appendChild(descLine);
+    content.appendChild(metaLine);
+
+    item.appendChild(head);
+    item.appendChild(content);
+    frag.appendChild(item);
+  });
+
+  planEditorList.appendChild(frag);
+  updateConfirmExecuteState();
+};
+
+const movePlanStep = (from, to) => {
+  if (to < 0 || to >= planSteps.length) return;
+  const nextSteps = [...planSteps];
+  const [moved] = nextSteps.splice(from, 1);
+  nextSteps.splice(to, 0, moved);
+  planSteps = nextSteps;
+  renderPlanEditor();
+  renderPlanSummary(planSteps);
+};
+
+const removePlanStep = (index) => {
+  if (index < 0 || index >= planSteps.length) return;
+  planSteps = planSteps.filter((_, i) => i !== index);
+  renderPlanEditor();
+  renderPlanSummary(planSteps);
+};
+
+const addPlanStep = () => {
+  planSteps = [...planSteps, normalizeStep({ title: "", description: "", agent_name: "", note: "" })];
+  renderPlanEditor();
+  renderPlanSummary(planSteps);
+};
+
+const validatePlanSteps = () => {
+  const errors = [];
+  const errorsByIndex = {};
+  if (!planSteps.length) {
+    errors.push("计划为空，请先新增步骤。");
+  }
+
+  const agentNames = new Set(
+    Array.isArray(latestAgents) ? latestAgents.map((agent) => agent.agent_name).filter(Boolean) : []
+  );
+  if (!agentNames.size) {
+    errors.push("Agent 列表未加载，无法校验执行角色。");
+  }
+
+  planSteps.forEach((step, idx) => {
+    const stepErrors = [];
+    if (!step.title || !step.title.trim()) {
+      stepErrors.push("缺少标题");
+    }
+    if (step.agent_name && agentNames.size && !agentNames.has(step.agent_name)) {
+      stepErrors.push(`执行角色不存在：${step.agent_name}`);
+    }
+    if (stepErrors.length) {
+      errorsByIndex[idx] = stepErrors;
+      errors.push(`第 ${idx + 1} 步：${stepErrors.join("，")}`);
+    }
+  });
+
+  renderPlanEditor(errorsByIndex);
+  renderPlanSummary(planSteps);
+  return errors;
+};
+
+const runPlannerUpdate = async (instruction, appendHistory = true) => {
+  const userId = userIdInput.value.trim();
+  if (!userId) {
+    showPlanNlHint("User ID required.", true);
+    return;
+  }
+  if (!instruction) {
+    showPlanNlHint("请输入修改指令。", true);
+    return;
+  }
+
+  if (appendHistory) {
+    instructionHistory = [...instructionHistory, instruction];
+  }
+
+  plannerOnlyMode = true;
+  plannerBuffer = "";
+  plannerCollecting = false;
+  plannerOnlyStepsUpdated = false;
+  showPlanNlHint("正在生成新的计划...");
+
+  const payload = {
+    user_id: userId,
+    lang: "zh",
+    workmode: "launch",
+    stop_after_planner: true,
+    instruction: instruction,
+    instruction_history: instructionHistory,
+    messages: [
+      {
+        role: "user",
+        content:
+          "请基于全部指令历史重新规划，输出JSON格式的steps。要求仅输出JSON，不要解释。\\n\\n最新补充：" +
+          instruction,
+      },
+    ],
+    debug: debugInput.checked,
+    deep_thinking_mode: deepThinkingInput.checked,
+    search_before_planning: searchBeforeInput.checked,
+    coor_agents: selectedCoorAgents.size ? Array.from(selectedCoorAgents) : null,
+    workflow_id: workflowIdInput.value.trim() || null,
+  };
+
+  const schedulePlannerTimeout = () => {
+    if (plannerOnlyTimeoutId) {
+      clearTimeout(plannerOnlyTimeoutId);
+    }
+    plannerOnlyTimeoutId = setTimeout(() => {
+      if (plannerOnlyController) {
+        plannerOnlyController.abort();
+      }
+      showPlanNlHint("生成超时，请调整指令后重试。", true);
+      plannerOnlyMode = false;
+      plannerOnlyController = null;
+    }, PLANNER_ONLY_TIMEOUT_MS);
+  };
+
+  plannerOnlyController = new AbortController();
+  schedulePlannerTimeout();
+  try {
+    const response = await fetch("/api/workflows/run", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      signal: plannerOnlyController.signal,
+    });
+
+    if (!response.ok || !response.body) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      buffer = parseSse(buffer, handleEvent);
+      schedulePlannerTimeout();
+    }
+  } catch (err) {
+    if (err?.name !== "AbortError") {
+      showPlanNlHint(`生成失败: ${err.message || err}`, true);
+    }
+  } finally {
+    plannerOnlyMode = false;
+    plannerOnlyController = null;
+    if (plannerOnlyTimeoutId) {
+      clearTimeout(plannerOnlyTimeoutId);
+      plannerOnlyTimeoutId = null;
+    }
   }
 };
 
@@ -236,42 +628,117 @@ const handleEvent = (eventName, payload) => {
   if (eventName === "messages") {
     const agentName = payload.agent_name || payload.data?.agent_name || payload.data?.tool || "assistant";
     const content = payload.data?.delta?.content || payload.data?.message || payload.raw || "";
-    appendOutput(agentName, content);
+    if (plannerOnlyMode && typeof agentName === "string" && agentName.toLowerCase().includes("planner")) {
+      if (plannerOnlyTimeoutId) {
+        clearTimeout(plannerOnlyTimeoutId);
+        plannerOnlyTimeoutId = setTimeout(() => {
+          if (plannerOnlyController) {
+            plannerOnlyController.abort();
+          }
+          showPlanNlHint("生成超时，请调整指令后重试。", true);
+          plannerOnlyMode = false;
+          plannerOnlyController = null;
+        }, PLANNER_ONLY_TIMEOUT_MS);
+      }
+    }
+    if (typeof agentName === "string" && agentName.toLowerCase().includes("planner")) {
+      plannerCollecting = true;
+      plannerBuffer += content;
+    }
+    if (!plannerOnlyMode) {
+      appendOutput(agentName, content);
+    }
     return;
   }
   if (eventName === "start_of_workflow") {
-    resetSummary();
-    appendOutput("system", `\n[workflow] ${payload.data?.workflow_id || ""}\n`);
+    if (!plannerOnlyMode) {
+      resetSummary();
+      resetPlan();
+      appendOutput("system", `\n[workflow] ${payload.data?.workflow_id || ""}\n`);
+    }
+    const wfId = payload.data?.workflow_id;
+    if (wfId && workflowIdInput && !workflowIdInput.value.trim()) {
+      workflowIdInput.value = wfId;
+    }
+    updateConfirmExecuteState();
     return;
   }
   if (eventName === "start_of_agent") {
     const agentName = payload.data?.agent_name || payload.agent_name || "agent";
-    pushFlowStep(agentName);
-    appendOutput("system", `\n[start_of_agent] ${agentName}\n`);
+    if (!plannerOnlyMode) {
+      pushFlowStep(agentName);
+    }
+    if (typeof agentName === "string" && agentName.toLowerCase().includes("planner")) {
+      plannerCollecting = true;
+      plannerBuffer = "";
+      showPlanHint("Collecting plan output...");
+    }
+    if (!plannerOnlyMode) {
+      appendOutput("system", `\n[start_of_agent] ${agentName}\n`);
+    }
     return;
   }
   if (eventName === "end_of_agent") {
     const agentName = payload.data?.agent_name || payload.agent_name || "agent";
-    finishActiveStep();
-    renderFlowSteps();
-    appendOutput("system", `\n[end_of_agent] ${agentName}\n`);
+    if (!plannerOnlyMode) {
+      finishActiveStep();
+      renderFlowSteps();
+    }
+    if (typeof agentName === "string" && agentName.toLowerCase().includes("planner")) {
+      plannerCollecting = false;
+      const parsed = extractJsonFromText(plannerBuffer);
+      const steps = normalizePlanSteps(parsed);
+      if (steps.length) {
+        planSteps = steps.map((step) => normalizeStep(step));
+        plannerOnlyStepsUpdated = true;
+        renderPlanSummary(planSteps);
+        renderPlanEditor();
+        showPlanValidationHint("计划已更新，可继续用自然语言补充。");
+        if (plannerOnlyMode && plannerOnlyController) {
+          plannerOnlyController.abort();
+          showPlanNlHint("已根据指令生成新计划。");
+          closePlanModal();
+        }
+      } else {
+        showPlanHint("Planner output is not valid JSON steps.", true);
+        if (plannerOnlyMode) {
+          showPlanNlHint("未能解析规划结果，请调整指令再试。", true);
+        }
+      }
+    }
+    if (!plannerOnlyMode) {
+      appendOutput("system", `\n[end_of_agent] ${agentName}\n`);
+    }
     return;
   }
   if (eventName === "end_of_workflow") {
-    showSummaryHint("Workflow completed.");
-    appendOutput("system", "\n[workflow] completed\n");
+    if (!plannerOnlyMode) {
+      showSummaryHint("Workflow completed.");
+      appendOutput("system", "\n[workflow] completed\n");
+    } else if (!plannerOnlyStepsUpdated) {
+      showPlanNlHint("规划完成，但未生成可用步骤。请调整指令后重试。", true);
+    }
     return;
   }
   if (eventName === "new_agent_created") {
-    appendOutput("system", `\n[new agent] ${payload.data?.new_agent_name || ""}\n`);
+    if (!plannerOnlyMode) {
+      appendOutput("system", `\n[new agent] ${payload.data?.new_agent_name || ""}\n`);
+    }
     return;
   }
   if (eventName === "error") {
-    showSummaryHint("Workflow error.", true);
-    appendOutput("system", `\n[error] ${payload.data?.error || payload.raw || "unknown error"}\n`);
+    if (!plannerOnlyMode) {
+      showSummaryHint("Workflow error.", true);
+      appendOutput("system", `\n[error] ${payload.data?.error || payload.raw || "unknown error"}\n`);
+      showPlanValidationHint("执行失败，可在 Task History 中恢复。", true);
+    } else {
+      showPlanNlHint(payload.data?.error || payload.raw || "unknown error", true);
+    }
     return;
   }
-  appendOutput("system", `\n[${eventName}] ${JSON.stringify(payload)}\n`);
+  if (!plannerOnlyMode) {
+    appendOutput("system", `\n[${eventName}] ${JSON.stringify(payload)}\n`);
+  }
 };
 
 const runWorkflow = async () => {
@@ -288,13 +755,19 @@ const runWorkflow = async () => {
 
   setStatus("Running", true);
   resetSummary();
+  resetPlan();
+  instructionHistory = [message];
   runBtn.disabled = true;
   stopBtn.disabled = false;
+  if (confirmExecuteBtn) confirmExecuteBtn.disabled = true;
 
   const payload = {
     user_id: userId,
     lang: "zh",
     workmode: workModeInput.value,
+    stop_after_planner: workModeInput.value === "launch",
+    instruction: message,
+    instruction_history: instructionHistory,
     messages: [{ role: "user", content: message }],
     debug: debugInput.checked,
     deep_thinking_mode: deepThinkingInput.checked,
@@ -334,8 +807,133 @@ const runWorkflow = async () => {
     runBtn.disabled = false;
     stopBtn.disabled = true;
     currentAbortController = null;
+    updateConfirmExecuteState();
   }
 };
+
+const runExecution = async () => {
+  const userId = userIdInput.value.trim();
+  if (!userId) {
+    setStatus("User ID required", false);
+    return;
+  }
+  const workflowId = workflowIdInput.value.trim();
+  if (!workflowId) {
+    showPlanValidationHint("缺少 Workflow ID，无法执行。", true);
+    return;
+  }
+  if (!planSteps.length) {
+    showPlanValidationHint("计划为空，无法执行。", true);
+    return;
+  }
+
+  setStatus("Executing", true);
+  resetSummary();
+  runBtn.disabled = true;
+  stopBtn.disabled = false;
+  if (confirmExecuteBtn) confirmExecuteBtn.disabled = true;
+
+  const payload = {
+    user_id: userId,
+    lang: "zh",
+    workmode: "production",
+    stop_after_planner: false,
+    instruction: null,
+    instruction_history: instructionHistory,
+    messages: [{ role: "user", content: "确认执行，按当前计划执行。" }],
+    debug: debugInput.checked,
+    deep_thinking_mode: deepThinkingInput.checked,
+    search_before_planning: searchBeforeInput.checked,
+    coor_agents: selectedCoorAgents.size ? Array.from(selectedCoorAgents) : null,
+    workflow_id: workflowId,
+  };
+
+  currentAbortController = new AbortController();
+  try {
+    const response = await fetch("/api/workflows/run", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      signal: currentAbortController.signal,
+    });
+
+    if (!response.ok || !response.body) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      buffer = parseSse(buffer, handleEvent);
+    }
+  } catch (err) {
+    appendOutput("system", `\n[error] ${err.message || err}\n`);
+    setStatus("Error", false);
+    showSummaryHint("Workflow error.", true);
+  } finally {
+    runBtn.disabled = false;
+    stopBtn.disabled = true;
+    currentAbortController = null;
+    updateConfirmExecuteState();
+  }
+};
+
+if (addPlanStepBtn) {
+  addPlanStepBtn.addEventListener("click", () => {
+    addPlanStep();
+    showPlanValidationHint("Step added. Remember to validate.");
+  });
+}
+
+if (nlPlanEditBtn) {
+  nlPlanEditBtn.addEventListener("click", () => openPlanModal());
+}
+
+if (confirmExecuteBtn) {
+  confirmExecuteBtn.addEventListener("click", () => runExecution());
+}
+
+if (retryPlanBtn) {
+  retryPlanBtn.addEventListener("click", () => {
+    if (!instructionHistory.length) {
+      showPlanValidationHint("没有可重试的指令。", true);
+      return;
+    }
+    const lastInstruction = instructionHistory[instructionHistory.length - 1];
+    runPlannerUpdate(lastInstruction, false);
+  });
+}
+
+if (closePlanModalBtn) {
+  closePlanModalBtn.addEventListener("click", () => closePlanModal());
+}
+
+if (cancelPlanNlBtn) {
+  cancelPlanNlBtn.addEventListener("click", () => closePlanModal());
+}
+
+if (applyPlanNlBtn) {
+  applyPlanNlBtn.addEventListener("click", () => {
+    const instruction = planNlInput ? planNlInput.value.trim() : "";
+    runPlannerUpdate(instruction);
+  });
+}
+
+if (validatePlanBtn) {
+  validatePlanBtn.addEventListener("click", () => {
+    const errors = validatePlanSteps();
+    if (!errors.length) {
+      showPlanValidationHint("Validation passed.");
+      return;
+    }
+    showPlanValidationHint(errors.join(" | "), true);
+  });
+}
 
 const stopWorkflow = () => {
   if (currentAbortController) {

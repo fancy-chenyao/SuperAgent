@@ -219,6 +219,187 @@ body {
   border: 1px solid rgba(20, 24, 40, 0.08);
 }
 
+.summary-plan {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px dashed rgba(20, 24, 40, 0.08);
+}
+
+.plan-summary {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.plan-card {
+  border-radius: 14px;
+  border: 1px solid rgba(20, 24, 40, 0.08);
+  background: rgba(248, 249, 252, 0.9);
+  padding: 12px 14px;
+  display: grid;
+  gap: 6px;
+}
+
+.plan-card .plan-title {
+  font-weight: 600;
+  font-size: 14px;
+  color: var(--text);
+}
+
+.plan-card .plan-meta {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.plan-card .plan-desc {
+  font-size: 13px;
+  color: var(--text);
+  line-height: 1.45;
+}
+
+.plan-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: rgba(27, 143, 107, 0.12);
+  color: #0f5f48;
+  font-size: 11px;
+  font-weight: 600;
+  width: fit-content;
+}
+
+.plan-editor-card {
+  display: grid;
+  gap: 12px;
+}
+
+.plan-editor-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.plan-editor-list {
+  display: grid;
+  gap: 12px;
+}
+
+.plan-editor-item {
+  border-radius: 14px;
+  border: 1px solid rgba(20, 24, 40, 0.08);
+  background: rgba(248, 249, 252, 0.9);
+  padding: 12px;
+  display: grid;
+  gap: 8px;
+}
+
+.plan-editor-item.invalid {
+  border-color: rgba(217, 83, 79, 0.6);
+  box-shadow: 0 0 0 1px rgba(217, 83, 79, 0.2);
+}
+
+.plan-editor-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.plan-editor-title {
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.plan-editor-actions-inline {
+  display: flex;
+  gap: 6px;
+}
+
+.plan-editor-actions-inline button {
+  padding: 6px 10px;
+  border-radius: 10px;
+  font-size: 12px;
+}
+
+.plan-editor-content {
+  display: grid;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.plan-editor-content .meta {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.modal {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: grid;
+  place-items: center;
+}
+
+.modal.hidden {
+  display: none;
+}
+
+.modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(9, 12, 20, 0.55);
+  backdrop-filter: blur(4px);
+}
+
+.modal-card {
+  position: relative;
+  z-index: 2;
+  width: min(640px, 92vw);
+  background: #ffffff;
+  border-radius: 16px;
+  border: 1px solid rgba(20, 24, 40, 0.12);
+  padding: 18px;
+  box-shadow: var(--shadow);
+  display: grid;
+  gap: 14px;
+}
+
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.modal-body {
+  display: grid;
+  gap: 10px;
+}
+
+.modal-hint {
+  font-size: 13px;
+  color: var(--muted);
+  margin: 0;
+}
+
+.modal-body textarea {
+  border-radius: 12px;
+  border: 1px solid rgba(20, 24, 40, 0.12);
+  padding: 10px 12px;
+  font-size: 14px;
+  background: rgba(248, 249, 252, 0.9);
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 .form-row {
   display: flex;
   flex-direction: column;

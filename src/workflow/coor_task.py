@@ -51,6 +51,41 @@ except Exception:  # pragma: no cover - optional dependency in lightweight test 
 
 logger = logging.getLogger(__name__)
 
+def _extract_plan_steps(content: str) -> list | None:
+    if not content:
+        return None
+
+    def _try_parse(value: str):
+        try:
+            return json.loads(value)
+        except Exception:
+            return None
+
+    text = content.strip()
+    candidates = [text]
+
+    first_obj = text.find("{")
+    last_obj = text.rfind("}")
+    if first_obj >= 0 and last_obj > first_obj:
+        candidates.append(text[first_obj : last_obj + 1])
+
+    first_arr = text.find("[")
+    last_arr = text.rfind("]")
+    if first_arr >= 0 and last_arr > first_arr:
+        candidates.append(text[first_arr : last_arr + 1])
+
+    for candidate in candidates:
+        parsed = _try_parse(candidate)
+        if parsed is None:
+            continue
+        if isinstance(parsed, dict):
+            steps = parsed.get("steps") or parsed.get("planning_steps")
+            if isinstance(steps, list):
+                return steps
+        if isinstance(parsed, list):
+            return parsed
+    return None
+
 
 async def publisher_node(
     state: State,
@@ -174,9 +209,36 @@ async def planner_node(state: State) -> Command[Literal["publisher", "__end__"]]
 
     content = ""
     goto = "publisher"
+    retry_messages = None
+    retry_llm = None
 
     if state["workflow_mode"] == "launch":
-        messages = apply_prompt_template("planner", state)
+        prompt_state = dict(state)
+        history = prompt_state.get("instruction_history") or []
+        if not isinstance(history, list):
+            history = [str(history)]
+        if history:
+            history_text = "\n".join(f"{idx + 1}. {item}" for idx, item in enumerate(history))
+        else:
+            history_text = "None"
+
+        current_plan = cache.get_planning_steps(state["workflow_id"])
+        if isinstance(current_plan, str):
+            try:
+                current_plan = json.loads(current_plan)
+            except Exception:
+                current_plan = []
+        if not isinstance(current_plan, list):
+            current_plan = []
+        current_plan_text = (
+            json.dumps({"steps": current_plan}, indent=2, ensure_ascii=False)
+            if current_plan
+            else "[]"
+        )
+
+        prompt_state["INSTRUCTION_HISTORY_TEXT"] = history_text
+        prompt_state["CURRENT_PLAN_TEXT"] = current_plan_text
+        messages = apply_prompt_template("planner", prompt_state)
         llm = get_llm_by_type(AGENT_LLM_MAP["planner"])
         if state.get("deep_thinking_mode"):
             llm = get_llm_by_type("reasoning")
@@ -202,6 +264,8 @@ async def planner_node(state: State) -> Command[Literal["publisher", "__end__"]]
             if chunk.content:
                 content += chunk.content  # type: ignore
         content = clean_response_tags(content)
+        retry_messages = messages
+        retry_llm = llm
     elif state["workflow_mode"] == "production":
         content = json.dumps(
             cache.get_planning_steps(state["workflow_id"]), indent=4, ensure_ascii=False
@@ -235,20 +299,41 @@ async def planner_node(state: State) -> Command[Literal["publisher", "__end__"]]
         response = await llm.ainvoke(messages)
         content = clean_response_tags(response.content)  # type: ignore
 
+    raw_content = content
+    message_content = content
+
     if state["workflow_mode"] in ["launch", "polish"]:
-        try:
-            steps_obj = json.loads(content)
-            steps = steps_obj.get("steps", [])
+        steps = _extract_plan_steps(raw_content)
+        if steps is None and state["workflow_mode"] == "launch" and retry_messages and retry_llm:
+            try:
+                retry_note = (
+                    "仅输出JSON格式的计划，不要解释或补充文字。"
+                    "必须使用 {\"steps\": [...]} 结构。"
+                )
+                retry_payload = deepcopy(retry_messages)
+                retry_payload.append({"role": "user", "content": retry_note})
+                retry_response = await retry_llm.ainvoke(retry_payload)
+                retry_content = clean_response_tags(getattr(retry_response, "content", ""))
+                if retry_content:
+                    steps = _extract_plan_steps(retry_content)
+                    if steps is not None:
+                        raw_content = retry_content
+            except Exception as exc:
+                logger.warning("Planner retry failed: %s", exc)
+        if steps is not None:
             cache.restore_planning_steps(state["workflow_id"], steps, state["user_id"])
-        except json.JSONDecodeError:
+            message_content = json.dumps({"steps": steps}, indent=2, ensure_ascii=False)
+            if state.get("stop_after_planner") and state["workflow_mode"] == "launch":
+                goto = "__end__"
+        else:
             logger.warning("Planner response is not a valid JSON \n")
             goto = "__end__"
         cache.restore_system_node(state["workflow_id"], goto, state["user_id"])
     return Command(
         update={
-            "messages": [{"content": content, "tool": "planner", "role": "assistant"}],
+            "messages": [{"content": message_content, "tool": "planner", "role": "assistant"}],
             "agent_name": "planner",
-            "full_plan": content,
+            "full_plan": raw_content,
         },
         goto=goto,
     )
