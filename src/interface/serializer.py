@@ -60,7 +60,5 @@ class PlanWithAgents(TypedDict):
     `TypedDict` to enforce type hints for the dictionary keys.
     """
 
-    thought: str
-    title: str
     new_agents_needed: list[NewAgent]
     steps: list[Step]

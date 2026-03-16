@@ -1,5 +1,6 @@
 ﻿import logging
 import json
+import time
 from copy import deepcopy
 from typing import Literal
 
@@ -50,6 +51,9 @@ except Exception:  # pragma: no cover - optional dependency in lightweight test 
 
 
 logger = logging.getLogger(__name__)
+# Ensure planner performance logs are visible
+if not logger.handlers:
+    logger.setLevel(logging.INFO)
 
 def _extract_plan_steps(content: str) -> list | None:
     if not content:
@@ -205,7 +209,11 @@ async def agent_proxy_node(state: State) -> Command[Literal["publisher", "__end_
 
 async def planner_node(state: State) -> Command[Literal["publisher", "__end__"]]:
     """Planner node that generates the plan."""
-    logger.info("Planner generating full plan in %s mode", state["workflow_mode"])
+    start_time = time.time()
+    logger.info("=" * 60)
+    logger.info("PLANNER PERFORMANCE TRACKING START")
+    logger.info("Mode: %s", state["workflow_mode"])
+    logger.info("=" * 60)
 
     content = ""
     goto = "publisher"
@@ -242,7 +250,14 @@ async def planner_node(state: State) -> Command[Literal["publisher", "__end__"]]
         llm = get_llm_by_type(AGENT_LLM_MAP["planner"])
         if state.get("deep_thinking_mode"):
             llm = get_llm_by_type("reasoning")
+
+        # Log LLM preparation time
+        prep_time = time.time()
+        prep_duration = prep_time - start_time
+        logger.info("[PERF] Prompt preparation: %.2fs", prep_duration)
+
         if state.get("search_before_planning"):
+            search_start = time.time()
             config = {"configurable": {"user_id": state.get("user_id")}}
             searched_content = tavily_tool.invoke(
                 {
@@ -254,15 +269,38 @@ async def planner_node(state: State) -> Command[Literal["publisher", "__end__"]]
                 },
                 config=config,
             )
+            search_time = time.time() - search_start
+            logger.info("[PERF] Web search: %.2fs", search_time)
+
             messages = deepcopy(messages)
             messages[-1]["content"] += (
                 f"\n\n# Relative Search Results\n\n{json.dumps([{'titile': elem['title'], 'content': elem['content']} for elem in searched_content], ensure_ascii=False)}"
             )
+
         cache.restore_system_node(state["workflow_id"], PLANNER, state["user_id"])
-        response = llm.stream(messages)
-        for chunk in response:
+
+        # Log LLM call start
+        llm_start = time.time()
+        model_type = "reasoning" if state.get("deep_thinking_mode") else AGENT_LLM_MAP["planner"]
+        logger.info("[PERF] Starting LLM call (model: %s)...", model_type)
+
+        # Use async streaming with real-time display
+        response = llm.astream(messages)
+        chunk_count = 0
+        async for chunk in response:
             if chunk.content:
                 content += chunk.content  # type: ignore
+                # Real-time streaming output to user
+                print(chunk.content, end="", flush=True)
+                chunk_count += 1
+
+        # Add newline after streaming completes
+        if chunk_count > 0:
+            print()  # Newline after streaming
+
+        llm_time = time.time() - llm_start
+        logger.info("[PERF] LLM call completed: %.2fs", llm_time)
+
         content = clean_response_tags(content)
         retry_messages = messages
         retry_llm = llm
@@ -272,6 +310,7 @@ async def planner_node(state: State) -> Command[Literal["publisher", "__end__"]]
         )
 
     elif state["workflow_mode"] == "polish" and state.get("polish_target") == "planner":
+        polish_start = time.time()
         state["historical_plan"] = cache.get_planning_steps(state["workflow_id"])
         state["adjustment_instruction"] = state.get("polish_instruction")
 
@@ -279,7 +318,12 @@ async def planner_node(state: State) -> Command[Literal["publisher", "__end__"]]
         llm = get_llm_by_type(AGENT_LLM_MAP["planner"])
         if state.get("deep_thinking_mode"):
             llm = get_llm_by_type("reasoning")
+
+        prep_time = time.time()
+        logger.info("[PERF] Polish prompt preparation: %.2fs", prep_time - polish_start)
+
         if state.get("search_before_planning"):
+            search_start = time.time()
             config = {"configurable": {"user_id": state.get("user_id")}}
             searched_content = tavily_tool.invoke(
                 {
@@ -291,21 +335,52 @@ async def planner_node(state: State) -> Command[Literal["publisher", "__end__"]]
                 },
                 config=config,
             )
+            search_time = time.time() - search_start
+            logger.info("[PERF] Polish web search: %.2fs", search_time)
+
             messages = deepcopy(messages)
             messages[-1]["content"] += (
                 f"\n\n# Relative Search Results\n\n{json.dumps([{'titile': elem['title'], 'content': elem['content']} for elem in searched_content], ensure_ascii=False)}"
             )
 
-        response = await llm.ainvoke(messages)
-        content = clean_response_tags(response.content)  # type: ignore
+        llm_start = time.time()
+        model_type = "reasoning" if state.get("deep_thinking_mode") else AGENT_LLM_MAP["planner"]
+        logger.info("[PERF] Polish starting LLM call (model: %s)...", model_type)
+
+        # Use async streaming with real-time display for polish mode
+        response = llm.astream(messages)
+        polish_content = ""
+        chunk_count = 0
+        async for chunk in response:
+            if chunk.content:
+                polish_content += chunk.content  # type: ignore
+                # Real-time streaming output to user
+                print(chunk.content, end="", flush=True)
+                chunk_count += 1
+
+        # Add newline after streaming completes
+        if chunk_count > 0:
+            print()  # Newline after streaming
+
+        llm_time = time.time() - llm_start
+        logger.info("[PERF] Polish LLM call completed: %.2fs", llm_time)
+
+        content = clean_response_tags(polish_content)
 
     raw_content = content
     message_content = content
 
     if state["workflow_mode"] in ["launch", "polish"]:
+        parse_start = time.time()
         steps = _extract_plan_steps(raw_content)
+        parse_time = time.time() - parse_start
+        logger.info("[PERF] JSON parsing: %.2fs", parse_time)
+
         if steps is None and state["workflow_mode"] == "launch" and retry_messages and retry_llm:
             try:
+                retry_start = time.time()
+                logger.warning("[PERF] JSON parsing failed, retrying...")
+
                 retry_note = (
                     "仅输出JSON格式的计划，不要解释或补充文字。"
                     "必须使用 {\"steps\": [...]} 结构。"
@@ -314,12 +389,19 @@ async def planner_node(state: State) -> Command[Literal["publisher", "__end__"]]
                 retry_payload.append({"role": "user", "content": retry_note})
                 retry_response = await retry_llm.ainvoke(retry_payload)
                 retry_content = clean_response_tags(getattr(retry_response, "content", ""))
+
+                retry_time = time.time() - retry_start
+                logger.info("[PERF] Retry LLM call: %.2fs", retry_time)
+
                 if retry_content:
                     steps = _extract_plan_steps(retry_content)
                     if steps is not None:
                         raw_content = retry_content
+                        logger.info("[PERF] Retry succeeded")
+                    else:
+                        logger.warning("[PERF] Retry failed: still cannot parse JSON")
             except Exception as exc:
-                logger.warning("Planner retry failed: %s", exc)
+                logger.warning("[PERF] Retry exception: %s", exc)
         if steps is not None:
             cache.restore_planning_steps(state["workflow_id"], steps, state["user_id"])
             message_content = json.dumps({"steps": steps}, indent=2, ensure_ascii=False)
@@ -329,6 +411,12 @@ async def planner_node(state: State) -> Command[Literal["publisher", "__end__"]]
             logger.warning("Planner response is not a valid JSON \n")
             goto = "__end__"
         cache.restore_system_node(state["workflow_id"], goto, state["user_id"])
+
+    total_time = time.time() - start_time
+    logger.info("=" * 60)
+    logger.info("[PERF] PLANNER TOTAL TIME: %.2fs (mode: %s)", total_time, state["workflow_mode"])
+    logger.info("=" * 60)
+
     return Command(
         update={
             "messages": [{"content": message_content, "tool": "planner", "role": "assistant"}],

@@ -70,8 +70,6 @@ interface Step {
 }
 
 interface PlanWithAgents {
-  thought: string;
-  title: string;
   new_agents_needed: NewAgent[];
   steps: Step[];
 }
