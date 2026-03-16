@@ -1,20 +1,29 @@
 import logging
 import hashlib
 import asyncio
-from typing import Any
+from typing import Any, Optional
 from collections.abc import AsyncGenerator
 from src.workflow import build_graph
 from src.manager import agent_manager
 from rich.console import Console
 from src.interface.agent import State
-from src.service.env import USE_BROWSER
+from src.service.env import USE_BROWSER, AUTO_RECOVERY_ENABLED
 from src.workflow.cache import workflow_cache as cache
 from src.workflow.graph import CompiledWorkflow
 from src.interface.agent import WorkMode
 from src.manager.registry import ToolRegistry
 from src.robust.checkpoint import CheckpointManager
 from src.robust.task_logger import TaskLogger
+from src.llm.llm import get_llm_by_type
 from src.manager.resource import get_resource_registry
+
+# Hook system imports
+from src.robust.hooks import (
+    HookEngine,
+    HookContext,
+    HookPoint,
+    initialize_hook_system,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -250,6 +259,15 @@ async def _process_workflow(
         task_id = CheckpointManager.generate_task_id(workflow_id)
     task_logger = TaskLogger(task_id=task_id, workflow_id=workflow_id, user_query=user_query)
 
+    # Initialize hook system (controlled by AUTO_RECOVERY_ENABLED)
+    hook_engine = None
+    if AUTO_RECOVERY_ENABLED:
+        initialize_hook_system()
+        hook_engine = HookEngine()
+    
+    # Prepare LLM client for handlers
+    llm_client = get_llm_by_type("reasoning")
+
     yield {
         "event": "start_of_workflow",
         "data": {"workflow_id": workflow_id, "task_id": task_id, "input": initial_state["messages"]},
@@ -261,7 +279,7 @@ async def _process_workflow(
 
         # Resume logic: Check if we are in a mode that supports resuming or resume_step is specified
         # This must be AFTER initializing current_node and state, so we can override them
-        should_resume = resume_step is not None or initial_state.get("workflow_mode") in [WorkMode.POLISH, WorkMode.PRODUCTION]
+        should_resume = resume_step is not None
         
         if should_resume:
             try:
@@ -293,6 +311,22 @@ async def _process_workflow(
             # Note: state["next"] is set by publisher in the previous iteration
             sub_agent_name = state.get("next") if agent_name == "agent_proxy" else None
             task_logger.log_agent_start(node_name=original_node_name, step=step_count, sub_agent_name=sub_agent_name)
+
+            # === Hook: NODE_START ===
+            if hook_engine:
+                hook_ctx = HookContext(
+                    task_id=task_id,
+                    workflow_id=workflow_id,
+                    current_node=agent_name,
+                    current_step=step_count,
+                    state=dict(state),
+                    history=task_logger.history,
+                    hook_point=HookPoint.NODE_START,
+                    user_query=user_query,
+                )
+                hook_result = await hook_engine.process(hook_ctx)
+                if hook_result.modified_state:
+                    state = State(**hook_result.modified_state)
 
             # Display name for frontend: agent_proxy【researcher】 format
             display_name = f"{agent_name}【{sub_agent_name}】" if sub_agent_name else agent_name
@@ -367,6 +401,36 @@ async def _process_workflow(
             except Exception as e:
                 logger.error(f"Failed to save checkpoint at step {step_count}: {e}")
 
+            # === Hook: NODE_END ===
+            if hook_engine:
+                hook_ctx = HookContext(
+                    task_id=task_id,
+                    workflow_id=workflow_id,
+                    current_node=next_node,
+                    current_step=step_count,
+                    state=dict(state),
+                    history=task_logger.history,
+                    hook_point=HookPoint.NODE_END,
+                    user_query=user_query,
+                    last_message=content if 'content' in dir() else None,
+                    last_agent=sub_agent_name,
+                )
+                hook_result = await hook_engine.process(hook_ctx)
+                if hook_result.modified_state:
+                    state = State(**hook_result.modified_state)
+                # Handle recovery from hook result
+                if hook_result.resume_step is not None and hook_result.modified_state:
+                    # Recovery triggered, resume workflow
+                    logger.info(f"Hook triggered recovery, resuming from step {hook_result.resume_step}")
+                    async for event_data in _process_workflow(
+                        workflow,
+                        hook_result.modified_state,
+                        resume_step=hook_result.resume_step,
+                        task_id=task_id,
+                    ):
+                        yield event_data
+                    return
+
             # Use sub_agent_name for display in end_of_agent event
             end_display_name = f"{original_node_name}【{sub_agent_name}】" if sub_agent_name else original_node_name
             yield {
@@ -381,6 +445,37 @@ async def _process_workflow(
             current_node = next_node
 
         task_logger.log_workflow_end()
+
+        # === Hook: WORKFLOW_END ===
+        if hook_engine:
+            hook_ctx = HookContext(
+                task_id=task_id,
+                workflow_id=workflow_id,
+                current_node="__end__",
+                current_step=step_count,
+                state=dict(state),
+                history=task_logger.history,
+                hook_point=HookPoint.WORKFLOW_END,
+                workflow_status="completed",
+                user_query=user_query,
+            )
+            # Inject dependencies for handlers
+            hook_ctx.state["__llm_client__"] = llm_client
+            hook_ctx.state["__checkpoint_manager__"] = checkpoint_manager
+            
+            hook_result = await hook_engine.process(hook_ctx)
+            
+            # Handle recovery from workflow_end hook
+            if hook_result.resume_step is not None and hook_result.modified_state:
+                logger.info(f"Workflow end hook triggered recovery, resuming from step {hook_result.resume_step}")
+                async for event_data in _process_workflow(
+                    workflow,
+                    hook_result.modified_state,
+                    resume_step=hook_result.resume_step,
+                    task_id=task_id,
+                ):
+                    yield event_data
+                return
 
         yield {
             "event": "end_of_workflow",
@@ -399,6 +494,40 @@ async def _process_workflow(
         traceback.print_exc()
         logger.error("Error in Agent workflow: %s", str(e))
         task_logger.log_error(error=str(e), node_name=current_node or "system", step=step_count)
+        
+        # === Hook: ERROR ===
+        if hook_engine:
+            hook_ctx = HookContext(
+                task_id=task_id,
+                workflow_id=workflow_id,
+                current_node=current_node,
+                current_step=step_count,
+                state=dict(state) if 'state' in dir() else {},
+                history=task_logger.history,
+                error=e,
+                error_message=str(e),
+                hook_point=HookPoint.ERROR,
+                workflow_status="failed",
+                user_query=user_query,
+            )
+            # Inject dependencies for handlers
+            hook_ctx.state["__llm_client__"] = llm_client
+            hook_ctx.state["__checkpoint_manager__"] = checkpoint_manager
+            
+            hook_result = await hook_engine.process(hook_ctx)
+            
+            # Handle recovery from error hook
+            if hook_result.resume_step is not None and hook_result.modified_state:
+                logger.info(f"Error hook triggered recovery, resuming from step {hook_result.resume_step}")
+                async for event_data in _process_workflow(
+                    workflow,
+                    hook_result.modified_state,
+                    resume_step=hook_result.resume_step,
+                    task_id=task_id,
+                ):
+                    yield event_data
+                return
+        
         yield {
             "event": "error",
             "data": {

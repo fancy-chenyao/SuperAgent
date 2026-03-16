@@ -36,3 +36,4 @@ blackd.log
 .mypy_cache/
 .dmypy.json
 dmypy.json
+/.qoder
