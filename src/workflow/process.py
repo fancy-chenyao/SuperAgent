@@ -1,7 +1,9 @@
 import logging
 import hashlib
 import asyncio
-from typing import Any, Optional
+import json
+from typing import Any
+from collections import deque
 from collections.abc import AsyncGenerator
 from src.workflow import build_graph
 from src.manager import agent_manager
@@ -39,6 +41,135 @@ def enable_debug_logging():
 
 
 logger = logging.getLogger(__name__)
+
+
+def _normalize_planning_steps(raw: Any) -> list:
+    if raw is None:
+        return []
+    if isinstance(raw, list):
+        return raw
+    if isinstance(raw, dict):
+        steps = raw.get("steps") or raw.get("planning_steps")
+        return steps if isinstance(steps, list) else []
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            return []
+        try:
+            parsed = json.loads(text)
+        except Exception:
+            return []
+        return _normalize_planning_steps(parsed)
+    return []
+
+
+async def _prepare_execution_graph(workflow_id: str, user_id: str) -> None:
+    workflow = cache.cache.get(workflow_id)
+    if not workflow:
+        cache._load_workflow(user_id)
+        workflow = cache.cache.get(workflow_id)
+    if not workflow:
+        raise ValueError("workflow not found for execution")
+
+    steps = _normalize_planning_steps(cache.get_planning_steps(workflow_id))
+    if not steps:
+        raise ValueError("no planning steps found for execution")
+
+    await agent_manager.ensure_initialized()
+    nodes = workflow.get("nodes") if isinstance(workflow.get("nodes"), dict) else {}
+    graph = workflow.get("graph") if isinstance(workflow.get("graph"), list) else []
+    system_graph = [
+        node
+        for node in graph
+        if isinstance(node, dict) and (node.get("config") or {}).get("node_type") == "system_agent"
+    ]
+
+    exec_graph = []
+    missing = []
+    for idx, step in enumerate(steps):
+        if not isinstance(step, dict):
+            missing.append(f"step_{idx + 1}")
+            continue
+        agent_name = step.get("agent_name")
+        if not agent_name:
+            missing.append(f"step_{idx + 1}")
+            continue
+        agent = await agent_manager.agent_registry.get(agent_name)
+        if agent is None:
+            missing.append(agent_name)
+            continue
+
+        tools = []
+        for tool in agent.selected_tools:
+            tools.append(
+                {
+                    "component_type": "function",
+                    "label": tool.name,
+                    "name": tool.name,
+                    "config": {
+                        "name": tool.name,
+                        "description": tool.description,
+                    },
+                }
+            )
+
+        nodes[agent_name] = {
+            "component_type": "agent",
+            "label": agent.agent_name,
+            "name": agent.agent_name,
+            "config": {
+                "type": "execution_agent",
+                "name": agent.agent_name,
+                "description": agent.description,
+                "tools": tools,
+                "prompt": agent.prompt,
+                "llm_type": agent.llm_type,
+            },
+        }
+
+        exec_graph.append(
+            {
+                "component_type": "agent",
+                "label": agent.agent_name,
+                "name": agent.agent_name,
+                "config": {
+                    "node_name": agent.agent_name,
+                    "node_type": "execution_agent",
+                    "next_to": [],
+                    "condition": "supervised",
+                },
+            }
+        )
+
+    if missing:
+        raise ValueError(f"missing agents for execution: {', '.join(missing)}")
+
+    for i, node in enumerate(exec_graph):
+        if i + 1 < len(exec_graph):
+            node["config"]["next_to"] = [exec_graph[i + 1]["config"]["node_name"]]
+        else:
+            node["config"]["next_to"] = []
+
+    workflow["planning_steps"] = steps
+    workflow["nodes"] = nodes
+    workflow["graph"] = system_graph + exec_graph
+    cache.cache[workflow_id] = workflow
+    cache.save_workflow(workflow)
+
+    cache.queue[workflow_id] = deque(exec_graph)
+    if exec_graph:
+        begin_node = {
+            "component_type": "agent",
+            "label": "begin_node",
+            "name": "begin_node",
+            "config": {
+                "node_name": "begin_node",
+                "node_type": "execution_agent",
+                "next_to": [exec_graph[0]["config"]["node_name"]],
+                "condition": "supervised",
+            },
+        }
+        cache.queue[workflow_id].appendleft(begin_node)
 
 if USE_BROWSER:
     DEFAULT_TEAM_MEMBERS_DESCRIPTION = """
@@ -157,6 +288,9 @@ async def run_agent_workflow(
     polish_instruction: str = None,
     resume_step: int = None,
     task_id: str = None,
+    stop_after_planner: bool = False,
+    instruction: str | None = None,
+    instruction_history: list[str] | None = None,
 ):
     """Run the agent workflow with the given user input.
 
@@ -194,6 +328,14 @@ async def run_agent_workflow(
         search_before_planning=search_before_planning,
         coor_agents=coor_agents,
     )
+
+    if instruction_history is not None:
+        cache.set_instruction_history(workflow_id, instruction_history, user_id=user_id)
+    elif instruction:
+        cache.append_instruction(workflow_id, instruction, user_id=user_id)
+
+    if workmode == "production":
+        await _prepare_execution_graph(workflow_id, user_id)
 
     # Generate a unique task_id for this execution instance if not provided
     if not task_id:
@@ -236,6 +378,8 @@ async def run_agent_workflow(
             "workflow_mode": workmode,
             "polish_instruction": polish_instruction,
             "initialized": False,
+            "stop_after_planner": stop_after_planner,
+            "instruction_history": cache.get_instruction_history(workflow_id),
         },
         resume_step=resume_step,
         task_id=task_id,

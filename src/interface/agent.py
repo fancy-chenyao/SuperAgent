@@ -125,6 +125,9 @@ class AgentRequest(BaseModel):
     coor_agents: Optional[list[str]]
     workmode: WorkMode
     workflow_id: Optional[str] = None
+    stop_after_planner: bool = False
+    instruction: Optional[str] = None
+    instruction_history: Optional[list[str]] = None
 
 
 class listAgentRequest(BaseModel):
@@ -158,6 +161,8 @@ class State(MessagesState):
     workflow_id: str
     workflow_mode: WorkMode
     initialized: bool
+    stop_after_planner: bool
+    instruction_history: list[str]
 
 
 class RemoveAgentRequest(BaseModel):

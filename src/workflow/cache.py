@@ -70,75 +70,95 @@ class WorkflowCache:
             raise e
 
     def init_cache(self, user_id: str, lap: int, mode: str, workflow_id: str, version: int, user_input_messages: list, deep_thinking_mode: bool, search_before_planning: bool, coor_agents: list[str], load_user_workflow: bool = True):
-        """初始化工作流缓存
-        
+        """Initialize workflow cache.
+
         Args:
-            user_id: 用户ID
-            lap: 迭代轮次
-            mode: 工作模式（launch/production等）
-            workflow_id: 工作流ID
-            version: 版本号
-            user_input_messages: 用户输入消息
-            deep_thinking_mode: 深度思考模式
-            search_before_planning: 规划前搜索
-            coor_agents: 协调器代理列表
-            load_user_workflow: 是否加载用户工作流
+            user_id: User ID
+            lap: Iteration counter
+            mode: Work mode (launch/production)
+            workflow_id: Workflow ID
+            version: Version
+            user_input_messages: User input messages
+            deep_thinking_mode: Deep thinking mode
+            search_before_planning: Search before planning
+            coor_agents: Coordinator agent list
+            load_user_workflow: Whether to load user workflows
         """
         try:
             self._load_workflow(user_id)
             with self._lock_pool[user_id]:
                 if mode == "launch":
-                    # 新建工作流：使用模板初始化
-                    self.cache[workflow_id] = WORKFLOW_TEMPLATE.copy()
-                    self.cache[workflow_id]["mode"] = mode
-                    self.cache[workflow_id]["lap"] = lap
-                    self.cache[workflow_id]["workflow_id"] = workflow_id
-                    self.cache[workflow_id]["version"] = version
-                    self.cache[workflow_id]["user_input_messages"] = user_input_messages
-                    self.cache[workflow_id]["deep_thinking_mode"] = deep_thinking_mode
-                    self.cache[workflow_id]["search_before_planning"] = search_before_planning
-                    self.cache[workflow_id]["coor_agents"] = coor_agents
+                    if workflow_id in self.cache:
+                        workflow = self.cache[workflow_id]
+                        workflow["mode"] = mode
+                        workflow["lap"] = lap
+                        workflow["workflow_id"] = workflow_id
+                        workflow["version"] = version
+                        workflow["user_input_messages"] = user_input_messages
+                        workflow["deep_thinking_mode"] = deep_thinking_mode
+                        workflow["search_before_planning"] = search_before_planning
+                        workflow["coor_agents"] = coor_agents
+                        if "instruction_history" not in workflow:
+                            workflow["instruction_history"] = []
+                        self.cache[workflow_id] = workflow
+                    else:
+                        # New workflow: initialize from template
+                        self.cache[workflow_id] = WORKFLOW_TEMPLATE.copy()
+                        self.cache[workflow_id]["mode"] = mode
+                        self.cache[workflow_id]["lap"] = lap
+                        self.cache[workflow_id]["workflow_id"] = workflow_id
+                        self.cache[workflow_id]["version"] = version
+                        self.cache[workflow_id]["user_input_messages"] = user_input_messages
+                        self.cache[workflow_id]["deep_thinking_mode"] = deep_thinking_mode
+                        self.cache[workflow_id]["search_before_planning"] = search_before_planning
+                        self.cache[workflow_id]["coor_agents"] = coor_agents
+                        if "instruction_history" not in self.cache[workflow_id]:
+                            self.cache[workflow_id]["instruction_history"] = []
                 else:
-                    # 恢复工作流：从文件加载
+                    # Recover workflow from file
                     try:
                         if workflow_id not in self.cache:
-                            #todo: user workflow.json file not exist, how to handle?
+                            # todo: user workflow.json file not exist, how to handle?
                             user_id, polish_id = workflow_id.split(":")
                             user_workflow_dir = self.workflow_dir / user_id
                             user_workflow_file = user_workflow_dir / polish_id
-                            with open(str(user_workflow_file) + '.json', 'r', encoding='utf-8') as f:
+                            with open(str(user_workflow_file) + ".json", "r", encoding="utf-8") as f:
                                 workflow = json.load(f)
                                 if workflow:
                                     self.cache[workflow["workflow_id"]] = workflow
+                                    if "instruction_history" not in self.cache[workflow["workflow_id"]]:
+                                        self.cache[workflow["workflow_id"]]["instruction_history"] = []
                                 else:
                                     logger.error(f"Error loading workflow {user_workflow_file} for user {user_id}: {e}")
                                     raise Exception(f"Error loading workflow {user_workflow_file} for user {user_id}")
 
-                        # 初始化执行队列
+                        # Initialize execution queue
                         self.queue[workflow_id] = deque()
                         for agent in self.cache[workflow_id]["graph"]:
                             if agent["config"]["node_type"] == "execution_agent":
                                 self.queue[workflow_id].append(agent)
-                        # 添加起始节点
-                        begin_node = {
-                            "component_type": "agent",
-                            "label": "begin_node",
-                            "name": "begin_node",
-                            "config": {
-                                "node_name": "begin_node",
-                                "node_type": "execution_agent",
-                                "next_to": [self.queue[workflow_id][0]["config"]["node_name"]],
-                                "condition": "supervised"
+                        # Add begin node only when execution queue is ready
+                        if self.queue[workflow_id]:
+                            begin_node = {
+                                "component_type": "agent",
+                                "label": "begin_node",
+                                "name": "begin_node",
+                                "config": {
+                                    "node_name": "begin_node",
+                                    "node_type": "execution_agent",
+                                    "next_to": [self.queue[workflow_id][0]["config"]["node_name"]],
+                                    "condition": "supervised"
+                                }
                             }
-                        }
-                        self.queue[workflow_id].appendleft(begin_node)
+                            self.queue[workflow_id].appendleft(begin_node)
+                        else:
+                            logger.warning("Execution queue is empty for workflow %s", workflow_id)
                     except Exception as e:
                         logger.error(f"Error initializing workflow cache: {e}")
                         raise e
         except Exception as e:
             logger.error(f"Error initializing workflow cache: {e}")
             raise e
-    
     def list_workflows(self, user_id: str, match: str = None):
         """列出指定用户的所有工作流，可选正则匹配
         
@@ -415,6 +435,47 @@ class WorkflowCache:
                     logger.warning(f"Mermaid visualization not saved for {workflow_id}")
         except Exception as e:
             logger.error(f"Error dumping workflow: {e}")
+
+    def get_instruction_history(self, workflow_id: str) -> list:
+        workflow = self.cache.get(workflow_id)
+        if not workflow:
+            return []
+        history = workflow.get("instruction_history", [])
+        return history if isinstance(history, list) else []
+
+    def set_instruction_history(self, workflow_id: str, history: list, user_id: str | None = None) -> None:
+        if workflow_id not in self.cache:
+            if user_id is None:
+                try:
+                    user_id = workflow_id.split(":")[0]
+                except Exception:
+                    return
+            self._load_workflow(user_id)
+        workflow = self.cache.get(workflow_id)
+        if not workflow:
+            return
+        workflow["instruction_history"] = list(history) if isinstance(history, list) else []
+        self.save_workflow(workflow)
+
+    def append_instruction(self, workflow_id: str, instruction: str, user_id: str | None = None) -> None:
+        if not instruction:
+            return
+        if workflow_id not in self.cache:
+            if user_id is None:
+                try:
+                    user_id = workflow_id.split(":")[0]
+                except Exception:
+                    return
+            self._load_workflow(user_id)
+        workflow = self.cache.get(workflow_id)
+        if not workflow:
+            return
+        history = workflow.get("instruction_history", [])
+        if not isinstance(history, list):
+            history = []
+        history.append(instruction)
+        workflow["instruction_history"] = history
+        self.save_workflow(workflow)
     def save_workflow(self, workflow):
         """保存工作流到文件
         

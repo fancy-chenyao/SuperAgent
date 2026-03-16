@@ -56,6 +56,9 @@ class Server:
             coor_agents=request.coor_agents,
             workmode=request.workmode,
             workflow_id=request.workflow_id,
+            stop_after_planner=getattr(request, "stop_after_planner", False),
+            instruction=getattr(request, "instruction", None),
+            instruction_history=getattr(request, "instruction_history", None),
         )
         async for res in response_stream:
             try:
@@ -100,6 +103,9 @@ class Server:
             workmode=request.workmode,
             workflow_id=request.workflow_id,
             resume_step=resume_step,
+            stop_after_planner=getattr(request, "stop_after_planner", False),
+            instruction=getattr(request, "instruction", None),
+            instruction_history=getattr(request, "instruction_history", None),
         )
         async for res in response_stream:
             try:

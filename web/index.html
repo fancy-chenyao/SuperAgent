@@ -97,6 +97,24 @@
                     <div id="summaryFlow" class="flow-track"></div>
                     <div id="summaryHint" class="summary-hint hidden">Workflow completed.</div>
                   </div>
+                  <div class="summary-plan">
+                    <div class="label">Plan Preview</div>
+                    <div id="planSummary" class="plan-summary"></div>
+                    <div id="planHint" class="summary-hint hidden">No plan available.</div>
+                  </div>
+                </div>
+
+                <div class="summary-card plan-editor-card">
+                  <div class="summary-header">
+                    <h3>Plan Feedback</h3>
+                  </div>
+                  <div class="plan-editor-actions">
+                    <button id="nlPlanEdit" class="primary">自然语言改写</button>
+                    <button id="confirmExecute" class="ghost">确认执行</button>
+                    <button id="retryPlan" class="ghost">重试规划</button>
+                  </div>
+                  <div id="planValidationHint" class="summary-hint hidden">Validation hint</div>
+                  <div id="planEditorList" class="plan-editor-list"></div>
                 </div>
 
                 <div class="output-card">
@@ -120,16 +138,59 @@
             </div>
           </section>
 
+          <div id="planModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="planModalTitle">
+            <div class="modal-backdrop"></div>
+            <div class="modal-card">
+              <div class="modal-header">
+                <h3 id="planModalTitle">新增/修改步骤（自然语言）</h3>
+                <button id="closePlanModal" class="ghost">Close</button>
+              </div>
+              <div class="modal-body">
+                <p class="modal-hint">用业务语言描述你的修改，例如“新增一步：先确认景区位置，再查天气”或“把第二步改成更简短的报告”。</p>
+                <textarea id="planNlInput" rows="6" placeholder="请输入自然语言修改指令..."></textarea>
+                <div id="planNlHint" class="summary-hint hidden">处理中...</div>
+              </div>
+              <div class="modal-actions">
+                <button id="applyPlanNl" class="primary">Apply</button>
+                <button id="cancelPlanNl" class="ghost">Cancel</button>
+              </div>
+            </div>
+          </div>
+
           <section class="panel" id="panel-agents">
             <div class="panel-header">
               <h2>Agents</h2>
               <p>默认 + 用户自定义代理。</p>
             </div>
-            <div class="panel-body">
-              <div class="panel-actions">
-                <button id="refreshAgents" class="primary">Refresh</button>
+            <div class="panel-body agents-body">
+              <div class="panel-actions agents-toolbar">
+                <div class="agents-search">
+                  <input id="agentsSearch" type="text" placeholder="Search (regex) agent_name..." />
+                  <button id="agentsSearchBtn" class="ghost">Search</button>
+                </div>
+                <div class="agents-filters">
+                  <button class="filter-btn agent-filter active" data-filter="all">All</button>
+                  <button class="filter-btn agent-filter" data-filter="default">Default</button>
+                  <button class="filter-btn agent-filter" data-filter="user">User</button>
+                  <button class="filter-btn agent-filter" data-filter="remote">Remote</button>
+                </div>
+                <div class="agents-meta">
+                  <span id="coorCount" class="coor-count">已选协同代理: 0</span>
+                  <button id="clearCoorBtn" class="ghost">Clear</button>
+                  <button id="healthCheckSelected" class="ghost">Health Check</button>
+                  <button id="refreshAgents" class="primary">Refresh</button>
+                </div>
               </div>
-              <div id="agentsList" class="card-grid" aria-live="polite"></div>
+              <div class="agents-layout">
+                <div>
+                  <div id="agentsList" class="card-grid" aria-live="polite"></div>
+                </div>
+                <aside class="agent-detail" id="agentDetail">
+                  <div class="agent-detail-empty">
+                    选择一个 Agent 查看详情
+                  </div>
+                </aside>
+              </div>
             </div>
           </section>
 
@@ -138,11 +199,48 @@
               <h2>Tools</h2>
               <p>全局工具列表。</p>
             </div>
-            <div class="panel-body">
-              <div class="panel-actions">
-                <button id="refreshTools" class="primary">Refresh</button>
+            <div class="panel-body tools-body">
+              <div class="panel-actions tools-toolbar">
+                <div class="tools-search">
+                  <input id="toolsSearch" type="text" placeholder="Search tool name or description..." />
+                  <button id="toolsSearchBtn" class="ghost">Search</button>
+                </div>
+                <div class="tools-filters">
+                  <select id="toolsSourceFilter">
+                    <option value="all">All sources</option>
+                    <option value="builtin">Builtin</option>
+                    <option value="mcp">MCP</option>
+                  </select>
+                  <select id="toolsScopeFilter">
+                    <option value="all">All scopes</option>
+                    <option value="global">Global</option>
+                    <option value="agent">Agent</option>
+                  </select>
+                  <select id="toolsSort">
+                    <option value="name">Sort: name</option>
+                    <option value="last_used">Sort: last used</option>
+                  </select>
+                </div>
+                <div class="tools-meta">
+                  <span id="toolsCountTotal" class="meta-pill">Total: 0</span>
+                  <span id="toolsCountBuiltin" class="meta-pill">Builtin: 0</span>
+                  <span id="toolsCountMcp" class="meta-pill">MCP: 0</span>
+                  <button id="refreshTools" class="primary">Refresh</button>
+                </div>
               </div>
-              <div id="toolsList" class="card-grid" aria-live="polite"></div>
+              <div class="tools-layout">
+                <div>
+                  <div id="toolsList" class="card-grid" aria-live="polite"></div>
+                </div>
+                <aside class="tool-detail" id="toolDetail">
+                  <div class="tool-detail-empty">选择一个 Tool 查看详情</div>
+                </aside>
+              </div>
+              <div class="detail-card mcp-card">
+                <h3>MCP Servers</h3>
+                <div id="mcpSummary" class="meta-row"></div>
+                <div id="mcpList" class="list"></div>
+              </div>
             </div>
           </section>
 

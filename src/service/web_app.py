@@ -1,16 +1,20 @@
 import asyncio
 import json
+import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any, AsyncGenerator, Optional
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+import httpx
 from pydantic import BaseModel
 
 from src.interface.agent import AgentRequest
 from src.manager import agent_manager
 from src.manager.registry import ToolRegistry
+from src.manager.mcp import mcp_client_config, mcp_config_fingerprint
 from src.service.server import Server
 from src.utils.path_utils import get_project_root
 from src.workflow.cache import workflow_cache
@@ -48,6 +52,122 @@ def _read_mermaid_from_md(md_text: str) -> Optional[str]:
     if end_idx == -1:
         return None
     return md_text[start_idx:end_idx].strip()
+
+
+def _parse_timestamp(raw: Any) -> Optional[datetime]:
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        return datetime.fromisoformat(text)
+    except Exception:
+        return None
+
+
+def _collect_workflow_files(base_dir: Path, user_id: str) -> list[Path]:
+    user_dir = base_dir / user_id
+    if not user_dir.exists():
+        return []
+    return [p for p in user_dir.glob("*.json") if p.is_file()]
+
+
+def _workflow_last_used(workflow: dict) -> Optional[datetime]:
+    messages = workflow.get("user_input_messages", []) or []
+    latest = None
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        ts = _parse_timestamp(msg.get("timestamp"))
+        if ts and (latest is None or ts > latest):
+            latest = ts
+    return latest
+
+
+def _format_datetime(dt: Optional[datetime]) -> Optional[str]:
+    if dt is None:
+        return None
+    try:
+        return dt.isoformat()
+    except Exception:
+        return None
+
+
+def _extract_tool_name(tool_entry: Any) -> str:
+    if isinstance(tool_entry, str):
+        return tool_entry
+    if isinstance(tool_entry, dict):
+        name = tool_entry.get("name") or tool_entry.get("tool") or tool_entry.get("tool_name")
+        if name:
+            return str(name)
+        config = tool_entry.get("config") or {}
+        if isinstance(config, dict):
+            name = config.get("name") or config.get("tool") or config.get("tool_name")
+            if name:
+                return str(name)
+    return ""
+
+
+def _extract_tools_from_node(node: Any) -> list[str]:
+    if not isinstance(node, dict):
+        return []
+    config = node.get("config") or {}
+    tools = None
+    if isinstance(config, dict):
+        tools = config.get("tools")
+    if tools is None:
+        tools = node.get("tools")
+    if not isinstance(tools, list):
+        return []
+    names: list[str] = []
+    for tool in tools:
+        name = _extract_tool_name(tool)
+        if name:
+            names.append(name)
+    return names
+
+
+def _extract_tools_from_workflow(workflow: dict) -> list[str]:
+    names: list[str] = []
+    graph = workflow.get("graph")
+    if isinstance(graph, list):
+        for node in graph:
+            names.extend(_extract_tools_from_node(node))
+    nodes = workflow.get("nodes")
+    if isinstance(nodes, dict):
+        for node in nodes.values():
+            names.extend(_extract_tools_from_node(node))
+    return names
+
+
+def _get_args_schema(tool: Any) -> Optional[dict[str, Any]]:
+    args_schema = getattr(tool, "args_schema", None)
+    if args_schema is None:
+        return None
+    try:
+        if hasattr(args_schema, "model_json_schema"):
+            return args_schema.model_json_schema()
+        if hasattr(args_schema, "schema"):
+            return args_schema.schema()
+    except Exception:
+        return None
+    return None
+
+
+def _build_health_fallback(endpoint: str) -> Optional[str]:
+    try:
+        url = httpx.URL(endpoint)
+    except Exception:
+        return None
+    if not url.scheme or not url.host:
+        return None
+    base = f"{url.scheme}://{url.host}"
+    if url.port:
+        base = f"{base}:{url.port}"
+    return f"{base}/health"
 
 
 def create_app() -> FastAPI:
@@ -99,6 +219,145 @@ def create_app() -> FastAPI:
         agents = await agent_manager.agent_registry.list(user_id="share")
         return [agent.model_dump() for agent in agents]
 
+    @app.get("/api/agents/health")
+    async def get_agents_health(
+        user_id: Optional[str] = None,
+        include_share: bool = True,
+        agent_names: Optional[str] = None,
+    ):
+        await agent_manager.ensure_initialized()
+        users = []
+        if user_id:
+            users.append(user_id)
+        if include_share or not users:
+            if "share" not in users:
+                users.append("share")
+
+        agents = []
+        for uid in users:
+            agents.extend(await agent_manager.agent_registry.list(user_id=uid))
+        if agent_names:
+            wanted = {name.strip() for name in agent_names.split(",") if name.strip()}
+            if wanted:
+                agents = [agent for agent in agents if agent.agent_name in wanted]
+
+        async def _probe(agent, client: httpx.AsyncClient):
+            if getattr(agent, "source", None) != "remote":
+                return agent.agent_name, {"status": "local", "latency_ms": None, "error": None}
+            endpoint = getattr(agent, "endpoint", None)
+            if not endpoint:
+                return agent.agent_name, {"status": "unknown", "latency_ms": None, "error": "missing endpoint"}
+
+            async def _check_url(url: str):
+                check_start = time.perf_counter()
+                resp = await client.get(url)
+                latency = int((time.perf_counter() - check_start) * 1000)
+                return resp, latency
+
+            start = time.perf_counter()
+            try:
+                resp, latency = await _check_url(endpoint)
+                if 200 <= resp.status_code < 300:
+                    return agent.agent_name, {"status": "ok", "latency_ms": latency, "error": None}
+
+                if resp.status_code in {404, 405}:
+                    fallback = _build_health_fallback(endpoint)
+                    if fallback:
+                        try:
+                            fallback_resp, fallback_latency = await _check_url(fallback)
+                            if 200 <= fallback_resp.status_code < 300:
+                                return agent.agent_name, {
+                                    "status": "ok",
+                                    "latency_ms": fallback_latency,
+                                    "error": None,
+                                }
+                            return agent.agent_name, {
+                                "status": "fail",
+                                "latency_ms": fallback_latency,
+                                "error": f"HTTP {resp.status_code} @ endpoint, HTTP {fallback_resp.status_code} @ /health",
+                            }
+                        except Exception as exc:
+                            latency = int((time.perf_counter() - start) * 1000)
+                            return agent.agent_name, {
+                                "status": "fail",
+                                "latency_ms": latency,
+                                "error": f"HTTP {resp.status_code} @ endpoint, fallback error: {exc}",
+                            }
+
+                return agent.agent_name, {
+                    "status": "fail",
+                    "latency_ms": latency,
+                    "error": f"HTTP {resp.status_code}",
+                }
+            except Exception as exc:
+                fallback = _build_health_fallback(endpoint)
+                if fallback:
+                    try:
+                        fallback_resp, fallback_latency = await _check_url(fallback)
+                        if 200 <= fallback_resp.status_code < 300:
+                            return agent.agent_name, {
+                                "status": "ok",
+                                "latency_ms": fallback_latency,
+                                "error": None,
+                            }
+                        return agent.agent_name, {
+                            "status": "fail",
+                            "latency_ms": fallback_latency,
+                            "error": f"endpoint error: {exc}, HTTP {fallback_resp.status_code} @ /health",
+                        }
+                    except Exception:
+                        pass
+                latency = int((time.perf_counter() - start) * 1000)
+                return agent.agent_name, {"status": "fail", "latency_ms": latency, "error": str(exc)}
+
+        async with httpx.AsyncClient(timeout=2.0, follow_redirects=True) as client:
+            results = await asyncio.gather(*[_probe(agent, client) for agent in agents])
+        payload = {name: info for name, info in results}
+        return {"agents": payload, "scope": {"users": users}}
+
+    @app.get("/api/agents/stats")
+    async def get_agents_stats(user_id: Optional[str] = None, include_share: bool = True):
+        project_root = get_project_root()
+        workflows_dir = project_root / "store" / "workflows"
+        users = []
+        if user_id:
+            users.append(user_id)
+        if include_share or not users:
+            if "share" not in users:
+                users.append("share")
+
+        stats: dict[str, dict[str, Any]] = {}
+        workflows_scanned = 0
+        for uid in users:
+            for workflow_path in _collect_workflow_files(workflows_dir, uid):
+                try:
+                    workflow = json.loads(workflow_path.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                workflows_scanned += 1
+                workflow_last = _workflow_last_used(workflow)
+                graph = workflow.get("graph", []) or []
+                for node in graph:
+                    if not isinstance(node, dict):
+                        continue
+                    config = node.get("config") or {}
+                    if config.get("node_type") != "execution_agent":
+                        continue
+                    agent_name = node.get("name") or config.get("node_name")
+                    if not agent_name:
+                        continue
+                    slot = stats.setdefault(agent_name, {"runs": 0, "last_used": None})
+                    slot["runs"] += 1
+                    if workflow_last:
+                        prev = _parse_timestamp(slot["last_used"])
+                        if prev is None or workflow_last > prev:
+                            slot["last_used"] = _format_datetime(workflow_last)
+
+        return {
+            "agents": stats,
+            "scope": {"users": users, "workflows_scanned": workflows_scanned},
+        }
+
     @app.get("/api/tools")
     async def list_tools():
         await agent_manager.ensure_initialized()
@@ -106,12 +365,114 @@ def create_app() -> FastAPI:
         tools = await registry.list_global_tools()
         return [
             {
-                "name": getattr(meta.tool, "name", ""),
+                "name": meta.identifier.name or getattr(meta.tool, "name", ""),
                 "description": meta.description or getattr(meta.tool, "description", ""),
+                "scope": meta.identifier.scope,
+                "server": meta.identifier.server,
+                "version": meta.version,
+                "tags": meta.tags,
+                "is_mcp": meta.identifier.is_mcp,
             }
             for meta in tools
-            if getattr(meta.tool, "name", "")
+            if meta.identifier.name or getattr(meta.tool, "name", "")
         ]
+
+    @app.get("/api/tools/{tool_name}")
+    async def get_tool_detail(tool_name: str):
+        await agent_manager.ensure_initialized()
+        registry = await ToolRegistry.get_instance()
+        tools = await registry.list_all_tools()
+        matches = []
+        for meta in tools:
+            identifier_name = meta.identifier.name
+            runtime_name = getattr(meta.tool, "name", "")
+            if identifier_name == tool_name or runtime_name == tool_name:
+                matches.append(meta)
+        if not matches:
+            raise HTTPException(status_code=404, detail="tool not found")
+
+        matches.sort(
+            key=lambda m: (
+                m.identifier.scope != "global",
+                m.identifier.server != "builtin",
+            )
+        )
+        meta = matches[0]
+        tool_obj = meta.tool
+        return {
+            "name": meta.identifier.name or getattr(tool_obj, "name", ""),
+            "description": meta.description or getattr(tool_obj, "description", ""),
+            "identifier": {
+                "scope": meta.identifier.scope,
+                "server": meta.identifier.server,
+                "name": meta.identifier.name,
+                "is_mcp": meta.identifier.is_mcp,
+            },
+            "scope": meta.identifier.scope,
+            "server": meta.identifier.server,
+            "version": meta.version,
+            "tags": meta.tags,
+            "is_mcp": meta.identifier.is_mcp,
+            "args_schema": _get_args_schema(tool_obj),
+        }
+
+    @app.get("/api/tools/stats")
+    async def get_tools_stats(user_id: Optional[str] = None, include_share: bool = True):
+        project_root = get_project_root()
+        workflows_dir = project_root / "store" / "workflows"
+        users: list[str] = []
+        if user_id:
+            users.append(user_id)
+        if include_share or not users:
+            if "share" not in users:
+                users.append("share")
+
+        stats: dict[str, dict[str, Any]] = {}
+        workflows_scanned = 0
+        for uid in users:
+            for workflow_path in _collect_workflow_files(workflows_dir, uid):
+                try:
+                    workflow = json.loads(workflow_path.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                workflows_scanned += 1
+                workflow_last = _workflow_last_used(workflow)
+                tool_names = set(_extract_tools_from_workflow(workflow))
+                for tool_name in tool_names:
+                    slot = stats.setdefault(tool_name, {"workflows": 0, "last_used": None})
+                    slot["workflows"] += 1
+                    if workflow_last:
+                        prev = slot["last_used"]
+                        if prev is None or workflow_last > prev:
+                            slot["last_used"] = workflow_last
+
+        payload = {
+            name: {
+                "workflows": slot["workflows"],
+                "last_used": _format_datetime(slot["last_used"]),
+            }
+            for name, slot in stats.items()
+        }
+        return {"tools": payload, "scope": {"users": users, "workflows_scanned": workflows_scanned}}
+
+    @app.get("/api/tools/mcp")
+    async def get_mcp_tools_config():
+        config = mcp_client_config()
+        fingerprint = mcp_config_fingerprint()
+        servers = []
+        for name, cfg in config.items():
+            if not isinstance(cfg, dict):
+                continue
+            servers.append(
+                {
+                    "name": name,
+                    "transport": cfg.get("transport"),
+                    "url": cfg.get("url"),
+                    "command": cfg.get("command"),
+                    "args": cfg.get("args"),
+                }
+            )
+        return {"servers": servers, "fingerprint": fingerprint}
 
     @app.get("/api/workflows")
     async def list_workflows(user_id: Optional[str] = None, match: Optional[str] = None):

@@ -30,6 +30,14 @@ You can break down the main topic into subtopics and expand the depth and breadt
 
 <<RESOURCE_CATALOG>>
 
+## Instruction History (All User Inputs)
+
+<<INSTRUCTION_HISTORY_TEXT>>
+
+## Current Plan Draft (if any)
+
+<<CURRENT_PLAN_TEXT>>
+
 ## Plan Generation Execution Standards
 
 - First, restate the user's requirements in your own words as a `thought`, with some of your own thinking.
@@ -62,8 +70,6 @@ interface Step {
 }
 
 interface PlanWithAgents {
-  thought: string;
-  title: string;
   new_agents_needed: NewAgent[];
   steps: Step[];
 }
@@ -75,6 +81,7 @@ interface PlanWithAgents {
 - Ensure that each agent name in the steps list remains unique. Do not duplicate agent names across different planning steps to maintain clear responsibility assignment
 - If existing agents are insufficient to complete the task, provide detailed specifications for the needed new agent.
 - The capabilities of the various agents are limited; you need to carefully read the agent descriptions to ensure you don't assign tasks beyond their abilities.
+- Always base the plan on the full instruction history. If an instruction references an earlier step (e.g., "modify step 2"), use the current plan draft to interpret it.
 - Always use the "code agent" for mathematical calculations, chart drawing.
 - Always use the "reporter" to generate reports, which can be called multiple times throughout the steps, but the reporter can only be used as the **last step** in the steps, as a summary of the entire work.
 - If "new_agents_needed" has content, keep steps empty and explain that creation is not available in this workflow.

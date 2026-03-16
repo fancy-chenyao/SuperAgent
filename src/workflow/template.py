@@ -8,6 +8,7 @@
     "search_before_planning": "false",
     "coor_agents": [],
     "planning_steps": [],
+    "instruction_history": [],
     "global_variables": {
         "has_lauched":"",
         "user_input":"",
