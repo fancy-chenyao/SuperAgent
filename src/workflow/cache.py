@@ -647,10 +647,26 @@ class WorkflowCache:
             mermaid_code += "\n"
 
             # 添加边（连接关系）
-            for node in graph:
+            end_node_added = False
+            for idx, node in enumerate(graph):
                 node_name = node.get("name", "unknown")
                 node_id = id_map.get(node_name, _safe_id(node_name, used_ids))
                 next_to = node.get("config", {}).get("next_to", [])
+
+                # 约定：
+                # - next_to: ["__end__"] 表示进入“命令确认”
+                # - next_to: [] 表示“执行结束”
+                if not next_to:
+                    if not end_node_added:
+                        mermaid_code += "    END[(结束<br>　　　<br>　　　)]\n"
+                        mermaid_code += (
+                            "    style END fill:#ffebee,stroke:#c62828,stroke-width:2px,"
+                            "font-size:16px,font-weight:600\n"
+                        )
+                        end_node_added = True
+                    mermaid_code += f"    {node_id} --> END\n"
+                    continue
+
                 for target in next_to:
                     if target != "__end__":
                         target_id = id_map.get(target)
@@ -660,8 +676,35 @@ class WorkflowCache:
                             mermaid_code += f'    {target_id}[({target})]\n'
                         mermaid_code += f'    {node_id} --> {target_id}\n'
                     else:
-                        mermaid_code += f'    {node_id} --> END[(结束)]\n'
-                        mermaid_code += f'    style END fill:#ffebee,stroke:#c62828,stroke-width:2px\n'
+                        # "__end__" 在这里不是“执行结束”，而是一次“命令确认”拦截点。
+                        # 为了保证后续节点连得上，这里创建一个“确认”中间节点，并连接到 graph 中的下一个节点。
+                        confirm_id = id_map.get(f"{node_name}::__confirm__")
+                        if not confirm_id:
+                            confirm_id = _safe_id(f"{node_id}_confirm", used_ids)
+                            id_map[f"{node_name}::__confirm__"] = confirm_id
+                            mermaid_code += f"    {confirm_id}[(命令确认)]\n"
+                            mermaid_code += (
+                                f"    style {confirm_id} fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px,"
+                                "font-size:14px,font-weight:600\n"
+                            )
+
+                        mermaid_code += f"    {node_id} --> {confirm_id}\n"
+
+                        # 约定：确认完成后继续执行 graph 中紧随其后的节点；若不存在则认为流程结束。
+                        next_node = graph[idx + 1] if idx + 1 < len(graph) else None
+                        next_name = next_node.get("name") if isinstance(next_node, dict) else None
+                        next_id = id_map.get(next_name) if next_name else None
+                        if next_id:
+                            mermaid_code += f"    {confirm_id} --> {next_id}\n"
+                        else:
+                            if not end_node_added:
+                                mermaid_code += "    END[(结束)]\n"
+                                mermaid_code += (
+                                    "    style END fill:#ffebee,stroke:#c62828,stroke-width:2px,"
+                                    "font-size:16px,font-weight:600\n"
+                                )
+                                end_node_added = True
+                            mermaid_code += f"    {confirm_id} --> END\n"
 
             # 保存到文件
             user_id, polish_id = workflow_id.split(":")

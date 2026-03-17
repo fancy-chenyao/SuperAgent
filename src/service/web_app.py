@@ -1,11 +1,13 @@
 import asyncio
 import json
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, AsyncGenerator, Optional
 
-from fastapi import FastAPI, HTTPException, Request
+import math
+
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 import httpx
@@ -85,6 +87,18 @@ def _workflow_last_used(workflow: dict) -> Optional[datetime]:
         if ts and (latest is None or ts > latest):
             latest = ts
     return latest
+
+
+def _workflow_last_used_score(workflow: dict) -> float:
+    dt = _workflow_last_used(workflow)
+    if dt is None:
+        return float("-inf")
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    try:
+        return dt.timestamp()
+    except Exception:
+        return float("-inf")
 
 
 def _format_datetime(dt: Optional[datetime]) -> Optional[str]:
@@ -475,11 +489,39 @@ def create_app() -> FastAPI:
         return {"servers": servers, "fingerprint": fingerprint}
 
     @app.get("/api/workflows")
-    async def list_workflows(user_id: Optional[str] = None, match: Optional[str] = None):
+    async def list_workflows(
+        response: Response,
+        user_id: Optional[str] = None,
+        match: Optional[str] = None,
+        page: int = 1,
+        page_size: int = 5,
+    ):
         if not user_id:
             raise HTTPException(status_code=400, detail="user_id is required")
+        if page < 1:
+            raise HTTPException(status_code=400, detail="page must be >= 1")
+        allowed_page_sizes = {5, 10, 20}
+        if page_size not in allowed_page_sizes:
+            raise HTTPException(status_code=400, detail="page_size must be one of 5, 10, 20")
+
         workflows = await Server._list_workflow_json(user_id=user_id, match=match)
-        return workflows
+
+        workflows.sort(key=lambda wf: str(wf.get("workflow_id") or ""))
+        workflows.sort(key=_workflow_last_used_score, reverse=True)
+
+        total = len(workflows)
+        total_pages = math.ceil(total / page_size) if total else 0
+
+        start = (page - 1) * page_size
+        end = start + page_size
+        paged = workflows[start:end] if start < total else []
+
+        response.headers["X-Total-Count"] = str(total)
+        response.headers["X-Page"] = str(page)
+        response.headers["X-Page-Size"] = str(page_size)
+        response.headers["X-Total-Pages"] = str(total_pages)
+
+        return paged
 
     @app.get("/api/workflows/{workflow_id}")
     async def get_workflow(workflow_id: str):

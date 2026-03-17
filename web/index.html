@@ -165,17 +165,22 @@
             <div class="panel-body agents-body">
               <div class="panel-actions agents-toolbar">
                 <div class="agents-search">
-                  <input id="agentsSearch" type="text" placeholder="Search (regex) agent_name..." />
-                  <button id="agentsSearchBtn" class="ghost">Search</button>
+                  <input id="agentsSearch" type="text" placeholder="Search agent name..." />
                 </div>
                 <div class="agents-filters">
-                  <button class="filter-btn agent-filter active" data-filter="all">All</button>
-                  <button class="filter-btn agent-filter" data-filter="default">Default</button>
-                  <button class="filter-btn agent-filter" data-filter="user">User</button>
-                  <button class="filter-btn agent-filter" data-filter="remote">Remote</button>
+                  <select id="agentsFilter">
+                    <option value="all">All Agents</option>
+                    <option value="default">Default</option>
+                    <option value="user">User</option>
+                    <option value="remote">Remote</option>
+                  </select>
+                  <select id="agentsSort">
+                    <option value="name">Sort: Name</option>
+                    <option value="health">Sort: Health</option>
+                  </select>
                 </div>
                 <div class="agents-meta">
-                  <span id="coorCount" class="coor-count">已选协同代理: 0</span>
+                  <span id="coorCount" class="coor-count">已选: 0</span>
                   <button id="clearCoorBtn" class="ghost">Clear</button>
                   <button id="healthCheckSelected" class="ghost">Health Check</button>
                   <button id="refreshAgents" class="primary">Refresh</button>
@@ -252,7 +257,22 @@
             <div class="panel-body workflow-grid">
               <div class="workflow-list">
                 <div class="panel-actions">
-                  <button id="refreshWorkflows" class="primary">Refresh</button>
+                  <div class="workflow-toolbar">
+                    <div class="workflow-toolbar-left">
+                      <button id="refreshWorkflows" class="primary">Refresh</button>
+                      <button id="workflowsPrevPage" class="ghost" disabled>Prev</button>
+                      <button id="workflowsNextPage" class="ghost" disabled>Next</button>
+                      <span id="workflowsPageInfo" class="workflow-page-info"></span>
+                    </div>
+                    <div class="workflow-toolbar-right">
+                      <label for="workflowsPageSize" class="workflow-page-size-label">Page size</label>
+                      <select id="workflowsPageSize">
+                        <option value="5" selected>5</option>
+                        <option value="10">10</option>
+                        <option value="20">20</option>
+                      </select>
+                    </div>
+                  </div>
                 </div>
                 <div id="workflowsList" class="list" aria-live="polite"></div>
               </div>

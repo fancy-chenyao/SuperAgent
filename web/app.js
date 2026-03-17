@@ -33,8 +33,8 @@ const toolsCountMcp = document.getElementById("toolsCountMcp");
 
 const agentsList = document.getElementById("agentsList");
 const agentsSearchInput = document.getElementById("agentsSearch");
-const agentsSearchBtn = document.getElementById("agentsSearchBtn");
-const agentFilterButtons = document.querySelectorAll(".agent-filter");
+const agentsFilterSelect = document.getElementById("agentsFilter");
+const agentsSortSelect = document.getElementById("agentsSort");
 const coorCount = document.getElementById("coorCount");
 const clearCoorBtn = document.getElementById("clearCoorBtn");
 const healthCheckSelectedBtn = document.getElementById("healthCheckSelected");
@@ -46,6 +46,10 @@ const mcpSummary = document.getElementById("mcpSummary");
 const workflowsList = document.getElementById("workflowsList");
 const workflowDetail = document.getElementById("workflowDetail");
 const mermaidContainer = document.getElementById("mermaidContainer");
+const workflowsPrevPageBtn = document.getElementById("workflowsPrevPage");
+const workflowsNextPageBtn = document.getElementById("workflowsNextPage");
+const workflowsPageInfo = document.getElementById("workflowsPageInfo");
+const workflowsPageSizeSelect = document.getElementById("workflowsPageSize");
 const planSummary = document.getElementById("planSummary");
 const planHint = document.getElementById("planHint");
 const planEditorList = document.getElementById("planEditorList");
@@ -73,6 +77,9 @@ let selectedAgentName = null;
 let selectedCoorAgents = new Set();
 let latestAgents = [];
 let agentFilter = "all";
+let agentSort = "name";
+let agentSearchQuery = "";
+let agentSearchTimeout = null;
 let agentHealth = {};
 let agentStats = {};
 let latestTools = [];
@@ -87,9 +94,26 @@ let plannerOnlyController = null;
 let plannerOnlyTimeoutId = null;
 let plannerOnlyStepsUpdated = false;
 let instructionHistory = [];
+let workflowsPage = 1;
+let workflowsPageSize = 5;
+let workflowsTotal = 0;
+let workflowsTotalPages = 0;
 const PLANNER_ONLY_TIMEOUT_MS = 50000;
 
 mermaid.initialize({ startOnLoad: false, theme: "default" });
+
+const updateWorkflowsPagination = () => {
+  if (!workflowsPageInfo || !workflowsPrevPageBtn || !workflowsNextPageBtn) return;
+
+  const hasPages = workflowsTotalPages > 0;
+  const currentPage = hasPages ? Math.min(workflowsPage, workflowsTotalPages) : 0;
+  workflowsPageInfo.textContent = workflowsTotal
+    ? `Page ${currentPage} / ${workflowsTotalPages} · Total ${workflowsTotal}`
+    : "";
+
+  workflowsPrevPageBtn.disabled = !hasPages || workflowsPage <= 1;
+  workflowsNextPageBtn.disabled = !hasPages || workflowsPage >= workflowsTotalPages;
+};
 
 const setStatus = (text, active = true) => {
   statusIndicator.querySelector(".label").textContent = text;
@@ -957,13 +981,33 @@ const setListState = (container, text, variant) => {
 
 const updateCoorCount = () => {
   if (!coorCount) return;
-  coorCount.textContent = `已选协同代理: ${selectedCoorAgents.size}`;
+  coorCount.textContent = `已选: ${selectedCoorAgents.size}`;
   if (clearCoorBtn) {
     clearCoorBtn.disabled = selectedCoorAgents.size === 0;
   }
   if (healthCheckSelectedBtn) {
     healthCheckSelectedBtn.disabled = selectedCoorAgents.size === 0;
   }
+};
+
+const debounce = (func, wait) => {
+  let timeout;
+  return function executedFunction(...args) {
+    const later = () => {
+      clearTimeout(timeout);
+      func(...args);
+    };
+    clearTimeout(timeout);
+    timeout = setTimeout(later, wait);
+  };
+};
+
+const getHealthStatus = (agentName) => {
+  const health = agentHealth[agentName];
+  if (!health) return { status: "unknown", color: "#999" };
+  if (health.status === "healthy") return { status: "healthy", color: "#4be3ac" };
+  if (health.status === "unhealthy") return { status: "unhealthy", color: "#ff6a6a" };
+  return { status: "unknown", color: "#999" };
 };
 
 const getMatchValue = () => (agentsSearchInput ? agentsSearchInput.value.trim() : "");
@@ -1427,22 +1471,51 @@ const selectTool = async (tool) => {
 
 const applyAgentFilter = (agents) => {
   if (!Array.isArray(agents)) return [];
+
+  let filtered = agents;
+
+  // Apply type filter
   if (agentFilter === "default") {
-    return agents.filter((agent) => agent.user_id === "share");
+    filtered = filtered.filter((agent) => agent.user_id === "share");
+  } else if (agentFilter === "user") {
+    filtered = filtered.filter((agent) => agent.user_id !== "share");
+  } else if (agentFilter === "remote") {
+    filtered = filtered.filter((agent) => agent.source === "remote");
   }
-  if (agentFilter === "user") {
-    return agents.filter((agent) => agent.user_id !== "share");
+
+  // Apply search filter
+  if (agentSearchQuery) {
+    const query = agentSearchQuery.toLowerCase();
+    filtered = filtered.filter((agent) => {
+      const name = (agent.agent_name || "").toLowerCase();
+      const nick = (agent.nick_name || "").toLowerCase();
+      const desc = (agent.description || "").toLowerCase();
+      return name.includes(query) || nick.includes(query) || desc.includes(query);
+    });
   }
-  if (agentFilter === "remote") {
-    return agents.filter((agent) => agent.source === "remote");
+
+  // Apply sorting
+  if (agentSort === "name") {
+    filtered.sort((a, b) => (a.agent_name || "").localeCompare(b.agent_name || ""));
+  } else if (agentSort === "health") {
+    filtered.sort((a, b) => {
+      const healthA = getHealthStatus(a.agent_name).status;
+      const healthB = getHealthStatus(b.agent_name).status;
+      const order = { healthy: 0, unknown: 1, unhealthy: 2 };
+      return (order[healthA] || 1) - (order[healthB] || 1);
+    });
   }
-  return agents;
+
+  return filtered;
 };
 
 const renderAgents = (agents) => {
   const filtered = applyAgentFilter(agents);
   if (!filtered.length) {
-    setListState(agentsList, "No agents match current filter.", "empty");
+    const emptyMsg = agentSearchQuery
+      ? `No agents found for "${agentSearchQuery}"`
+      : "No agents match current filter.";
+    setListState(agentsList, emptyMsg, "empty");
     return;
   }
 
@@ -1458,22 +1531,28 @@ const renderAgents = (agents) => {
     head.className = "agent-card-head";
 
     const titleWrap = document.createElement("div");
+    titleWrap.style.flex = "1";
+
     const title = document.createElement("div");
     title.className = "agent-name";
     title.textContent = agent.agent_name || "agent";
+
     const sub = document.createElement("div");
     sub.className = "agent-sub";
     const userLabel = agent.user_id === "share" ? "default" : "user";
     const sourceLabel = agent.source ? ` · ${agent.source}` : "";
     const nick = agent.nick_name ? `${agent.nick_name} · ` : "";
-    sub.textContent = `${nick}${userLabel}${sourceLabel}`;
+    const toolCount = Array.isArray(agent.selected_tools) ? agent.selected_tools.length : 0;
+    const toolLabel = toolCount > 0 ? ` · ${toolCount} tools` : "";
+    sub.textContent = `${nick}${userLabel}${sourceLabel}${toolLabel}`;
+
     titleWrap.appendChild(title);
     titleWrap.appendChild(sub);
 
     const selectBtn = document.createElement("button");
     selectBtn.className = "select-toggle";
     const isSelected = selectedCoorAgents.has(agent.agent_name);
-    selectBtn.textContent = isSelected ? "Selected" : "Select";
+    selectBtn.textContent = isSelected ? "✓" : "+";
     if (isSelected) selectBtn.classList.add("active");
     selectBtn.addEventListener("click", (event) => {
       event.stopPropagation();
@@ -1539,6 +1618,8 @@ const renderAgents = (agents) => {
 
     agentsList.appendChild(card);
   });
+
+  updateCoorCount();
 };
 
 const fetchAgents = async () => {
@@ -1638,32 +1719,33 @@ const fetchWorkflows = async () => {
   const userId = userIdInput.value.trim();
   if (!userId) {
     setListState(workflowsList, "请先输入 user_id", "empty");
+    workflowsTotal = 0;
+    workflowsTotalPages = 0;
+    updateWorkflowsPagination();
     return;
   }
 
   setListState(workflowsList, "Loading...", "loading");
   try {
-    const res = await fetch(`/api/workflows?user_id=${encodeURIComponent(userId)}`);
+    const params = new URLSearchParams();
+    params.set("user_id", userId);
+    params.set("page", String(workflowsPage));
+    params.set("page_size", String(workflowsPageSize));
+    const res = await fetch(`/api/workflows?${params.toString()}`);
     if (!res.ok) {
       throw new Error("request failed");
     }
     const workflows = await res.json();
+    workflowsTotal = Number.parseInt(res.headers.get("X-Total-Count") || "0", 10) || 0;
+    workflowsTotalPages = Number.parseInt(res.headers.get("X-Total-Pages") || "0", 10) || 0;
+    updateWorkflowsPagination();
     if (!workflows.length) {
       setListState(workflowsList, "No workflows found.", "empty");
       return;
     }
 
-    const sortedWorkflows = [...workflows].sort((a, b) => {
-      const aTs = getWorkflowTimestamp(a);
-      const bTs = getWorkflowTimestamp(b);
-      if (aTs === null && bTs === null) return 0;
-      if (aTs === null) return 1;
-      if (bTs === null) return -1;
-      return bTs - aTs;
-    });
-
     workflowsList.textContent = "";
-    sortedWorkflows.forEach((wf) => {
+    workflows.forEach((wf) => {
       const title = formatWorkflowTitle(wf);
       const item = document.createElement("div");
       item.className = "workflow-item";
@@ -1671,14 +1753,24 @@ const fetchWorkflows = async () => {
       item.setAttribute("role", "button");
       item.tabIndex = 0;
 
-      const titleEl = document.createElement("strong");
+      const titleEl = document.createElement("div");
+      titleEl.className = "workflow-item-id";
       titleEl.textContent = title;
 
-      const meta = document.createElement("span");
-      meta.textContent = `ID: ${wf.workflow_id} · lap: ${wf.lap} · version: ${wf.version}`;
+      const metaEl = document.createElement("div");
+      metaEl.className = "workflow-item-meta";
+
+      const idSpan = document.createElement("span");
+      idSpan.textContent = `ID: ${wf.workflow_id}`;
+
+      const versionSpan = document.createElement("span");
+      versionSpan.textContent = `lap: ${wf.lap} · version: ${wf.version}`;
+
+      metaEl.appendChild(idSpan);
+      metaEl.appendChild(versionSpan);
 
       item.appendChild(titleEl);
-      item.appendChild(meta);
+      item.appendChild(metaEl);
 
       item.addEventListener("click", () => selectWorkflow(wf.workflow_id));
       item.addEventListener("keydown", (event) => {
@@ -1696,6 +1788,9 @@ const fetchWorkflows = async () => {
     });
   } catch (err) {
     setListState(workflowsList, "Failed to load workflows.", "error");
+    workflowsTotal = 0;
+    workflowsTotalPages = 0;
+    updateWorkflowsPagination();
   }
 };
 
@@ -1820,7 +1915,7 @@ const exportOutputTxt = () => {
 const runSelectedHealthCheck = async () => {
   const names = Array.from(selectedCoorAgents);
   if (!names.length) {
-    flashButton(healthCheckSelectedBtn, "Select agents");
+    flashButton(healthCheckSelectedBtn, "Select agents first");
     return;
   }
   const prevText = healthCheckSelectedBtn.textContent;
@@ -1844,11 +1939,18 @@ const runSelectedHealthCheck = async () => {
         if (active) renderAgentDetail(active);
       }
     }
+    healthCheckSelectedBtn.textContent = "✓ Done";
+    setTimeout(() => {
+      healthCheckSelectedBtn.textContent = prevText;
+      healthCheckSelectedBtn.disabled = false;
+    }, 1500);
   } catch (err) {
-    setStatus("Health check failed", false);
-  } finally {
-    healthCheckSelectedBtn.textContent = prevText;
-    healthCheckSelectedBtn.disabled = false;
+    console.error("Health check failed:", err);
+    healthCheckSelectedBtn.textContent = "✗ Failed";
+    setTimeout(() => {
+      healthCheckSelectedBtn.textContent = prevText;
+      healthCheckSelectedBtn.disabled = false;
+    }, 2000);
   }
 };
 
@@ -1860,16 +1962,61 @@ exportTxtBtn.addEventListener("click", exportOutputTxt);
 
 refreshAgentsBtn.addEventListener("click", fetchAgents);
 refreshToolsBtn.addEventListener("click", fetchTools);
-refreshWorkflowsBtn.addEventListener("click", fetchWorkflows);
+refreshWorkflowsBtn.addEventListener("click", () => {
+  workflowsPage = 1;
+  fetchWorkflows();
+});
 
-if (agentsSearchBtn) {
-  agentsSearchBtn.addEventListener("click", fetchAgents);
+if (workflowsPageSizeSelect) {
+  workflowsPageSize = Number.parseInt(workflowsPageSizeSelect.value || "5", 10) || 5;
+  workflowsPageSizeSelect.addEventListener("change", () => {
+    workflowsPageSize = Number.parseInt(workflowsPageSizeSelect.value || "5", 10) || 5;
+    workflowsPage = 1;
+    fetchWorkflows();
+  });
 }
+
+if (workflowsPrevPageBtn) {
+  workflowsPrevPageBtn.addEventListener("click", () => {
+    workflowsPage = Math.max(1, workflowsPage - 1);
+    fetchWorkflows();
+  });
+}
+
+if (workflowsNextPageBtn) {
+  workflowsNextPageBtn.addEventListener("click", () => {
+    if (workflowsTotalPages && workflowsPage < workflowsTotalPages) {
+      workflowsPage += 1;
+      fetchWorkflows();
+    }
+  });
+}
+
 if (agentsSearchInput) {
+  const debouncedSearch = debounce(() => {
+    agentSearchQuery = agentsSearchInput.value.trim();
+    if (latestAgents.length) {
+      renderAgents(latestAgents);
+    }
+  }, 300);
+
+  agentsSearchInput.addEventListener("input", debouncedSearch);
   agentsSearchInput.addEventListener("keydown", (event) => {
     if (event.key === "Enter") {
       event.preventDefault();
-      fetchAgents();
+      agentSearchQuery = agentsSearchInput.value.trim();
+      if (latestAgents.length) {
+        renderAgents(latestAgents);
+      }
+    }
+  });
+}
+
+if (agentsSortSelect) {
+  agentsSortSelect.addEventListener("change", () => {
+    agentSort = agentsSortSelect.value || "name";
+    if (latestAgents.length) {
+      renderAgents(latestAgents);
     }
   });
 }
@@ -1898,17 +2045,14 @@ if (toolsSortSelect) {
   toolsSortSelect.addEventListener("change", renderTools);
 }
 
-agentFilterButtons.forEach((btn) => {
-  btn.addEventListener("click", () => {
-    agentFilter = btn.dataset.filter || "all";
-    agentFilterButtons.forEach((item) =>
-      item.classList.toggle("active", item.dataset.filter === agentFilter)
-    );
+if (agentsFilterSelect) {
+  agentsFilterSelect.addEventListener("change", () => {
+    agentFilter = agentsFilterSelect.value || "all";
     if (latestAgents.length) {
       renderAgents(latestAgents);
     }
   });
-});
+}
 
 if (clearCoorBtn) {
   clearCoorBtn.addEventListener("click", () => {
