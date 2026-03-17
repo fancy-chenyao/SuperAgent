@@ -171,6 +171,20 @@ def _get_args_schema(tool: Any) -> Optional[dict[str, Any]]:
     return None
 
 
+def _count_schema_params(schema: Optional[dict[str, Any]]) -> dict[str, int]:
+    """Count required and total parameters from schema."""
+    if not schema or not isinstance(schema, dict):
+        return {"total": 0, "required": 0}
+
+    properties = schema.get("properties", {})
+    required = schema.get("required", [])
+
+    return {
+        "total": len(properties),
+        "required": len(required)
+    }
+
+
 def _build_health_fallback(endpoint: str) -> Optional[str]:
     try:
         url = httpx.URL(endpoint)
@@ -377,19 +391,24 @@ def create_app() -> FastAPI:
         await agent_manager.ensure_initialized()
         registry = await ToolRegistry.get_instance()
         tools = await registry.list_global_tools()
-        return [
-            {
-                "name": meta.identifier.name or getattr(meta.tool, "name", ""),
+        result = []
+        for meta in tools:
+            name = meta.identifier.name or getattr(meta.tool, "name", "")
+            if not name:
+                continue
+            schema = _get_args_schema(meta.tool)
+            params_count = _count_schema_params(schema)
+            result.append({
+                "name": name,
                 "description": meta.description or getattr(meta.tool, "description", ""),
                 "scope": meta.identifier.scope,
                 "server": meta.identifier.server,
                 "version": meta.version,
                 "tags": meta.tags,
                 "is_mcp": meta.identifier.is_mcp,
-            }
-            for meta in tools
-            if meta.identifier.name or getattr(meta.tool, "name", "")
-        ]
+                "params_count": params_count,
+            })
+        return result
 
     @app.get("/api/tools/{tool_name}")
     async def get_tool_detail(tool_name: str):

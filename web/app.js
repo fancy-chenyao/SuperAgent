@@ -43,6 +43,8 @@ const toolsList = document.getElementById("toolsList");
 const toolDetail = document.getElementById("toolDetail");
 const mcpList = document.getElementById("mcpList");
 const mcpSummary = document.getElementById("mcpSummary");
+const mcpToggle = document.getElementById("mcpToggle");
+const mcpContent = document.getElementById("mcpContent");
 const workflowsList = document.getElementById("workflowsList");
 const workflowDetail = document.getElementById("workflowDetail");
 const mermaidContainer = document.getElementById("mermaidContainer");
@@ -970,7 +972,40 @@ const stopWorkflow = () => {
 const createStateCard = (text, variant = "info") => {
   const card = document.createElement("div");
   card.className = `card state ${variant}`;
-  card.textContent = text;
+
+  if (variant === "empty") {
+    const icon = document.createElement("div");
+    icon.className = "empty-state-icon";
+    icon.textContent = "📦";
+    card.appendChild(icon);
+
+    const textEl = document.createElement("div");
+    textEl.className = "empty-state-text";
+    textEl.textContent = text;
+    card.appendChild(textEl);
+  } else if (variant === "loading") {
+    // Create skeleton loading
+    const skeleton = document.createElement("div");
+    skeleton.className = "loading-skeleton";
+    for (let i = 0; i < 3; i++) {
+      const skeletonCard = document.createElement("div");
+      skeletonCard.className = "skeleton-card";
+      const titleLine = document.createElement("div");
+      titleLine.className = "skeleton-line title";
+      const line1 = document.createElement("div");
+      line1.className = "skeleton-line";
+      const line2 = document.createElement("div");
+      line2.className = "skeleton-line short";
+      skeletonCard.appendChild(titleLine);
+      skeletonCard.appendChild(line1);
+      skeletonCard.appendChild(line2);
+      skeleton.appendChild(skeletonCard);
+    }
+    card.appendChild(skeleton);
+  } else {
+    card.textContent = text;
+  }
+
   return card;
 };
 
@@ -1211,22 +1246,89 @@ const renderSchemaTable = (schema) => {
 
   const tbody = document.createElement("tbody");
   const required = new Set(schema.required || []);
-  Object.entries(schema.properties).forEach(([key, value]) => {
+
+  const renderRow = (key, value, level = 0, parentPath = "") => {
     const row = document.createElement("tr");
+    const isRequired = required.has(key);
+    if (isRequired) {
+      row.classList.add("required-param");
+    }
+
     const nameCell = document.createElement("td");
-    nameCell.textContent = key;
+    const indent = level > 0 ? `${"  ".repeat(level)}↳ ` : "";
+
+    // Check if this is a nested object
+    const isObject = value?.type === "object" && value?.properties;
+    if (isObject) {
+      const expandBtn = document.createElement("span");
+      expandBtn.className = "expand-btn";
+      expandBtn.textContent = "▶ ";
+      expandBtn.style.cursor = "pointer";
+      expandBtn.style.userSelect = "none";
+
+      const keyText = document.createTextNode(indent + key);
+      nameCell.appendChild(expandBtn);
+      nameCell.appendChild(keyText);
+
+      let isExpanded = false;
+      expandBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        isExpanded = !isExpanded;
+        expandBtn.textContent = isExpanded ? "▼ " : "▶ ";
+
+        // Toggle nested rows
+        const nestedRows = tbody.querySelectorAll(`[data-parent="${parentPath}${key}"]`);
+        nestedRows.forEach(nestedRow => {
+          nestedRow.style.display = isExpanded ? "" : "none";
+        });
+      });
+    } else {
+      nameCell.textContent = indent + key;
+    }
+
+    if (level > 0) {
+      row.dataset.parent = parentPath;
+      row.style.display = "none";
+    }
+
     const typeCell = document.createElement("td");
     typeCell.textContent = formatSchemaType(value);
+
     const reqCell = document.createElement("td");
-    reqCell.textContent = required.has(key) ? "Yes" : "No";
+    reqCell.textContent = isRequired ? "Yes" : "No";
+    if (isRequired) {
+      reqCell.style.fontWeight = "bold";
+      reqCell.style.color = "#1b8f6b";
+    }
+
     const descCell = document.createElement("td");
     descCell.textContent = value?.description || value?.title || "";
+
     row.appendChild(nameCell);
     row.appendChild(typeCell);
     row.appendChild(reqCell);
     row.appendChild(descCell);
     tbody.appendChild(row);
+
+    // Recursively render nested properties
+    if (isObject) {
+      const nestedRequired = new Set(value.required || []);
+      Object.entries(value.properties).forEach(([nestedKey, nestedValue]) => {
+        if (nestedRequired.has(nestedKey)) {
+          required.add(nestedKey);
+        }
+        renderRow(nestedKey, nestedValue, level + 1, `${parentPath}${key}.`);
+        if (nestedRequired.has(nestedKey)) {
+          required.delete(nestedKey);
+        }
+      });
+    }
+  };
+
+  Object.entries(schema.properties).forEach(([key, value]) => {
+    renderRow(key, value);
   });
+
   table.appendChild(tbody);
   return table;
 };
@@ -1239,8 +1341,19 @@ const renderToolDetail = (tool) => {
   }
 
   toolDetail.textContent = "";
+
+  const header = document.createElement("div");
+  header.className = "tool-detail-header";
+
+  const icon = document.createElement("span");
+  icon.className = "tool-detail-icon";
+  icon.textContent = tool.is_mcp ? "🔌" : "🔧";
+
   const title = document.createElement("h3");
   title.textContent = tool.name || "tool";
+
+  header.appendChild(icon);
+  header.appendChild(title);
 
   const sub = document.createElement("div");
   sub.className = "agent-sub";
@@ -1296,7 +1409,7 @@ const renderToolDetail = (tool) => {
   const schemaEmpty = document.createElement("p");
   schemaEmpty.textContent = tool.args_schema ? "" : "No schema available.";
 
-  toolDetail.appendChild(title);
+  toolDetail.appendChild(header);
   toolDetail.appendChild(sub);
   toolDetail.appendChild(tagRow);
   toolDetail.appendChild(descTitle);
@@ -1423,8 +1536,19 @@ const renderTools = () => {
       card.classList.add("active");
     }
 
+    const header = document.createElement("div");
+    header.className = "tool-card-header";
+
+    const icon = document.createElement("span");
+    icon.className = "tool-icon";
+    icon.textContent = tool.is_mcp ? "🔌" : "🔧";
+
     const title = document.createElement("h4");
     title.textContent = tool.name;
+
+    header.appendChild(icon);
+    header.appendChild(title);
+
     const desc = document.createElement("p");
     desc.textContent = tool.description || "";
 
@@ -1432,6 +1556,14 @@ const renderTools = () => {
     tagRow.className = "tag-row";
     tagRow.appendChild(createTag(tool.scope || "global"));
     tagRow.appendChild(createTag(tool.server || "builtin", tool.is_mcp ? "warn" : "accent"));
+
+    // Add params count info
+    if (tool.params_count) {
+      const paramsText = tool.params_count.required > 0
+        ? `${tool.params_count.required}/${tool.params_count.total} params`
+        : `${tool.params_count.total} params`;
+      tagRow.appendChild(createTag(paramsText, ""));
+    }
 
     const stats = toolStats[tool.name] || {};
     const meta = document.createElement("div");
@@ -1441,7 +1573,7 @@ const renderTools = () => {
     if (stats.last_used) metaParts.push(`last: ${formatDate(stats.last_used)}`);
     meta.textContent = metaParts.length ? metaParts.join(" · ") : "workflows: 0";
 
-    card.appendChild(title);
+    card.appendChild(header);
     card.appendChild(desc);
     card.appendChild(tagRow);
     card.appendChild(meta);
@@ -1967,6 +2099,15 @@ refreshWorkflowsBtn.addEventListener("click", () => {
   fetchWorkflows();
 });
 
+// MCP toggle functionality
+if (mcpToggle && mcpContent) {
+  mcpToggle.addEventListener("click", () => {
+    const isCollapsed = mcpContent.classList.toggle("collapsed");
+    mcpToggle.classList.toggle("collapsed", isCollapsed);
+    mcpToggle.textContent = isCollapsed ? "▶" : "▼";
+  });
+}
+
 if (workflowsPageSizeSelect) {
   workflowsPageSize = Number.parseInt(workflowsPageSizeSelect.value || "5", 10) || 5;
   workflowsPageSizeSelect.addEventListener("change", () => {
@@ -2021,13 +2162,11 @@ if (agentsSortSelect) {
   });
 }
 
-if (toolsSearchBtn) {
-  toolsSearchBtn.addEventListener("click", renderTools);
-}
 if (toolsSearchInput) {
   toolsSearchInput.addEventListener("keydown", (event) => {
-    if (event.key === "Enter") {
-      event.preventDefault();
+    if (event.key === "Escape") {
+      event.target.value = "";
+      toolsSearchQuery = "";
       renderTools();
     }
   });
@@ -2035,6 +2174,20 @@ if (toolsSearchInput) {
     renderTools();
   });
 }
+
+// Global keyboard shortcut for tools search
+document.addEventListener("keydown", (event) => {
+  if (event.key === "/" && !event.ctrlKey && !event.metaKey && !event.altKey) {
+    const activeTab = document.querySelector(".tab.active");
+    if (activeTab && activeTab.dataset.tab === "tools") {
+      const target = event.target;
+      if (target.tagName !== "INPUT" && target.tagName !== "TEXTAREA") {
+        event.preventDefault();
+        toolsSearchInput?.focus();
+      }
+    }
+  }
+});
 if (toolsSourceFilter) {
   toolsSourceFilter.addEventListener("change", renderTools);
 }

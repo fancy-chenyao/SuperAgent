@@ -207,8 +207,7 @@
             <div class="panel-body tools-body">
               <div class="panel-actions tools-toolbar">
                 <div class="tools-search">
-                  <input id="toolsSearch" type="text" placeholder="Search tool name or description..." />
-                  <button id="toolsSearchBtn" class="ghost">Search</button>
+                  <input id="toolsSearch" type="text" placeholder="Search tool name or description... (Press / to focus)" />
                 </div>
                 <div class="tools-filters">
                   <select id="toolsSourceFilter">
@@ -242,9 +241,14 @@
                 </aside>
               </div>
               <div class="detail-card mcp-card">
-                <h3>MCP Servers</h3>
-                <div id="mcpSummary" class="meta-row"></div>
-                <div id="mcpList" class="list"></div>
+                <div class="mcp-header">
+                  <h3>MCP Servers</h3>
+                  <button id="mcpToggle" class="ghost mcp-toggle">▼</button>
+                </div>
+                <div id="mcpContent" class="mcp-content">
+                  <div id="mcpSummary" class="meta-row"></div>
+                  <div id="mcpList" class="list"></div>
+                </div>
               </div>
             </div>
           </section>
