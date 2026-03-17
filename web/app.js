@@ -2013,9 +2013,25 @@ const fetchTasks = async () => {
       wfId.className = "task-item-wfid";
       wfId.textContent = `workflow: ${task.workflow_id || "-"}`;
 
+      // Delete button on card (using trash icon)
+      const deleteBtn = document.createElement("button");
+      deleteBtn.className = "task-card-delete-btn";
+      deleteBtn.title = "Delete task";
+      deleteBtn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>`;
+
       item.appendChild(header);
       item.appendChild(meta);
       item.appendChild(wfId);
+      item.appendChild(deleteBtn);
+
+      // Delete button click handler
+      deleteBtn.addEventListener("click", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        if (confirm(`Are you sure you want to delete task "${task.task_id}"?\nThis will delete the task log and all associated checkpoints.`)) {
+          deleteTaskById(task.task_id);
+        }
+      });
 
       item.addEventListener("click", () => selectTask(task));
       item.addEventListener("keydown", (e) => {
@@ -2346,6 +2362,41 @@ const stopResume = () => {
 };
 
 refreshTasksBtn.addEventListener("click", fetchTasks);
+
+const deleteTaskById = async (taskId) => {
+  try {
+    const res = await fetch(`/api/tasks/${encodeURIComponent(taskId)}`, {
+      method: "DELETE",
+    });
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(err.detail || "Delete failed");
+    }
+    // Clear panels if deleted task was selected
+    if (selectedTaskId === taskId) {
+      checkpointPanel.style.display = "none";
+      logPanel.style.display = "none";
+      resumePanel.style.display = "none";
+      selectedTaskId = null;
+    }
+    // Refresh task list
+    await fetchTasks();
+  } catch (err) {
+    alert(`Failed to delete task: ${err.message}`);
+  }
+};
+
+const deleteTask = async () => {
+  if (!selectedTaskId) {
+    alert("Please select a task first.");
+    return;
+  }
+  if (!confirm(`Are you sure you want to delete task "${selectedTaskId}"?\nThis will delete the task log and all associated checkpoints.`)) {
+    return;
+  }
+  await deleteTaskById(selectedTaskId);
+};
+
 copyLogBtn.addEventListener("click", copyTaskLog);
 resumeBtn.addEventListener("click", resumeTask);
 resumeStopBtn.addEventListener("click", stopResume);

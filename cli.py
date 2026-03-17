@@ -1588,7 +1588,7 @@ async def resume_workflow(ctx, workflow_id, step, user_id):
         request = AgentRequest(
             user_id=user_id,
             lang="en",
-            task_type="agent_workflow",
+            # task_type="agent_workflow",
             messages=initial_messages,
             debug=checkpoint.state.get("debug", False),
             deep_thinking_mode=checkpoint.state.get("deep_thinking_mode", True),

@@ -469,6 +469,15 @@ button.primary {
   color: #05101a;
 }
 
+button.danger {
+  background: linear-gradient(135deg, #ff4757, #c0392b);
+  color: #fff;
+}
+
+button.danger:hover:not(:disabled) {
+  background: linear-gradient(135deg, #ff6b7a, #e74c3c);
+}
+
 button.ghost {
   background: transparent;
   border: 1px solid rgba(20, 24, 40, 0.12);
@@ -1170,6 +1179,7 @@ button:disabled {
 
 /* Task list item */
 .task-item {
+  position: relative;
   background: var(--card);
   border: 1.5px solid transparent;
   border-radius: 12px;
@@ -1219,6 +1229,43 @@ button:disabled {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+
+/* Delete button on task card - icon in top-right corner */
+.task-card-delete-btn {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s ease;
+  opacity: 0;
+  z-index: 10;
+}
+
+.task-item:hover .task-card-delete-btn {
+  opacity: 1;
+}
+
+.task-card-delete-btn:hover {
+  background: rgba(217, 83, 79, 0.15);
+  color: var(--danger);
+}
+
+.task-card-delete-btn:active {
+  background: rgba(217, 83, 79, 0.25);
+  transform: scale(0.95);
+}
+
+
 
 /* Status badges */
 .status-badge {

@@ -63,7 +63,15 @@ def _normalize_planning_steps(raw: Any) -> list:
     return []
 
 
-async def _prepare_execution_graph(workflow_id: str, user_id: str) -> None:
+async def _prepare_execution_graph(workflow_id: str, user_id: str, resume_step: int = None) -> None:
+    """Prepare execution graph and queue for production mode.
+
+    Args:
+        workflow_id: Workflow ID
+        user_id: User ID
+        resume_step: If provided, fast-forward the queue to start from this step.
+                     resume_step=5 means the first 4 steps are done, start from step 5.
+    """
     workflow = cache.cache.get(workflow_id)
     if not workflow:
         cache._load_workflow(user_id)
@@ -170,6 +178,47 @@ async def _prepare_execution_graph(workflow_id: str, user_id: str) -> None:
             },
         }
         cache.queue[workflow_id].appendleft(begin_node)
+
+    # Fast-forward queue for resume
+    if resume_step is not None and resume_step >= 1:
+        # Execution sequence analysis:
+        # - Steps 0,1: coordinator, planner (system nodes, no queue update)
+        # - Step 2: publisher (system node, no queue update)
+        # - Step 3: agent_proxy->agent1 (update_stack pops begin_node)
+        # - Step 4: publisher (no update)
+        # - Step 5: agent_proxy->agent2 (update_stack pops agent1)
+        # - Step 6: publisher (no update)
+        # - ...
+        #
+        # Pattern: agent_proxy runs at odd steps (3, 5, 7, ...), each pops queue[0]
+        #          publisher runs at even steps (2, 4, 6, ...), no pop
+        #
+        # Checkpoint is saved AFTER node execution and update_stack
+        # So for resume_step=M (checkpoint step=M-1):
+        # - Queue state reflects all update_stack calls from steps < M
+        # - We need to replay those pops
+        #
+        # Count agent_proxy steps that completed before resume_step:
+        # - Agent_proxy steps are: 3, 5, 7, ... (odd steps >= 3)
+        # - Count odd numbers in range [3, resume_step)
+        agent_proxy_steps_completed = sum(1 for s in range(3, resume_step) if s % 2 == 1)
+        
+        # Log initial queue state
+        initial_queue = list(cache.queue[workflow_id])
+        logger.info(f"Queue BEFORE fast-forward (resume_step={resume_step}): {[n['name'] for n in initial_queue]}")
+        logger.info(f"Agent_proxy steps completed: {agent_proxy_steps_completed}")
+        
+        # Pop that many elements from queue
+        for i in range(agent_proxy_steps_completed):
+            if cache.queue[workflow_id]:
+                popped = cache.queue[workflow_id].popleft()
+                logger.info(f"Fast-forward pop {i+1}: removed '{popped.get('name')}' from queue")
+            else:
+                logger.warning(f"Queue empty at iteration {i+1}, stopping fast-forward")
+                break
+        
+        final_queue = list(cache.queue[workflow_id])
+        logger.info(f"Queue AFTER fast-forward: {[n['name'] for n in final_queue]}")
 
 if USE_BROWSER:
     DEFAULT_TEAM_MEMBERS_DESCRIPTION = """
@@ -335,7 +384,7 @@ async def run_agent_workflow(
         cache.append_instruction(workflow_id, instruction, user_id=user_id)
 
     if workmode == "production":
-        await _prepare_execution_graph(workflow_id, user_id)
+        await _prepare_execution_graph(workflow_id, user_id, resume_step=resume_step)
 
     # Generate a unique task_id for this execution instance if not provided
     if not task_id:
@@ -390,7 +439,13 @@ async def run_agent_workflow(
 async def _process_workflow(
     workflow: CompiledWorkflow, initial_state: dict[str, Any], resume_step: int = None, task_id: str = None
 ) -> AsyncGenerator[dict[str, Any], None]:
-    """处理自定义工作流的事件流"""
+    """处理自定义工作流的事件流
+    
+    Args:
+        resume_step: The step to START executing (not the checkpoint step).
+                     So resume_step=5 means: load checkpoint from step 4, then execute step 5.
+                     Must be >= 1.
+    """
     current_node = None
 
     workflow_id = initial_state["workflow_id"]
@@ -401,7 +456,31 @@ async def _process_workflow(
     user_query = initial_state.get("USER_QUERY", "")
     if not task_id:
         task_id = CheckpointManager.generate_task_id(workflow_id)
-    task_logger = TaskLogger(task_id=task_id, workflow_id=workflow_id, user_query=user_query)
+    
+    # Resume logic: Check if we are in a mode that supports resuming or resume_step is specified
+    # resume_step indicates the step to START executing, so we need checkpoint from (resume_step - 1)
+    should_resume = resume_step is not None and resume_step >= 1
+    
+    if should_resume:
+        # Load existing TaskLogger and truncate history
+        from src.robust.task_logger import TaskLogger as TL
+        existing_logger = TL.load(task_id)
+        if existing_logger:
+            # Truncate history: remove entries from resume_step onwards and workflow_end events
+            existing_logger.history = [
+                entry for entry in existing_logger.history
+                if entry.get("step", 0) < resume_step and entry.get("event") != "workflow_end"
+            ]
+            existing_logger.status = "running"
+            existing_logger.error = None
+            existing_logger._step_counter = {"__global__": resume_step - 1}
+            task_logger = existing_logger
+            user_query = existing_logger.user_query
+            logger.info(f"Resumed TaskLogger for task {task_id}, truncated to step {resume_step - 1}")
+        else:
+            task_logger = TaskLogger(task_id=task_id, workflow_id=workflow_id, user_query=user_query)
+    else:
+        task_logger = TaskLogger(task_id=task_id, workflow_id=workflow_id, user_query=user_query)
 
     # Initialize hook system (controlled by AUTO_RECOVERY_ENABLED)
     hook_engine = None
@@ -414,35 +493,32 @@ async def _process_workflow(
 
     yield {
         "event": "start_of_workflow",
-        "data": {"workflow_id": workflow_id, "task_id": task_id, "input": initial_state["messages"]},
+        "data": {"workflow_id": workflow_id, "task_id": task_id, "input": initial_state["messages"], "resume_step": resume_step},
     }
 
     try:
         current_node = workflow.start_node
         state = State(**initial_state)
 
-        # Resume logic: Check if we are in a mode that supports resuming or resume_step is specified
-        # This must be AFTER initializing current_node and state, so we can override them
-        should_resume = resume_step is not None
-        
         if should_resume:
             try:
-                # If resume_step is specified, load that specific checkpoint
-                # Otherwise, load the latest checkpoint
-                target_step = resume_step if resume_step is not None else None
-                checkpoint = checkpoint_manager.load_checkpoint(workflow_id=workflow_id, task_id=task_id, step=target_step)
+                # Load checkpoint from (resume_step - 1)
+                checkpoint_step = resume_step - 1
+                checkpoint = checkpoint_manager.load_checkpoint(workflow_id=workflow_id, task_id=task_id, step=checkpoint_step)
                 if checkpoint:
-                    logger.info(f"Resuming workflow {workflow_id} (task {task_id}) from step {checkpoint.step}, node {checkpoint.node_name}")
+                    logger.info(f"Resuming workflow {workflow_id} (task {task_id}) from checkpoint step {checkpoint.step}, will execute step {resume_step}")
                     if checkpoint.next_node:
                         current_node = checkpoint.next_node
                         state = State(**checkpoint.state)
-                        step_count = checkpoint.step + 1
+                        step_count = resume_step
                     else:
                         logger.warning("Checkpoint missing next_node, starting from scratch")
             except Exception as e:
                 logger.warning(f"Could not load checkpoint for resume, starting from scratch: {e}")
 
-        task_logger.log_workflow_start(user_query=user_query)
+        # Only log workflow_start for new executions, not for resume
+        if not should_resume:
+            task_logger.log_workflow_start(user_query=user_query)
 
         while current_node != "__end__":
             agent_name = current_node

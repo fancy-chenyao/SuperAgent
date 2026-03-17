@@ -92,6 +92,10 @@ class TaskLogger:
         """
         if step is None:
             step = self._next_step(node_name)
+        else:
+            # Update step counter when explicit step is provided
+            # to keep it in sync for subsequent auto-increment calls
+            self._step_counter["__global__"] = step
 
         entry: Dict[str, Any] = {
             "step": step,

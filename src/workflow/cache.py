@@ -267,7 +267,16 @@ class WorkflowCache:
         if user_id not in self._lock_pool:
             self._lock_pool[user_id] = threading.Lock()
         with self._lock_pool[user_id]:
-            self.queue[workflow_id].popleft()
+            if workflow_id not in self.queue or not self.queue[workflow_id]:
+                logger.warning(f"update_stack called but queue is empty or missing for workflow {workflow_id}. "
+                             f"This may indicate a resume state mismatch.")
+                return
+            
+            queue_before = [n.get('name') for n in self.queue[workflow_id]]
+            popped = self.queue[workflow_id].popleft()
+            queue_after = [n.get('name') for n in self.queue[workflow_id]] if self.queue[workflow_id] else []
+            logger.info(f"update_stack: popped '{popped.get('name')}', "
+                       f"queue before={queue_before}, after={queue_after}")
     
     def get_next_node(self, workflow_id: str):
         """获取下一个要执行的节点
@@ -295,12 +304,13 @@ class WorkflowCache:
             workflow_id: 工作流ID
             
         Returns:
-            迭代轮次
+            迭代轮次，如果不存在则返回0
         """
         try:
             return self.cache[workflow_id]["lap"]
         except Exception as e:
             logger.error(f"Error getting lap: {e}")
+            return 0  # Return default value instead of None
 
     def restore_system_node(self, workflow_id: str, node: Union[Component, str], user_id: str):
         """恢复系统节点到工作流缓存

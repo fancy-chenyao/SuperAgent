@@ -79,7 +79,8 @@ class Server:
     async def _run_agent_workflow_with_resume(
             self,
             request: "AgentRequest",
-            resume_step: int = None
+            resume_step: int = None,
+            task_id: str = None
     ) -> AsyncGenerator[str, None]:
         """Run agent workflow with resume capability from a specific checkpoint step."""
         if agent_manager is None:
@@ -103,6 +104,7 @@ class Server:
             workmode=request.workmode,
             workflow_id=request.workflow_id,
             resume_step=resume_step,
+            task_id=task_id,
             stop_after_planner=getattr(request, "stop_after_planner", False),
             instruction=getattr(request, "instruction", None),
             instruction_history=getattr(request, "instruction_history", None),

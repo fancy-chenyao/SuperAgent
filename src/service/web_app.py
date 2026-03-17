@@ -544,36 +544,57 @@ def create_app() -> FastAPI:
     @app.post("/api/tasks/resume")
     async def resume_task(request: Request, body: "ResumeRequest"):
         """
-        Resume a task execution from a specific checkpoint step.
+        Resume a task execution from a specific step.
+        The resume_step indicates the step to START executing (not the checkpoint step).
+        So resume_step=5 means: load checkpoint from step 4, then execute step 5.
+        resume_step must be >= 1.
         Streams SSE events like the normal run endpoint.
+        Configuration is restored from checkpoint.
         """
-        from src.robust.task_logger import TaskLogger as TL
+        from src.robust.checkpoint import CheckpointManager
         from src.interface.agent import AgentMessage
 
-        # Load original messages from task log to reconstruct context
-        task_log = TL.load(body.task_id)
-        messages = []
-        if task_log:
-            # Extract initial user message from history
-            for entry in task_log.history:
-                if entry.get("event") == "workflow_start":
-                    q = task_log.user_query
-                    if q:
-                        messages = [{"role": "user", "content": q}]
-                    break
-        if not messages:
-            messages = [{"role": "user", "content": "(resume)"}]
+        # resume_step indicates the step to START executing
+        # We need to load checkpoint from (resume_step - 1)
+        if body.resume_step < 1:
+            raise HTTPException(
+                status_code=400,
+                detail="resume_step must be >= 1. Step 0 is the initial state, use step 1 to resume from the beginning."
+            )
+
+        checkpoint_manager = CheckpointManager()
+
+        # Load checkpoint from (resume_step - 1) to get the state before the target step
+        checkpoint_step = body.resume_step - 1
+        checkpoint = checkpoint_manager.load_checkpoint(
+            task_id=body.task_id, step=checkpoint_step
+        )
+
+        # Load step=0 checkpoint to get initial messages
+        checkpoint_0 = checkpoint_manager.load_checkpoint(
+            task_id=body.task_id, step=0
+        )
+        initial_messages = checkpoint_0.state.get("messages", [])
+
+        if not initial_messages:
+            initial_messages = [{"role": "user", "content": "(resume)"}]
+
+        # Resume should use production mode to ensure cache.queue is initialized
+        # Or restore from checkpoint if available
+        workmode = checkpoint.state.get("workflow_mode", "production")
+        if workmode not in ["production", "launch"]:
+            workmode = "production"
 
         agent_request = AgentRequest(
             user_id=body.user_id,
-            task_type=body.task_type,
-            workmode=body.workmode,
-            messages=[AgentMessage(role=m["role"], content=m["content"]) for m in messages],
-            debug=body.debug,
-            deep_thinking_mode=body.deep_thinking_mode,
-            search_before_planning=body.search_before_planning,
-            coor_agents=body.coor_agents,
-            workflow_id=body.workflow_id,
+            lang=body.lang,
+            workmode=workmode,
+            messages=[AgentMessage(role=m["role"], content=m["content"]) for m in initial_messages],
+            debug=checkpoint.state.get("debug", False),
+            deep_thinking_mode=checkpoint.state.get("deep_thinking_mode", True),
+            search_before_planning=checkpoint.state.get("search_before_planning", False),
+            coor_agents=checkpoint.state.get("coor_agents", []),
+            workflow_id=checkpoint.workflow_id,
         )
 
         server = Server()
@@ -581,7 +602,7 @@ def create_app() -> FastAPI:
         async def event_stream() -> AsyncGenerator[str, None]:
             try:
                 async for event in server._run_agent_workflow_with_resume(
-                    agent_request, resume_step=body.resume_step
+                    agent_request, resume_step=body.resume_step, task_id=body.task_id
                 ):
                     if await request.is_disconnected():
                         break
@@ -596,21 +617,48 @@ def create_app() -> FastAPI:
             headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
         )
 
+    @app.delete("/api/tasks/{task_id}")
+    async def delete_task(task_id: str):
+        """
+        Delete a task log and its associated checkpoints.
+        """
+        import shutil
+        from src.robust.task_logger import _get_task_logs_dir
+        from src.robust.checkpoint import CheckpointManager
+
+        # Delete task log
+        logs_dir = _get_task_logs_dir()
+        log_file = logs_dir / f"{task_id}.json"
+        if not log_file.exists():
+            raise HTTPException(status_code=404, detail=f"Task log not found: {task_id}")
+
+        try:
+            # Delete log file
+            log_file.unlink()
+
+            # Delete checkpoints directory
+            checkpoint_manager = CheckpointManager()
+            checkpoint_dir = checkpoint_manager._get_task_dir(task_id)
+            if checkpoint_dir.exists():
+                shutil.rmtree(checkpoint_dir)
+
+            return {"result": "success", "message": f"Task {task_id} deleted successfully"}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to delete task: {str(e)}")
+
     return app
 
 
 # ---- Tasks API request models ----
 class ResumeRequest(BaseModel):
+    """Request model for resuming a task from checkpoint.
+    Configuration (debug, deep_thinking_mode, etc.) is restored from checkpoint.
+    """
     task_id: str
     resume_step: int
-    workflow_id: Optional[str] = None
     user_id: str = "test"
-    task_type: str = "agent_workflow"
+    lang: str = "en"
     workmode: str = "launch"
-    debug: bool = False
-    deep_thinking_mode: bool = True
-    search_before_planning: bool = False
-    coor_agents: Optional[list] = None
 
 
 app = create_app()
