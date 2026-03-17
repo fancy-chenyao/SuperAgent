@@ -511,6 +511,9 @@ async def _process_workflow(
                         current_node = checkpoint.next_node
                         state = State(**checkpoint.state)
                         step_count = resume_step
+                        # Clean up stale checkpoints from previous failed runs
+                        # Delete checkpoints with step >= resume_step (they may be from earlier failed attempts)
+                        checkpoint_manager.clean_checkpoints_from_step(task_id=task_id, from_step=resume_step)
                     else:
                         logger.warning("Checkpoint missing next_node, starting from scratch")
             except Exception as e:

@@ -215,6 +215,43 @@ class CheckpointManager:
             logger.error(f"Failed to list checkpoints: {e}")
             return []
 
+    def clean_checkpoints_from_step(self, task_id: str, from_step: int) -> int:
+        """
+        Delete checkpoint files with step >= from_step for a specific task.
+        This is used during resume to clean up stale checkpoints from failed runs.
+        
+        Args:
+            task_id: The unique task execution ID
+            from_step: Delete checkpoints with step >= this value
+            
+        Returns:
+            int: Number of checkpoint files deleted
+        """
+        try:
+            task_dir = self._get_task_dir(task_id)
+            deleted_count = 0
+            
+            for checkpoint_file in task_dir.glob("*.json"):
+                # Extract step number from filename (format: {step}_{node_name}.json)
+                try:
+                    step_str = checkpoint_file.name.split('_')[0]
+                    step = int(step_str)
+                    if step >= from_step:
+                        checkpoint_file.unlink()
+                        logger.info(f"Deleted stale checkpoint: {checkpoint_file.name}")
+                        deleted_count += 1
+                except (ValueError, IndexError):
+                    # Skip files that don't match the expected format
+                    continue
+                    
+            if deleted_count > 0:
+                logger.info(f"Cleaned {deleted_count} stale checkpoint(s) for task {task_id} from step {from_step}")
+            return deleted_count
+            
+        except Exception as e:
+            logger.error(f"Failed to clean checkpoints: {e}")
+            return 0
+
     def list_tasks(self, workflow_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """
         List all task execution instances.
