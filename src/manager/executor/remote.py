@@ -1,3 +1,60 @@
+"""
+Remote Agent Executor
+
+This module handles execution of remote agents via HTTP/HTTPS endpoints.
+
+## Remote Communication Protocol
+
+All communication with remote agents MUST use JSON format with the following structure:
+
+### Request Format:
+```json
+{
+  "agent_name": "string",
+  "messages": [
+    {
+      "type": "human" | "ai" | "system" | "user",
+      "role": "user" | "assistant" | "system",
+      "content": "string or dict"
+    }
+  ],
+  "context": {
+    "user_id": "string",
+    "workflow_id": "string",
+    "workflow_mode": "string",
+    "deep_thinking_mode": boolean,
+    "debug": boolean
+  },
+  "tools": [
+    {
+      "name": "string",
+      "description": "string"
+    }
+  ]
+}
+```
+
+### Response Format:
+```json
+{
+  "status": "success" | "failed",
+  "result": "string or dict",
+  "error": "string (optional)",
+  "metadata": {
+    "duration": number,
+    "endpoint": "string"
+  }
+}
+```
+
+### Message Content Rules:
+1. When content is a JSON string, it should be parseable as valid JSON
+2. When content is a dict, it represents structured parameters
+3. Remote agents should detect and parse JSON content automatically
+4. NO Python string representations (e.g., "{'key': 'value'}") - use proper JSON
+
+"""
+
 import asyncio
 import logging
 import time
@@ -75,6 +132,21 @@ class RemoteExecutor(AgentExecutor):
         return
 
     async def _ensure_session(self):
+        if self._session is not None:
+            if self._session.closed:
+                self._session = None
+            else:
+                # If the session is bound to a closed or different loop, recreate it.
+                try:
+                    current_loop = asyncio.get_running_loop()
+                    session_loop = getattr(self._session, "_loop", None)
+                    if session_loop is not None and session_loop is not current_loop:
+                        await self._session.close()
+                        self._session = None
+                except RuntimeError:
+                    # No running loop; allow recreation on next call.
+                    self._session = None
+
         if self._session is not None and not self._session.closed:
             return
         async with self._session_lock:
@@ -160,18 +232,65 @@ class RemoteExecutor(AgentExecutor):
             )
 
     def _build_request(self, agent: Any, messages: List[Any], context: ExecutionContext) -> Dict[str, Any]:
+        """
+        Build request payload for remote agent.
+
+        All messages are serialized to a standard JSON format:
+        {
+            "type": "human" | "ai" | "system" | "user",
+            "content": <string or dict>,
+            "role": "user" | "assistant" | "system" (optional)
+        }
+
+        This ensures consistent data flow between local and remote agents.
+        """
         serialized_messages = []
         for msg in messages:
             if isinstance(msg, HumanMessage):
-                serialized_messages.append({"type": "human", "content": msg.content})
+                serialized_messages.append({
+                    "type": "human",
+                    "role": "user",
+                    "content": msg.content
+                })
             elif isinstance(msg, AIMessage):
-                serialized_messages.append({"type": "ai", "content": msg.content})
+                serialized_messages.append({
+                    "type": "ai",
+                    "role": "assistant",
+                    "content": msg.content
+                })
             elif isinstance(msg, SystemMessage):
-                serialized_messages.append({"type": "system", "content": msg.content})
+                serialized_messages.append({
+                    "type": "system",
+                    "role": "system",
+                    "content": msg.content
+                })
+            elif isinstance(msg, dict):
+                # If message is already a dict, ensure it has required fields
+                # and normalize the structure
+                msg_type = msg.get("type", "user")
+                msg_role = msg.get("role", "user")
+                msg_content = msg.get("content", "")
+
+                serialized_messages.append({
+                    "type": msg_type,
+                    "role": msg_role,
+                    "content": msg_content
+                })
             elif hasattr(msg, "content"):
-                serialized_messages.append({"type": "unknown", "content": msg.content})
+                # Generic message object with content attribute
+                serialized_messages.append({
+                    "type": "unknown",
+                    "role": "user",
+                    "content": msg.content
+                })
             else:
-                serialized_messages.append({"type": "unknown", "content": str(msg)})
+                # Fallback: convert to string, but this should be avoided
+                logger.warning(f"Message type {type(msg)} is not standard, converting to string")
+                serialized_messages.append({
+                    "type": "unknown",
+                    "role": "user",
+                    "content": str(msg)
+                })
 
         request = {
             "agent_name": agent.agent_name,

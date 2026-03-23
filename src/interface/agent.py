@@ -93,6 +93,7 @@ class Agent(BaseModel):
     api_key: Optional[str] = None
     mcp_config: Optional[AgentMCPConfig] = None
     mcp_servers: Optional[Dict[str, Any]] = None
+    parameter_mapping: Optional[Dict[str, str]] = None
 
     model_config = ConfigDict(extra="allow")
 
@@ -163,6 +164,7 @@ class State(MessagesState):
     initialized: bool
     stop_after_planner: bool
     instruction_history: list[str]
+    planning_steps: list[dict]
 
 
 class RemoveAgentRequest(BaseModel):

@@ -1,0 +1,84 @@
+﻿{
+  "schema_version": "1.0",
+  "entities": [
+    {
+      "company_id": "uc-001",
+      "name": "星云智能",
+      "industry": "人工智能",
+      "valuation_usd_b": 12.5,
+      "founded_year": 2018,
+      "headquarters": "北京",
+      "stage": "D轮",
+      "employees": 3200,
+      "business_model": "B2B订阅+解决方案",
+      "key_products": ["AI中台", "智能客服"],
+      "customers": ["金融", "制造"],
+      "growth_tag": "高增长",
+      "notes": "ToB大客户续费率高"
+    },
+    {
+      "company_id": "uc-002",
+      "name": "云衡科技",
+      "industry": "云计算",
+      "valuation_usd_b": 10.2,
+      "founded_year": 2016,
+      "headquarters": "上海",
+      "stage": "C轮",
+      "employees": 2800,
+      "business_model": "IaaS/PaaS",
+      "key_products": ["容器平台", "数据湖"],
+      "customers": ["互联网", "政务"],
+      "growth_tag": "稳健",
+      "notes": "政府项目占比高"
+    },
+    {
+      "company_id": "uc-003",
+      "name": "钛链物流",
+      "industry": "物流科技",
+      "valuation_usd_b": 8.4,
+      "founded_year": 2017,
+      "headquarters": "广州",
+      "stage": "C+轮",
+      "employees": 5200,
+      "business_model": "平台佣金+SaaS",
+      "key_products": ["智能调度", "仓储系统"],
+      "customers": ["电商", "零售"],
+      "growth_tag": "高增长",
+      "notes": "履约效率领先"
+    },
+    {
+      "company_id": "uc-004",
+      "name": "禾图医疗",
+      "industry": "医疗科技",
+      "valuation_usd_b": 7.1,
+      "founded_year": 2015,
+      "headquarters": "杭州",
+      "stage": "D轮",
+      "employees": 2100,
+      "business_model": "医院SaaS+服务费",
+      "key_products": ["影像AI", "病历系统"],
+      "customers": ["医院", "医保"],
+      "growth_tag": "稳健",
+      "notes": "合规投入高"
+    },
+    {
+      "company_id": "uc-005",
+      "name": "量子出行",
+      "industry": "智能出行",
+      "valuation_usd_b": 6.8,
+      "founded_year": 2019,
+      "headquarters": "深圳",
+      "stage": "B+轮",
+      "employees": 1500,
+      "business_model": "硬件销售+订阅",
+      "key_products": ["车载系统", "运营平台"],
+      "customers": ["出行平台", "车企"],
+      "growth_tag": "高增长",
+      "notes": "对供应链敏感"
+    }
+  ],
+  "meta": {
+    "source": "intranet_unicorn_db",
+    "last_updated": "2026-03-19"
+  }
+}

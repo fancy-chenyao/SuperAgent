@@ -1,0 +1,88 @@
+{
+  "todos": [
+    {
+      "id": "todo-001",
+      "title": "准备周会材料",
+      "due_date": "2026-03-23",
+      "priority": "高",
+      "status": "待办",
+      "tags": [
+        "工作",
+        "会议"
+      ],
+      "notes": "整理上周进度与风险",
+      "user_id": "u001",
+      "employee_id": "85981012"
+    },
+    {
+      "id": "todo-002",
+      "title": "提交季度报表",
+      "due_date": "2026-03-25",
+      "priority": "中",
+      "status": "待办",
+      "tags": [
+        "工作",
+        "报表"
+      ],
+      "notes": "财务口径一致性检查",
+      "user_id": "u002",
+      "employee_id": "1087528"
+    },
+    {
+      "id": "todo-003",
+      "title": "客户回访",
+      "due_date": "2026-03-27",
+      "priority": "中",
+      "status": "进行中",
+      "tags": [
+        "客户",
+        "沟通"
+      ],
+      "notes": "重点客户满意度回访",
+      "user_id": "u003",
+      "employee_id": "86000101"
+    },
+    {
+      "id": "todo-004",
+      "title": "团队培训安排",
+      "due_date": "2026-03-28",
+      "priority": "低",
+      "status": "待办",
+      "tags": [
+        "团队",
+        "培训"
+      ],
+      "notes": "安排讲师与日程",
+      "user_id": "u004",
+      "employee_id": "86000102"
+    },
+    {
+      "id": "todo-005",
+      "title": "系统巡检",
+      "due_date": "2026-03-29",
+      "priority": "高",
+      "status": "待办",
+      "tags": [
+        "系统",
+        "运维"
+      ],
+      "notes": "检查关键服务可用性",
+      "user_id": "u005",
+      "employee_id": "86000103"
+    },
+    {
+      "id": "todo-006",
+      "title": "整理学习笔记",
+      "due_date": "2026-03-20",
+      "priority": "低",
+      "status": "待办",
+      "tags": [
+        "个人",
+        "学习"
+      ],
+      "notes": "复盘本周学习内容",
+      "user_id": "u006",
+      "employee_id": "86000104"
+    }
+  ]
+}

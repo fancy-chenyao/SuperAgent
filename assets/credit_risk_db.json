@@ -1,0 +1,26 @@
+﻿{
+  "schema": {
+    "version": "1.0.0",
+    "description": "信贷风控库",
+    "fields": [
+      {"name": "company_id", "type": "string", "required": true},
+      {"name": "credit_score", "type": "number"},
+      {"name": "risk_level", "type": "string"},
+      {"name": "cashflow_health", "type": "string"},
+      {"name": "debt_ratio", "type": "number"},
+      {"name": "default_events", "type": "number"},
+      {"name": "regulatory_risk", "type": "string"},
+      {"name": "market_risk", "type": "string"},
+      {"name": "operation_risk", "type": "string"},
+      {"name": "notes", "type": "string"}
+    ]
+  },
+  "records": [
+    {"company_id": "uc-001", "credit_score": 72, "risk_level": "中", "cashflow_health": "一般", "debt_ratio": 0.58, "default_events": 0, "regulatory_risk": "低", "market_risk": "中", "operation_risk": "中", "notes": "收入增长快但现金流承压"},
+    {"company_id": "uc-002", "credit_score": 86, "risk_level": "低", "cashflow_health": "良好", "debt_ratio": 0.42, "default_events": 0, "regulatory_risk": "低", "market_risk": "中", "operation_risk": "低", "notes": "盈利稳定，研发投入高"},
+    {"company_id": "uc-003", "credit_score": 68, "risk_level": "中", "cashflow_health": "偏弱", "debt_ratio": 0.64, "default_events": 1, "regulatory_risk": "中", "market_risk": "高", "operation_risk": "中", "notes": "扩张快，履约风险需关注"},
+    {"company_id": "uc-004", "credit_score": 74, "risk_level": "中", "cashflow_health": "一般", "debt_ratio": 0.55, "default_events": 0, "regulatory_risk": "中", "market_risk": "中", "operation_risk": "低", "notes": "合规审查周期较长"},
+    {"company_id": "uc-005", "credit_score": 88, "risk_level": "低", "cashflow_health": "良好", "debt_ratio": 0.38, "default_events": 0, "regulatory_risk": "低", "market_risk": "中", "operation_risk": "低", "notes": "盈利能力强，客户集中度偏高"},
+    {"company_id": "uc-006", "credit_score": 70, "risk_level": "中", "cashflow_health": "一般", "debt_ratio": 0.60, "default_events": 0, "regulatory_risk": "中", "market_risk": "中", "operation_risk": "中", "notes": "金融合规要求高，需持续跟踪"}
+  ]
+}

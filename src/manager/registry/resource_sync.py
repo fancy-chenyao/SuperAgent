@@ -114,6 +114,11 @@ async def sync_remote_agents(resource_registry: ResourceRegistry, agent_registry
             elif isinstance(item, dict):
                 selected_tools.append(Tool(name=item.get("name", ""), description=item.get("description", "")))
 
+        # Extract requires and produces from metadata
+        requires = metadata.get("requires", [])
+        produces = metadata.get("produces", [])
+        parameter_mapping = metadata.get("parameter_mapping", {})
+
         agent = Agent(
             user_id=default_user_id,
             agent_name=agent_name,
@@ -125,6 +130,9 @@ async def sync_remote_agents(resource_registry: ResourceRegistry, agent_registry
             source=AgentSource.REMOTE,
             endpoint=spec.endpoint,
             api_key=(spec.auth or {}).get("api_key"),
+            requires=requires,
+            produces=produces,
+            parameter_mapping=parameter_mapping,
         )
 
         await agent_registry.register(agent, persist=False)
