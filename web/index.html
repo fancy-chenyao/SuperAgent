@@ -44,20 +44,14 @@
               <h2>Run Workflow</h2>
               <p>发起任务并实时查看输出。</p>
             </div>
-            <div class="panel-body run-grid">
+            <div class="panel-body run-single-column">
               <div class="form-card">
+                <div class="summary-header">
+                  <h3>任务配置</h3>
+                </div>
                 <div class="form-row">
                   <label for="userId">User ID</label>
                   <input id="userId" type="text" value="test" />
-                </div>
-                <div class="form-row">
-                  <label for="workMode">Work Mode</label>
-                  <select id="workMode">
-                    <option value="launch">launch</option>
-                    <option value="polish">polish</option>
-                    <option value="production">production</option>
-                    <option value="auto">auto</option>
-                  </select>
                 </div>
                 <div class="form-row inline">
                   <div class="checkbox">
@@ -87,52 +81,50 @@
                 </div>
               </div>
 
-              <div class="right-stack">
-                <div class="summary-card">
-                  <div class="summary-header">
-                    <h3>Execution Summary</h3>
-                  </div>
-                  <div class="summary-flow">
-                    <div class="label">Live Flow</div>
-                    <div id="summaryFlow" class="flow-track"></div>
-                    <div id="summaryHint" class="summary-hint hidden">Workflow completed.</div>
-                  </div>
-                  <div class="summary-plan">
-                    <div class="label">Plan Preview</div>
-                    <div id="planSummary" class="plan-summary"></div>
-                    <div id="planHint" class="summary-hint hidden">No plan available.</div>
+              <div class="summary-card plan-editor-card">
+                <div class="summary-header">
+                  <h3>计划反馈</h3>
+                </div>
+                <div class="plan-editor-actions">
+                  <button id="nlPlanEdit" class="primary">自然语言改写</button>
+                  <button id="confirmExecute" class="ghost">确认执行</button>
+                  <button id="retryPlan" class="ghost">重试规划</button>
+                </div>
+                <div id="planValidationHint" class="summary-hint hidden">Validation hint</div>
+                <div id="planEditorList" class="plan-editor-list"></div>
+              </div>
+
+              <div class="output-card">
+                <div class="output-header">
+                  <h3>流式输出</h3>
+                  <div class="output-actions">
+                    <button id="autoScrollBtn" class="ghost">Auto-scroll: On</button>
+                    <button id="exportTxtBtn" class="ghost">Export .txt</button>
+                    <button id="clearOutput" class="ghost">Clear</button>
                   </div>
                 </div>
+                <div
+                  id="streamOutput"
+                  class="output-body"
+                  role="log"
+                  aria-live="polite"
+                  aria-relevant="additions"
+                ></div>
+              </div>
 
-                <div class="summary-card plan-editor-card">
-                  <div class="summary-header">
-                    <h3>Plan Feedback</h3>
-                  </div>
-                  <div class="plan-editor-actions">
-                    <button id="nlPlanEdit" class="primary">自然语言改写</button>
-                    <button id="confirmExecute" class="ghost">确认执行</button>
-                    <button id="retryPlan" class="ghost">重试规划</button>
-                  </div>
-                  <div id="planValidationHint" class="summary-hint hidden">Validation hint</div>
-                  <div id="planEditorList" class="plan-editor-list"></div>
+              <div class="summary-card">
+                <div class="summary-header">
+                  <h3>执行摘要</h3>
                 </div>
-
-                <div class="output-card">
-                  <div class="output-header">
-                    <h3>Stream Output</h3>
-                    <div class="output-actions">
-                      <button id="autoScrollBtn" class="ghost">Auto-scroll: On</button>
-                      <button id="exportTxtBtn" class="ghost">Export .txt</button>
-                      <button id="clearOutput" class="ghost">Clear</button>
-                    </div>
-                  </div>
-                  <div
-                    id="streamOutput"
-                    class="output-body"
-                    role="log"
-                    aria-live="polite"
-                    aria-relevant="additions"
-                  ></div>
+                <div class="summary-flow">
+                  <div class="label">Live Flow</div>
+                  <div id="summaryFlow" class="flow-track"></div>
+                  <div id="summaryHint" class="summary-hint hidden">Workflow completed.</div>
+                </div>
+                <div class="summary-plan">
+                  <div class="label">Plan Preview</div>
+                  <div id="planSummary" class="plan-summary"></div>
+                  <div id="planHint" class="summary-hint hidden">No plan available.</div>
                 </div>
               </div>
             </div>

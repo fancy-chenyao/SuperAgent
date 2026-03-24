@@ -201,6 +201,16 @@ body {
   margin-top: 16px;
 }
 
+.run-single-column {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  margin-top: 16px;
+  max-width: 900px;
+  margin-left: auto;
+  margin-right: auto;
+}
+
 .right-stack {
   display: flex;
   flex-direction: column;

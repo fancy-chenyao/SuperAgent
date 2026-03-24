@@ -3,7 +3,6 @@ const tabs = document.querySelectorAll(".tab");
 const panels = document.querySelectorAll(".panel");
 
 const userIdInput = document.getElementById("userId");
-const workModeInput = document.getElementById("workMode");
 const deepThinkingInput = document.getElementById("deepThinking");
 const searchBeforeInput = document.getElementById("searchBefore");
 const debugInput = document.getElementById("debugMode");
@@ -790,8 +789,8 @@ const runWorkflow = async () => {
   const payload = {
     user_id: userId,
     lang: "zh",
-    workmode: workModeInput.value,
-    stop_after_planner: workModeInput.value === "launch",
+    workmode: "launch",
+    stop_after_planner: true,
     instruction: message,
     instruction_history: instructionHistory,
     messages: [{ role: "user", content: message }],
