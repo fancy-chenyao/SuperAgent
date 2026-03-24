@@ -56,6 +56,32 @@ logger = logging.getLogger(__name__)
 if not logger.handlers:
     logger.setLevel(logging.INFO)
 
+
+def _stringify_stream_chunk(content) -> str:
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                text = item.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+                else:
+                    parts.append(json.dumps(item, ensure_ascii=False))
+            else:
+                parts.append(str(item))
+        return "".join(parts)
+    try:
+        return json.dumps(content, ensure_ascii=False)
+    except Exception:
+        return str(content)
+
+
 def _sanitize_messages(messages):
     if not isinstance(messages, list):
         return messages
@@ -416,6 +442,7 @@ async def planner_node(state: State) -> Command[Literal["publisher", "__end__"]]
     goto = "publisher"
     retry_messages = None
     retry_llm = None
+    runtime_event_handler = state.get("runtime_event_handler")
 
     if state["workflow_mode"] == "launch":
         prompt_state = dict(state)
@@ -485,15 +512,40 @@ async def planner_node(state: State) -> Command[Literal["publisher", "__end__"]]
         response = llm.astream(messages)
         chunk_count = 0
         async for chunk in response:
-            if chunk.content:
-                content += chunk.content  # type: ignore
+            chunk_text = _stringify_stream_chunk(getattr(chunk, "content", ""))
+            if chunk_text:
+                content += chunk_text
                 # Real-time streaming output to user
-                print(chunk.content, end="", flush=True)
+                print(chunk_text, end="", flush=True)
+                if callable(runtime_event_handler):
+                    await runtime_event_handler(
+                        {
+                            "event": "planner_delta",
+                            "agent_name": "planner",
+                            "data": {
+                                "delta": {"content": chunk_text},
+                                "full_content": content,
+                                "is_final": False,
+                            },
+                        }
+                    )
                 chunk_count += 1
 
         # Add newline after streaming completes
         if chunk_count > 0:
             print()  # Newline after streaming
+        if callable(runtime_event_handler):
+            await runtime_event_handler(
+                {
+                    "event": "planner_delta",
+                    "agent_name": "planner",
+                    "data": {
+                        "delta": {"content": ""},
+                        "full_content": content,
+                        "is_final": True,
+                    },
+                }
+            )
 
         llm_time = time.time() - llm_start
         logger.info("[PERF] LLM call completed: %.2fs", llm_time)
@@ -549,15 +601,40 @@ async def planner_node(state: State) -> Command[Literal["publisher", "__end__"]]
         polish_content = ""
         chunk_count = 0
         async for chunk in response:
-            if chunk.content:
-                polish_content += chunk.content  # type: ignore
+            chunk_text = _stringify_stream_chunk(getattr(chunk, "content", ""))
+            if chunk_text:
+                polish_content += chunk_text
                 # Real-time streaming output to user
-                print(chunk.content, end="", flush=True)
+                print(chunk_text, end="", flush=True)
+                if callable(runtime_event_handler):
+                    await runtime_event_handler(
+                        {
+                            "event": "planner_delta",
+                            "agent_name": "planner",
+                            "data": {
+                                "delta": {"content": chunk_text},
+                                "full_content": polish_content,
+                                "is_final": False,
+                            },
+                        }
+                    )
                 chunk_count += 1
 
         # Add newline after streaming completes
         if chunk_count > 0:
             print()  # Newline after streaming
+        if callable(runtime_event_handler):
+            await runtime_event_handler(
+                {
+                    "event": "planner_delta",
+                    "agent_name": "planner",
+                    "data": {
+                        "delta": {"content": ""},
+                        "full_content": polish_content,
+                        "is_final": True,
+                    },
+                }
+            )
 
         llm_time = time.time() - llm_start
         logger.info("[PERF] Polish LLM call completed: %.2fs", llm_time)

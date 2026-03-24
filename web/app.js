@@ -88,6 +88,7 @@ let toolStats = {};
 let selectedToolName = null;
 let mcpConfig = null;
 let plannerBuffer = "";
+let plannerFinalMessageBuffer = "";
 let plannerCollecting = false;
 let planSteps = [];
 let plannerOnlyMode = false;
@@ -148,6 +149,7 @@ const resetPlan = () => {
   }
   planSteps = [];
   plannerBuffer = "";
+  plannerFinalMessageBuffer = "";
   plannerCollecting = false;
   updateConfirmExecuteState();
 };
@@ -565,7 +567,6 @@ const runPlannerUpdate = async (instruction, appendHistory = true) => {
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
       buffer = parseSse(buffer, handleEvent);
-      schedulePlannerTimeout();
     }
   } catch (err) {
     if (err?.name !== "AbortError") {
@@ -618,6 +619,47 @@ const appendOutput = (agentName, content) => {
   appendOutputImmediate(agentName, content);
 };
 
+const refreshPlannerTimeout = () => {
+  if (!plannerOnlyMode || !plannerOnlyTimeoutId) return;
+  clearTimeout(plannerOnlyTimeoutId);
+  plannerOnlyTimeoutId = setTimeout(() => {
+    if (plannerOnlyController) {
+      plannerOnlyController.abort();
+    }
+    showPlanNlHint("生成超时，请调整指令后重试。", true);
+    plannerOnlyMode = false;
+    plannerOnlyController = null;
+  }, PLANNER_ONLY_TIMEOUT_MS);
+};
+
+const applyPlannerStepsFromBuffer = (buffer, options = {}) => {
+  const { finalize = false } = options;
+  const parsed = extractJsonFromText(buffer);
+  const steps = normalizePlanSteps(parsed);
+  if (!steps.length) {
+    if (finalize) {
+      showPlanHint("Planner output is not valid JSON steps.", true);
+      if (plannerOnlyMode) {
+        showPlanNlHint("未能解析规划结果，请调整指令再试。", true);
+      }
+    }
+    return false;
+  }
+
+  planSteps = steps.map((step) => normalizeStep(step));
+  plannerOnlyStepsUpdated = true;
+  renderPlanSummary(planSteps);
+  renderPlanEditor();
+  showPlanValidationHint("计划已更新，可继续用自然语言补充。");
+
+  if (finalize && plannerOnlyMode && plannerOnlyController) {
+    plannerOnlyController.abort();
+    showPlanNlHint("已根据指令生成新计划。");
+    closePlanModal();
+  }
+  return true;
+};
+
 const clearOutput = () => {
   streamOutput.innerHTML = "";
   outputBlocks = new Map();
@@ -653,26 +695,32 @@ const handleEvent = (eventName, payload) => {
   if (eventName === "messages") {
     const agentName = payload.agent_name || payload.data?.agent_name || payload.data?.tool || "assistant";
     const content = payload.data?.delta?.content || payload.data?.message || payload.raw || "";
-    if (plannerOnlyMode && typeof agentName === "string" && agentName.toLowerCase().includes("planner")) {
-      if (plannerOnlyTimeoutId) {
-        clearTimeout(plannerOnlyTimeoutId);
-        plannerOnlyTimeoutId = setTimeout(() => {
-          if (plannerOnlyController) {
-            plannerOnlyController.abort();
-          }
-          showPlanNlHint("生成超时，请调整指令后重试。", true);
-          plannerOnlyMode = false;
-          plannerOnlyController = null;
-        }, PLANNER_ONLY_TIMEOUT_MS);
-      }
-    }
     if (typeof agentName === "string" && agentName.toLowerCase().includes("planner")) {
-      plannerCollecting = true;
-      plannerBuffer += content;
+      refreshPlannerTimeout();
+      plannerFinalMessageBuffer += content;
+      return;
     }
     if (!plannerOnlyMode) {
       appendOutput(agentName, content);
     }
+    return;
+  }
+  if (eventName === "planner_delta") {
+    const agentName = payload.agent_name || payload.data?.agent_name || "planner";
+    const content = payload.data?.delta?.content || "";
+    const fullContent = payload.data?.full_content || "";
+    const isFinal = Boolean(payload.data?.is_final);
+    refreshPlannerTimeout();
+    plannerCollecting = !isFinal;
+    if (fullContent) {
+      plannerBuffer = fullContent;
+    } else if (content) {
+      plannerBuffer += content;
+    }
+    if (content && !plannerOnlyMode) {
+      appendOutput(agentName, content);
+    }
+    applyPlannerStepsFromBuffer(plannerBuffer, { finalize: false });
     return;
   }
   if (eventName === "start_of_workflow") {
@@ -696,6 +744,7 @@ const handleEvent = (eventName, payload) => {
     if (typeof agentName === "string" && agentName.toLowerCase().includes("planner")) {
       plannerCollecting = true;
       plannerBuffer = "";
+      plannerFinalMessageBuffer = "";
       showPlanHint("Collecting plan output...");
     }
     if (!plannerOnlyMode) {
@@ -711,25 +760,11 @@ const handleEvent = (eventName, payload) => {
     }
     if (typeof agentName === "string" && agentName.toLowerCase().includes("planner")) {
       plannerCollecting = false;
-      const parsed = extractJsonFromText(plannerBuffer);
-      const steps = normalizePlanSteps(parsed);
-      if (steps.length) {
-        planSteps = steps.map((step) => normalizeStep(step));
-        plannerOnlyStepsUpdated = true;
-        renderPlanSummary(planSteps);
-        renderPlanEditor();
-        showPlanValidationHint("计划已更新，可继续用自然语言补充。");
-        if (plannerOnlyMode && plannerOnlyController) {
-          plannerOnlyController.abort();
-          showPlanNlHint("已根据指令生成新计划。");
-          closePlanModal();
-        }
-      } else {
-        showPlanHint("Planner output is not valid JSON steps.", true);
-        if (plannerOnlyMode) {
-          showPlanNlHint("未能解析规划结果，请调整指令再试。", true);
-        }
+      const fallbackBuffer = plannerFinalMessageBuffer || plannerBuffer;
+      if (fallbackBuffer) {
+        plannerBuffer = fallbackBuffer;
       }
+      applyPlannerStepsFromBuffer(plannerBuffer, { finalize: true });
     }
     if (!plannerOnlyMode) {
       appendOutput("system", `\n[end_of_agent] ${agentName}\n`);

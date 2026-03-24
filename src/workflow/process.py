@@ -63,6 +63,41 @@ def _normalize_planning_steps(raw: Any) -> list:
     return []
 
 
+async def _execute_node_with_runtime_events(
+    state: State, node_func, enable_runtime_events: bool
+):
+    if not enable_runtime_events:
+        yield await node_func(state)
+        return
+
+    runtime_event_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+
+    async def _emit_runtime_event(event: dict[str, Any]) -> None:
+        await runtime_event_queue.put(event)
+
+    state["runtime_event_handler"] = _emit_runtime_event
+    command_task = asyncio.create_task(node_func(state))
+
+    try:
+        while True:
+            if command_task.done():
+                while not runtime_event_queue.empty():
+                    yield await runtime_event_queue.get()
+                break
+            try:
+                event = await asyncio.wait_for(runtime_event_queue.get(), timeout=0.05)
+                yield event
+            except asyncio.TimeoutError:
+                continue
+
+        command = await command_task
+        yield command
+    finally:
+        state.pop("runtime_event_handler", None)
+        if not command_task.done():
+            command_task.cancel()
+
+
 async def _prepare_execution_graph(workflow_id: str, user_id: str, resume_step: int = None) -> None:
     """Prepare execution graph and queue for production mode.
 
@@ -574,7 +609,19 @@ async def _process_workflow(
                 },
             }
             node_func = workflow.nodes[current_node]
-            command = await node_func(state)
+            command = None
+            async for runtime_result in _execute_node_with_runtime_events(
+                state,
+                node_func,
+                enable_runtime_events=agent_name == "planner",
+            ):
+                if hasattr(runtime_result, "goto"):
+                    command = runtime_result
+                else:
+                    yield runtime_result
+
+            if command is None:
+                raise RuntimeError(f"Node '{agent_name}' did not return a command")
 
             if hasattr(command, "update") and command.update:
                 for key, value in command.update.items():

@@ -1,5 +1,5 @@
 ﻿from enum import Enum, unique
-from typing import Any, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 try:
     from langgraph.graph import MessagesState
@@ -165,6 +165,7 @@ class State(MessagesState):
     stop_after_planner: bool
     instruction_history: list[str]
     planning_steps: list[dict]
+    runtime_event_handler: Optional[Callable[[dict[str, Any]], Awaitable[None]]]
 
 
 class RemoveAgentRequest(BaseModel):
