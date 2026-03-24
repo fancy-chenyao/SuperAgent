@@ -1,0 +1,106 @@
+﻿{
+  "schema": {
+    "version": "1.0.0",
+    "description": "内网企业库（独角兽）",
+    "fields": [
+      {"name": "company_id", "type": "string", "required": true},
+      {"name": "name", "type": "string", "required": true},
+      {"name": "industry", "type": "string"},
+      {"name": "valuation_billion_usd", "type": "number"},
+      {"name": "founded_year", "type": "number"},
+      {"name": "hq_city", "type": "string"},
+      {"name": "employees", "type": "number"},
+      {"name": "revenue_million_usd", "type": "number"},
+      {"name": "growth_rate_pct", "type": "number"},
+      {"name": "profitability", "type": "string"},
+      {"name": "status", "type": "string"},
+      {"name": "source", "type": "string"}
+    ]
+  },
+  "records": [
+    {
+      "company_id": "uc-001",
+      "name": "星云智控",
+      "industry": "企业软件",
+      "valuation_billion_usd": 4.2,
+      "founded_year": 2016,
+      "hq_city": "北京",
+      "employees": 1800,
+      "revenue_million_usd": 320,
+      "growth_rate_pct": 38,
+      "profitability": "亏损",
+      "status": "独角兽",
+      "source": "内网企业库"
+    },
+    {
+      "company_id": "uc-002",
+      "name": "云芯科技",
+      "industry": "半导体",
+      "valuation_billion_usd": 6.5,
+      "founded_year": 2014,
+      "hq_city": "上海",
+      "employees": 2400,
+      "revenue_million_usd": 560,
+      "growth_rate_pct": 26,
+      "profitability": "盈利",
+      "status": "独角兽",
+      "source": "内网企业库"
+    },
+    {
+      "company_id": "uc-003",
+      "name": "极光物流",
+      "industry": "智能物流",
+      "valuation_billion_usd": 3.1,
+      "founded_year": 2017,
+      "hq_city": "深圳",
+      "employees": 3200,
+      "revenue_million_usd": 410,
+      "growth_rate_pct": 45,
+      "profitability": "亏损",
+      "status": "独角兽",
+      "source": "内网企业库"
+    },
+    {
+      "company_id": "uc-004",
+      "name": "澜图医疗",
+      "industry": "医疗科技",
+      "valuation_billion_usd": 2.8,
+      "founded_year": 2015,
+      "hq_city": "杭州",
+      "employees": 1500,
+      "revenue_million_usd": 260,
+      "growth_rate_pct": 31,
+      "profitability": "亏损",
+      "status": "独角兽",
+      "source": "内网企业库"
+    },
+    {
+      "company_id": "uc-005",
+      "name": "皓月新能源",
+      "industry": "新能源",
+      "valuation_billion_usd": 5.4,
+      "founded_year": 2013,
+      "hq_city": "苏州",
+      "employees": 2700,
+      "revenue_million_usd": 620,
+      "growth_rate_pct": 22,
+      "profitability": "盈利",
+      "status": "独角兽",
+      "source": "内网企业库"
+    },
+    {
+      "company_id": "uc-006",
+      "name": "映河金融云",
+      "industry": "金融科技",
+      "valuation_billion_usd": 3.9,
+      "founded_year": 2018,
+      "hq_city": "广州",
+      "employees": 1300,
+      "revenue_million_usd": 210,
+      "growth_rate_pct": 52,
+      "profitability": "亏损",
+      "status": "独角兽",
+      "source": "内网企业库"
+    }
+  ]
+}

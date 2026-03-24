@@ -10,7 +10,7 @@ from src.manager.mcp import get_mcp_hot_reload_manager
 from src.manager.registry import AgentRegistry, ToolRegistry
 from src.manager.registry import sync_local_resources, sync_remote_agents
 from src.manager.resource import get_resource_registry, refresh_remote_resources, start_remote_registry_watch
-from src.service.env import USR_AGENT, USE_BROWSER, USE_MCP_TOOLS
+from src.service.env import USR_AGENT, USE_BROWSER, USE_MCP_TOOLS, DISABLE_DEFAULT_AGENTS
 from src.skills import SkillsManager
 from src.utils.path_utils import get_project_root
 
@@ -49,7 +49,8 @@ class AgentManager:
             if self._initialized:
                 return
 
-            await self._load_default_agents()
+            if not DISABLE_DEFAULT_AGENTS:
+                await self._load_default_agents()
             await self.agent_registry.load_from_disk(user_agent_flag=user_agent_flag)
             await self._sync_agent_cache()
 

@@ -9,7 +9,7 @@ from src.workflow import build_graph
 from src.manager import agent_manager
 from rich.console import Console
 from src.interface.agent import State
-from src.service.env import USE_BROWSER, AUTO_RECOVERY_ENABLED
+from src.service.env import USE_BROWSER, AUTO_RECOVERY_ENABLED, DISABLE_DEFAULT_AGENTS
 from src.workflow.cache import workflow_cache as cache
 from src.workflow.graph import CompiledWorkflow
 from src.interface.agent import WorkMode
@@ -28,7 +28,7 @@ from src.robust.hooks import (
 )
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.WARNING,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 
@@ -220,23 +220,27 @@ async def _prepare_execution_graph(workflow_id: str, user_id: str, resume_step: 
         final_queue = list(cache.queue[workflow_id])
         logger.info(f"Queue AFTER fast-forward: {[n['name'] for n in final_queue]}")
 
-if USE_BROWSER:
+if USE_BROWSER and not DISABLE_DEFAULT_AGENTS:
     DEFAULT_TEAM_MEMBERS_DESCRIPTION = """
         - **`coder`**: Executes Python or Bash commands, performs mathematical calculations, and outputs a Markdown report. Must be used for all mathematical computations.
         - **`browser`**: Directly interacts with web pages, performing complex operations and interactions. You can also leverage `browser` to perform in-domain search, like Facebook, Instagram, Github, etc.
         - **`reporter`**: Write a professional report based on the result of each step.
         
         """
-else:
+elif not DISABLE_DEFAULT_AGENTS:
     DEFAULT_TEAM_MEMBERS_DESCRIPTION = """
         - **`researcher`**: Uses search engines and web crawlers to gather information from the internet. Outputs a Markdown report summarizing findings. Researcher can not do math or programming.
         - **`coder`**: Executes Python or Bash commands, performs mathematical calculations, and outputs a Markdown report. Must be used for all mathematical computations.
         - **`reporter`**: Write a professional report based on the result of each step.
         
         """
+else:
+    DEFAULT_TEAM_MEMBERS_DESCRIPTION = ""
 
 TEAM_MEMBERS_DESCRIPTION_TEMPLATE = """
 - **`{agent_name}`**: {agent_description}
+  - Requires: {requires}
+  - Produces: {produces}
 """
 TOOLS_DESCRIPTION_TEMPLATE = """
 - **`{tool_name}`**: {tool_description}
@@ -265,9 +269,17 @@ async def _build_team_members(
             members.append(agent.agent_name)
 
         if agent.user_id != "share" or getattr(agent, "source", None) == "remote":
+            # Get requires and produces, format as comma-separated strings
+            requires = getattr(agent, "requires", [])
+            produces = getattr(agent, "produces", [])
+            requires_str = ", ".join(requires) if requires else "None"
+            produces_str = ", ".join(produces) if produces else "None"
+
             member_desc += "\n" + TEAM_MEMBERS_DESCRIPTION_TEMPLATE.format(
                 agent_name=agent.agent_name,
                 agent_description=agent.description,
+                requires=requires_str,
+                produces=produces_str,
             )
 
     return members, member_desc
@@ -585,6 +597,11 @@ async def _process_workflow(
                                     continue
                             if agent_name in ["planner", "coordinator", "agent_proxy"]:
                                 content = last_message["content"]
+                                if not isinstance(content, str):
+                                    try:
+                                        content = json.dumps(content, ensure_ascii=False)
+                                    except Exception:
+                                        content = str(content)
                                 # Log agent message to task log
                                 task_logger.log_message(node_name=original_node_name, content=content, step=step_count)
                                 chunk_size = 10  # send 10 words for each chunk

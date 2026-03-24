@@ -27,6 +27,7 @@ def _get_builtin_tool_instances() -> List[Any]:
             bash_tool,
             browser_tool,
             crawl_tool,
+            person_info_query_tool,
             python_repl_tool,
             tavily_tool,
             web_preview_tool,
@@ -42,6 +43,7 @@ def _get_builtin_tool_instances() -> List[Any]:
             write_file_tool,
             avatar_tool,
             web_preview_tool,
+            person_info_query_tool,
         ]
     except Exception as e:  # pragma: no cover - optional dependency in lightweight test env
         logger.warning("Failed to import builtin tools: %s", e)
