@@ -9,11 +9,24 @@
       "server_id": "remote-demo",
       "health_url": "http://127.0.0.1:8010/health",
       "metadata": {
-        "description": "Remote weather agent for location queries",
+        "description": "Remote weather agent for querying weather information of specific locations. Use this agent when you need to check weather conditions for cities or regions. This agent autonomously extracts location information from the conversation context.",
         "llm_type": "basic",
-        "prompt": "remote agent",
+        "prompt": "You are a weather query agent. Use the remote_weather_tool to get weather information for the specified location.",
         "selected_tools": [
-          {"name": "remote_weather_tool", "description": "Remote weather tool"}
+          {
+            "name": "remote_weather_tool",
+            "description": "Query weather information for a specific location",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "location": {
+                  "type": "string",
+                  "description": "The name of the city or region to query weather for, e.g., '雄安新区', '北京', '上海'"
+                }
+              },
+              "required": ["location"]
+            }
+          }
         ]
       }
     },
@@ -26,16 +39,43 @@
       "server_id": "remote-demo",
       "health_url": "http://127.0.0.1:8010/health",
       "metadata": {
-        "description": "Remote person info agent for querying personnel data",
+        "description": "Remote person info agent for querying personnel data. This agent autonomously extracts query information from the conversation context.",
         "llm_type": "basic",
         "prompt": "remote person info agent",
-        "requires": ["person.query"],
-        "produces": ["person.records", "person.email"],
-        "parameter_mapping": {
-          "person.query": "query"
-        },
         "selected_tools": [
-          {"name": "remote_person_info_tool", "description": "Remote person info tool"}
+          {
+            "name": "remote_person_info_tool",
+            "description": "Query personnel information from internal database",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "keyword": {
+                  "type": "string",
+                  "description": "Search keyword for person name or job title"
+                },
+                "job_keywords": {
+                  "type": "array",
+                  "items": {"type": "string"},
+                  "description": "Job title keywords, e.g., ['行长秘书', '经理']"
+                },
+                "org_keywords": {
+                  "type": "array",
+                  "items": {"type": "string"},
+                  "description": "Organization keywords, e.g., ['支行', '分行']"
+                },
+                "gender": {
+                  "type": "string",
+                  "enum": ["男", "女"],
+                  "description": "Gender filter"
+                },
+                "limit": {
+                  "type": "integer",
+                  "description": "Maximum number of results",
+                  "default": 5
+                }
+              }
+            }
+          }
         ]
       }
     },
@@ -48,16 +88,28 @@
       "server_id": "remote-demo",
       "health_url": "http://127.0.0.1:8010/health",
       "metadata": {
-        "description": "Remote agent to query unicorn companies from internal enterprise DB",
+        "description": "Remote agent to query unicorn companies from internal enterprise DB. This agent autonomously extracts query criteria from the conversation context.",
         "llm_type": "basic",
         "prompt": "remote unicorn selector agent",
-        "requires": ["unicorn.query"],
-        "produces": ["unicorn.list"],
-        "parameter_mapping": {
-          "unicorn.query": "query"
-        },
         "selected_tools": [
-          {"name": "remote_unicorn_db_tool", "description": "Remote unicorn DB tool"}
+          {
+            "name": "remote_unicorn_db_tool",
+            "description": "Query unicorn companies from enterprise database",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "status": {
+                  "type": "string",
+                  "description": "Company status filter, e.g., '独角兽'"
+                },
+                "limit": {
+                  "type": "integer",
+                  "description": "Maximum number of results",
+                  "default": 5
+                }
+              }
+            }
+          }
         ]
       }
     },
@@ -70,16 +122,29 @@
       "server_id": "remote-demo",
       "health_url": "http://127.0.0.1:8010/health",
       "metadata": {
-        "description": "Remote agent to query credit risk DB for business & risk metrics",
+        "description": "Remote agent to query credit risk DB for business & risk metrics. This agent autonomously extracts company information from previous steps in the conversation.",
         "llm_type": "basic",
         "prompt": "remote business risk agent",
-        "requires": ["unicorn.list"],
-        "produces": ["risk.metrics"],
-        "parameter_mapping": {
-          "unicorn.list": "companies"
-        },
         "selected_tools": [
-          {"name": "remote_credit_risk_db_tool", "description": "Remote credit risk DB tool"}
+          {
+            "name": "remote_credit_risk_db_tool",
+            "description": "Query credit risk metrics for companies",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "company_ids": {
+                  "type": "array",
+                  "items": {"type": "string"},
+                  "description": "List of company IDs to query risk metrics for. Extract from previous unicorn query results."
+                },
+                "companies": {
+                  "type": "array",
+                  "description": "Alternative: array of company objects with id/name fields"
+                }
+              },
+              "required": ["company_ids"]
+            }
+          }
         ]
       }
     },
@@ -92,16 +157,45 @@
       "server_id": "remote-demo",
       "health_url": "http://127.0.0.1:8010/health",
       "metadata": {
-        "description": "Remote agent to build markdown reports from structured inputs",
+        "description": "Remote agent to build markdown reports from structured inputs. This agent autonomously extracts analysis data from previous steps in the conversation.",
         "llm_type": "basic",
         "prompt": "remote report agent",
-        "requires": ["analysis.summary"],
-        "produces": ["report.markdown"],
-        "parameter_mapping": {
-          "analysis.summary": "data"
-        },
         "selected_tools": [
-          {"name": "remote_report_builder_tool", "description": "Remote report builder tool"}
+          {
+            "name": "remote_report_builder_tool",
+            "description": "Build markdown reports from structured data or raw analysis results",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "data": {
+                  "type": "array",
+                  "description": "Raw data array from previous analysis steps (e.g., unicorn records, risk metrics). The tool will use LLM to generate a comprehensive report from this data."
+                },
+                "sections": {
+                  "type": "array",
+                  "description": "Pre-structured report sections with heading and content",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "heading": {"type": "string"},
+                      "content": {"type": "string"}
+                    }
+                  }
+                },
+                "title": {
+                  "type": "string",
+                  "description": "Report title",
+                  "default": "分析报告"
+                },
+                "instruction": {
+                  "type": "string",
+                  "description": "Instructions for report generation",
+                  "default": "生成清晰、专业的Markdown分析报告"
+                }
+              },
+              "required": ["data"]
+            }
+          }
         ]
       }
     },
@@ -114,17 +208,33 @@
       "server_id": "remote-demo",
       "health_url": "http://127.0.0.1:8010/health",
       "metadata": {
-        "description": "Remote agent to send emails with default sender",
+        "description": "Remote agent to send emails with default sender. This agent autonomously extracts recipient email and message content from previous steps in the conversation.",
         "llm_type": "basic",
         "prompt": "remote email dispatch agent",
-        "requires": ["email.to", "report.markdown"],
-        "produces": ["email.sent_id"],
-        "parameter_mapping": {
-          "email.to": "to",
-          "report.markdown": "body"
-        },
         "selected_tools": [
-          {"name": "remote_email_tool", "description": "Remote email tool"}
+          {
+            "name": "remote_email_tool",
+            "description": "Send email with specified recipient and content",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "to": {
+                  "type": "string",
+                  "description": "Recipient email address. Extract from previous agent results (e.g., person info query results)."
+                },
+                "subject": {
+                  "type": "string",
+                  "description": "Email subject",
+                  "default": "分析报告"
+                },
+                "body": {
+                  "type": "string",
+                  "description": "Email body content. Extract from previous agent results (e.g., report generation results)."
+                }
+              },
+              "required": ["to", "body"]
+            }
+          }
         ]
       }
     },
@@ -137,16 +247,34 @@
       "server_id": "remote-demo",
       "health_url": "http://127.0.0.1:8010/health",
       "metadata": {
-        "description": "Remote agent to create visit schedules",
+        "description": "Remote agent to create visit schedules. This agent autonomously extracts schedule information from the conversation context.",
         "llm_type": "basic",
         "prompt": "remote schedule agent",
-        "requires": ["schedule.request"],
-        "produces": ["schedule.created"],
-        "parameter_mapping": {
-          "schedule.request": "schedule"
-        },
         "selected_tools": [
-          {"name": "remote_schedule_tool", "description": "Remote schedule tool"}
+          {
+            "name": "remote_schedule_tool",
+            "description": "Create or manage visit schedules",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "action": {
+                  "type": "string",
+                  "enum": ["create", "update", "delete"],
+                  "description": "Schedule action",
+                  "default": "create"
+                },
+                "schedule": {
+                  "type": "object",
+                  "properties": {
+                    "title": {"type": "string", "description": "Schedule title"},
+                    "date": {"type": "string", "description": "Schedule date"},
+                    "location": {"type": "string", "description": "Visit location"}
+                  },
+                  "description": "Schedule details"
+                }
+              }
+            }
+          }
         ]
       }
     },
@@ -159,16 +287,38 @@
       "server_id": "remote-demo",
       "health_url": "http://127.0.0.1:8010/health",
       "metadata": {
-        "description": "Remote todo agent for querying upcoming tasks",
+        "description": "Remote todo agent for querying upcoming tasks. This agent autonomously extracts query information from the conversation context.",
         "llm_type": "basic",
         "prompt": "remote todo agent",
-        "requires": ["todo.query"],
-        "produces": ["todo.list"],
-        "parameter_mapping": {
-          "todo.query": "query"
-        },
         "selected_tools": [
-          {"name": "remote_todo_query_tool", "description": "Remote todo query tool"}
+          {
+            "name": "remote_todo_query_tool",
+            "description": "Query upcoming tasks and todos",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "start_date": {
+                  "type": "string",
+                  "description": "Start date for query range (ISO format)"
+                },
+                "end_date": {
+                  "type": "string",
+                  "description": "End date for query range (ISO format)"
+                },
+                "status": {
+                  "type": "string",
+                  "enum": ["待办", "进行中", "已完成"],
+                  "description": "Task status filter"
+                },
+                "action": {
+                  "type": "string",
+                  "enum": ["query", "create", "update", "delete"],
+                  "description": "Action to perform",
+                  "default": "query"
+                }
+              }
+            }
+          }
         ]
       }
     },
@@ -181,7 +331,7 @@
       "server_id": "remote-demo",
       "health_url": "http://127.0.0.1:8011/health",
       "metadata": {
-        "description": "Remote weather lookup tool"
+        "description": "Query weather information for a specific location. Parameters: location (string, required) - the name of the city or region to query weather for, e.g., '雄安新区', '北京', '上海'. Returns weather conditions and temperature."
       }
     },
     {

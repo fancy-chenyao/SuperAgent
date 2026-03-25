@@ -190,7 +190,11 @@ class AgentManager:
     ):
         await self.ensure_initialized()
         selected_tools = [
-            Tool(name=getattr(t, "name", ""), description=getattr(t, "description", ""))
+            Tool(
+                name=getattr(t, "name", ""),
+                description=getattr(t, "description", ""),
+                parameters=getattr(t, "parameters", None)
+            )
             for t in tools
             if getattr(t, "name", None)
         ]
@@ -251,7 +255,11 @@ class AgentManager:
                 description=spec["description"],
                 llm_type=spec["llm_type"],
                 selected_tools=[
-                    Tool(name=t.name, description=getattr(t, "description", ""))
+                    Tool(
+                        name=t.name,
+                        description=getattr(t, "description", ""),
+                        parameters=getattr(t, "parameters", None)
+                    )
                     for t in spec["tools"]
                 ],
                 prompt=get_prompt_template(spec["name"]),
@@ -261,7 +269,11 @@ class AgentManager:
     async def _list_default_tools(self):
         await self.ensure_initialized()
         return [
-            Tool(name=tool_name, description=getattr(agent_tool, "description", ""))
+            Tool(
+                name=tool_name,
+                description=getattr(agent_tool, "description", ""),
+                parameters=getattr(agent_tool, "parameters", None)
+            )
             for tool_name, agent_tool in self.available_tools.items()
         ]
 

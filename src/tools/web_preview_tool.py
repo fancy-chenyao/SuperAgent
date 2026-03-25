@@ -25,12 +25,12 @@ class WebPreviewTool(BaseTool):
     def _run(self, content: str, title: str = "Web Preview", user_id: str = None) -> str:
         """Generate web preview HTML file"""
 
-        print(" Calling LLM to generate HTML...")
-        
+        logger.info("Calling LLM to generate HTML...")
+
         try:
             # Call LLM for content summarization
             llm = get_llm_by_type("basic")
-            
+
             # Build prompt requiring only HTML code return
             prompt = f"""Please summarize the following content and convert it into a beautiful HTML page. Requirements:
 1. Return only complete HTML code, no other text explanations
@@ -46,8 +46,8 @@ Content:
             # Call LLM to get HTML code
             response = llm.invoke([HumanMessage(content=prompt)])
             html_content = response.content.strip()
-            
-            print("✅ LLM response received")
+
+            logger.info("LLM response received")
             
             # If the returned content contains markdown code block markers, remove them
             if html_content.startswith("```html"):
@@ -58,19 +58,19 @@ Content:
                 html_content = html_content[:-3]
             
             html_content = html_content.strip()
-            
+
             # Ensure src/tools/web_preview directory exists
             web_preview_dir = Path("src/tools/web_preview")
             web_preview_dir.mkdir(parents=True, exist_ok=True)
-            print(f" Created directory: {web_preview_dir.absolute()}")
-            
+            logger.info(f"Created directory: {web_preview_dir.absolute()}")
+
             # Write HTML file
             html_file = web_preview_dir / "index.html"
             with open(html_file, 'w', encoding='utf-8') as f:
                 f.write(html_content)
-            
-            print(f" HTML file saved: {html_file.absolute()}")
-            print(" Web Preview generation completed!")
+
+            logger.info(f"HTML file saved: {html_file.absolute()}")
+            logger.info("Web Preview generation completed!")
             
             # Send special web_preview_ready message
             if user_id:
@@ -111,10 +111,9 @@ Content:
             
             logger.info(f"Web preview HTML generated successfully at {html_file}")
             return f"Web preview has been generated successfully with the title '{title}'. The HTML content has been summarized and formatted into a beautiful webpage. The preview link will be automatically sent to the frontend."
-            
+
         except Exception as e:
             error_msg = f"Failed to generate web preview. Error: {repr(e)}"
-            print(f"❌ Generation failed: {error_msg}")
             logger.error(error_msg)
             return error_msg
     

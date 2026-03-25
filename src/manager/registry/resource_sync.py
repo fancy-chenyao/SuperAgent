@@ -112,7 +112,13 @@ async def sync_remote_agents(resource_registry: ResourceRegistry, agent_registry
             if isinstance(item, Tool):
                 selected_tools.append(item)
             elif isinstance(item, dict):
-                selected_tools.append(Tool(name=item.get("name", ""), description=item.get("description", "")))
+                selected_tools.append(
+                    Tool(
+                        name=item.get("name", ""),
+                        description=item.get("description", ""),
+                        parameters=item.get("parameters")
+                    )
+                )
 
         # Extract requires and produces from metadata
         requires = metadata.get("requires", [])

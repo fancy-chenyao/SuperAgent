@@ -230,34 +230,14 @@ async def agent_proxy_node(state: State) -> Command[Literal["publisher", "__end_
     agent_requires = getattr(_agent, "requires", [])
     messages_to_send = state["messages"]
 
-    if False:
-        logger.info("=" * 80)
-        logger.info(f"[PARAMETER EXTRACTION] Agent: {_agent.agent_name}")
-        logger.info(f"[PARAMETER EXTRACTION] Agent requires: {agent_requires}")
-        logger.info(f"[PARAMETER EXTRACTION] Agent source: {_agent.source.value}")
-        logger.info(f"[PARAMETER EXTRACTION] Original message count: {len(state['messages'])}")
-
     if agent_requires and _agent.source.value == "remote":
         # Find current step in planning_steps
         planning_steps = state.get("planning_steps", [])
-        if False:
-            logger.info(f"[PARAMETER EXTRACTION] Total planning steps: {len(planning_steps)}")
-
         current_step = None
         for step in planning_steps:
             if step.get("agent_name") == state["next"]:
                 current_step = step
                 break
-
-        if current_step:
-            if False:
-                logger.info(f"[PARAMETER EXTRACTION] Found current step: {current_step.get('title')}")
-                logger.info(f"[PARAMETER EXTRACTION] Step has inputs: {bool(current_step.get('inputs'))}")
-                if current_step.get("inputs"):
-                    logger.info(f"[PARAMETER EXTRACTION] Input mappings: {json.dumps(current_step.get('inputs'), ensure_ascii=False, indent=2)}")
-        else:
-            if False:
-                logger.warning(f"[PARAMETER EXTRACTION] Could not find step for agent: {state['next']}")
 
         # Try to extract parameters if:
         # 1. Step has explicit input mappings, OR
@@ -269,9 +249,6 @@ async def agent_proxy_node(state: State) -> Command[Literal["publisher", "__end_
 
         if should_extract:
             try:
-                if False:
-                    logger.info("[PARAMETER EXTRACTION] Starting parameter extraction...")
-
                 # If step has explicit input mappings, use them
                 if current_step.get("inputs"):
                     # Extract parameters based on input mappings
@@ -281,63 +258,26 @@ async def agent_proxy_node(state: State) -> Command[Literal["publisher", "__end_
                         state["messages"]
                     )
                 else:
-                    # Fallback: Agent requires parameters but no input mappings
-                    # Try to extract from user instruction or context
-                    if False:
-                        logger.info("[PARAMETER EXTRACTION] No input mappings, attempting context extraction...")
+                    # Remote agents in autonomous mode don't need parameter extraction
+                    # They will extract parameters from the full message context themselves
                     parameters = {}
 
-                    # Get user instruction from state
-                    user_instruction = state.get("messages", [{}])[0].get("content", "")
-
-                    # Simple heuristic extraction for common patterns
-                    for param in agent_requires:
-                        if "person.query" in param:
-                            # Extract person query from instruction (e.g., "行长秘书")
-                            if "行长秘书" in user_instruction or "秘书" in user_instruction:
-                                parameters[param] = "行长秘书"
-                                if False:
-                                    logger.info(f"[PARAMETER EXTRACTION] Extracted {param} = '行长秘书' from user instruction")
-                        elif "unicorn.query" in param:
-                            # Extract unicorn query from instruction
-                            if "独角兽" in user_instruction:
-                                parameters[param] = "独角兽企业"
-                                if False:
-                                    logger.info(f"[PARAMETER EXTRACTION] Extracted {param} = '独角兽企业' from user instruction")
-                        # Add more patterns as needed
-
-                    if not parameters:
-                        if False:
-                            logger.warning(f"[PARAMETER EXTRACTION] Could not extract required parameters {agent_requires} from context")
-
                 if parameters:
-                    if False:
-                        logger.info(f"[PARAMETER EXTRACTION] ✓ Successfully extracted parameters:")
-                        logger.info(f"[PARAMETER EXTRACTION]   {json.dumps(parameters, ensure_ascii=False, indent=2)}")
-
                     # Transform parameter names using agent's parameter_mapping
                     # This ensures compatibility with tools that expect specific field names
                     transformed_params = {}
                     parameter_mapping = getattr(_agent, "parameter_mapping", None) or {}
 
                     if parameter_mapping:
-                        if False:
-                            logger.info(f"[PARAMETER EXTRACTION] Using parameter_mapping: {json.dumps(parameter_mapping, ensure_ascii=False)}")
                         for param_name, param_value in parameters.items():
                             # Use mapping if available, otherwise keep original name
                             mapped_name = parameter_mapping.get(param_name, param_name)
                             transformed_params[mapped_name] = param_value
                     else:
-                        if False:
-                            logger.info("[PARAMETER EXTRACTION] No parameter_mapping found, using fallback strategy")
                         # Fallback: remove prefix (e.g., "email.to" -> "to")
                         for param_name, param_value in parameters.items():
                             simple_name = param_name.split(".")[-1] if "." in param_name else param_name
                             transformed_params[simple_name] = param_value
-
-                    if False:
-                        logger.info(f"[PARAMETER EXTRACTION] ✓ Transformed parameters:")
-                        logger.info(f"[PARAMETER EXTRACTION]   {json.dumps(transformed_params, ensure_ascii=False, indent=2)}")
 
                     # Create a clean message with just the transformed parameters
                     messages_to_send = [
@@ -346,34 +286,9 @@ async def agent_proxy_node(state: State) -> Command[Literal["publisher", "__end_
                             "content": json.dumps(transformed_params, ensure_ascii=False)
                         }
                     ]
-                    if False:
-                        logger.info(f"[PARAMETER EXTRACTION] ✓ Created clean message with {len(messages_to_send)} message(s)")
-                else:
-                    if False:
-                        logger.warning("[PARAMETER EXTRACTION] ✗ No parameters extracted")
             except Exception as e:
-                if False:
-                    logger.error(f"[PARAMETER EXTRACTION] ✗ Failed to extract parameters: {e}")
-                    logger.error(f"[PARAMETER EXTRACTION] Exception details:", exc_info=True)
-                    logger.warning("[PARAMETER EXTRACTION] Falling back to sending all messages")
-        else:
-            if not current_step:
-                if False:
-                    logger.info("[PARAMETER EXTRACTION] Skipping extraction: current step not found")
-            elif not current_step.get("inputs"):
-                if False:
-                    logger.info("[PARAMETER EXTRACTION] Skipping extraction: no input mappings in step")
-    else:
-        if not agent_requires:
-            if False:
-                logger.info("[PARAMETER EXTRACTION] Skipping extraction: agent has no requirements")
-        elif _agent.source.value != "remote":
-            if False:
-                logger.info(f"[PARAMETER EXTRACTION] Skipping extraction: agent is not remote (source={_agent.source.value})")
-
-    if False:
-        logger.info(f"[PARAMETER EXTRACTION] Final message count to send: {len(messages_to_send)}")
-        logger.info("=" * 80)
+                logger.error(f"Failed to extract parameters: {e}")
+                # Fallback to sending all messages
 
     execute_result = await execute_agent(_agent, messages_to_send, context)
     response_content = execute_result.result if execute_result.is_success else execute_result.error

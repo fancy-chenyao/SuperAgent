@@ -45,19 +45,17 @@ class CompiledWorkflow:
         
     def invoke(self, state: State) -> State:
         current_node = self.start_node
-        print(f"CompiledWorkflow current_node: {current_node}")
         while current_node != "__end__":
             if current_node not in self.nodes:
                 raise ValueError(f"Node {current_node} not found in workflow")
-                
+
             node_func = self.nodes[current_node]
             command = node_func(state)
-            
+
             if hasattr(command, 'update') and command.update:
                 for key, value in command.update.items():
-                    print(f"update {key} to {value}")
                     state[key] = value
-            
+
             current_node = command.goto
-            
+
         return state

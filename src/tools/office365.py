@@ -26,8 +26,7 @@ class O365Toolkit(BaseModel):
 
 O365Toolkit.model_rebuild()
 
-toolkit = O365Toolkit()
-tools = toolkit.get_tools()
-print(tools)
-
-
+if __name__ == "__main__":
+    toolkit = O365Toolkit()
+    tools = toolkit.get_tools()
+    print(tools)

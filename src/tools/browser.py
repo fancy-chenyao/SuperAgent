@@ -112,7 +112,6 @@ class BrowserTool(BaseTool):
                 "scroll_amount": 1,
                 "return_html": "true"
             }
-            print("Request URL", url)
             # Send request to scroll API
             response = requests.get(f"{BROWSER_BACKEND}/scroll", params=query_params)
             

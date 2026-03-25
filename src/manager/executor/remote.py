@@ -313,6 +313,7 @@ class RemoteExecutor(AgentExecutor):
                 {
                     "name": getattr(t, "name", ""),
                     "description": getattr(t, "description", ""),
+                    "parameters": getattr(t, "parameters", {}),
                 }
                 for t in selected_tools
                 if getattr(t, "name", "")

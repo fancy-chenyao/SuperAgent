@@ -1,233 +1,281 @@
-# cooragent
+# SuperAgent
 
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
-[![Wechat](https://img.shields.io/badge/WeChat-cooragent-brightgreen?logo=wechat&logoColor=white)](./assets/wechat_community.jpg)
-[![GitHub stars](https://img.shields.io/github/stars/LeapLabTHU/Cooragent?style=social)](https://github.com/LeapLabTHU/Cooragent/stargazers)
+[![GitHub stars](https://img.shields.io/github/stars/LeapLabTHU/SuperAgent?style=social)](https://github.com/LeapLabTHU/SuperAgent/stargazers)
 
 [English](./README.md) | [简体中文](./README_zh.md)
 
-# Cooragent 是什么
+# SuperAgent 是什么
 
-Cooragent 是一个 AI 智能体协作社区。在这个社区中，你可以通过一句话创建一个具备强大功能的智能体，并与其他智能体协作完成复杂任务。智能体可以自由组合，创造出无限可能。与此同时，你还可以将你的智能体发布到社区中，与其他人共享。
+SuperAgent 是一个 AI 多智能体协作系统。通过一句话描述任务，SuperAgent 会自动分析需求、选择合适的智能体、规划执行步骤，并协调多个智能体协作完成复杂任务。智能体可以自由组合，创造出无限可能。
 
-# cooragent 的核心理念
+# 核心理念
+
 当智能体的构建和打磨变得足够简单，AGI 时代将真正到来。
-cooragent 的核心目标是：帮助用户快速构建智能体，快速构建工作流，快速打磨工作流。
+SuperAgent 的核心目标是：帮助用户快速构建智能体，快速构建工作流，快速打磨工作流。
 
-<h5 align="center">
-<video src="https://github.com/user-attachments/assets/9af611e3-aed6-4a2f-8663-428a7707fe8d" width="70%" alt="introduce cooragent" controls></video>
-</h5>
+# 核心特性
 
-# Cooragent Agent Studio
+## 三种工作模式
 
-Cooragent Agent Studio 是一款在线智能体工作室，能快速生成可完成各类场景任务的智能体。它支持随时随地使用，同时还允许你对自己创建的智能体进行管理与分享。 免费试用 [Cooragent Agent Studio](www.cooragent.com)
+SuperAgent 提供三种工作流模式，覆盖从快速原型到生产部署的完整生命周期：
 
-# 自动创建 Agent，创造无限可能
-Cooragent 有两种任务模式：**Agent Factory** 和 **Agent Workflow**。
-- **Agent Factory** 模式下，你只需要你对智能体做出描述，Cooragent 就会根据你的需求生成一个智能体。Agent Factory 模式下，系统的会自动分析用户需求，通过记忆和扩展深入理解用户，省去纷繁复杂的 Prompt 设计。Planner 会在深入理解用户需求的基础上，挑选合适的工具，自动打磨 Prompt，逐步完成智能体构建。智能体构建完成后，可以立即投入使用，但你仍然可以对智能体进行编辑，优化其行为和功能。
-- **Agent Workflow** 模式下你只需要描述你想要完成的目标任务，Cooragent 会自动分析任务的需求，挑选合适的智能体进行协作。Planner 根据各个智能体擅长的领域，对其进行组合并规划任务步骤和完成顺序，随后交由任务分发节点 publish 发布任务。各个智能领取自身任务，并协作完成任务。
-Cooragent 可以在两种模式下不断演进，从而创造出无限可能。
+### Launch 模式 - 快速构建
+- 只需描述想要完成的目标任务
+- 系统自动分析需求、选择智能体、构建完整工作流
+- 任务结束后工作流保存在本地（`store/workflow`），支持后续复用与编辑
+- CLI 命令：`run-l`
 
-# 高效构建 Agentic Workflow
-如何高效构建 Workflow 是提升 Agent 在生产场景落地的关键。传统的 Workflow 构建完全依赖于开发人员的经验。无论是工具的选择，Prompt 打磨还是结构选择都耗费大量的人工和时间成本。Cooragent 创造性的提供三种 Workflow 工作方式 - Launch, polish, production。
-- **Launch** 模式下，用户只需描述想要完成的目标任务，Cooragent 自动分析任务的需求，挑选合适的 Agent，构建完整工作流。且在任务结束后将工作流保存在本地存储中（通常在 store/workflow 下），支持后续复用与二次编辑。在 cli 工具中，用户可以通过 `run-l` 命令启动 Launch 模式。
+### Polish 模式 - 精细打磨
+- 手动或通过自然语言指令调整工作流
+- 支持修改执行顺序、工具选择、LLM 配置、Prompt 等
+- 基于 APE、Absolute-Zero-Reasoner 等技术自动优化
+- CLI 命令：`run-o`
 
-- **Polish** 模式下，用户可以手动调整 workflow 的执行顺序，Agent 的工具选择，Agent 的 LLM 配置以及相关 Prompt。用户也可以通过自然语言指令交由 Cooragent 针对性的对某些部分进行调整。例如用户可以告诉 Cooragent：“调整股票分析 agent 的工具选择， 使用 tavily 工具代替 browser 工具以便更快速的搜索信息“。Cooragent 会基于类似 [APE](!https://arxiv.org/abs/2211.01910), [Absolute-Zero-Reasoner](!https://andrewzh112.github.io/absolute-zero-reasoner/)等技术框架自动化地调整 Agent 使用的提示词、工具和其他流程。在 cli 工具中，用户可以通过 `run-o` 命令启动 Polish 模式。
+### Production 模式 - 生产运行
+- 使用打磨好的工作流高效执行
+- 避免过多运行干预，使用 Supervisor 对结果兜底
+- 支持断点恢复，确保长时间任务的可靠性
+- CLI 命令：`run-p`
 
-- **Production** 模式下，Cooragent 根据已经打磨好的 Workflow 高效执行，避免过多的运行干预，同时使用 Supervisor 对运行结果进行兜底。在 cli 工具中，用户可以通过 `run-p` 命令启动 Production 模式。
+## 多智能体协作架构
 
-**最佳实践**，Launch 模式用于自动化快速构建可运行的 Workflow。Polish 模式用于 Workflow 的精细化打磨。Production 模式用于生产场景，追求稳定运行。
+SuperAgent 采用 Coordinator-Planner-Publisher-AgentProxy 四层架构：
 
+1. **Coordinator（协调器）**：理解用户意图，决定是否进入规划
+2. **Planner（规划器）**：生成多智能体协作计划
+3. **Publisher（发布器）**：根据计划选择下一位执行的 Agent
+4. **Agent Proxy（代理执行器）**：调用目标 Agent（本地或远程），收集结果
 
-<div align="center" style="display: flex; gap: 20px;">
-    <img src="assets/polish.png" alt="Cooragent polish" />
-</div>
+## 强大的工具生态
 
+- **内置工具**：搜索、爬虫、代码执行、浏览器操作、文件管理、Excel 操作等
+- **MCP 集成**：支持 Model Context Protocol，可集成外部服务（如高德地图、AWS 服务）
+- **远程工具**：支持调用远程部署的 Agent 和工具
 
-# 快速安装
+## 任务执行追踪与恢复
 
-1. 使用 conda 安装
+- **完整日志记录**：记录每个任务执行的完整交互历史
+- **检查点机制**：每个节点执行后自动保存状态
+- **断点恢复**：支持从任意检查点恢复执行，应对网络错误、API 限流等场景
+- **Web UI 可视化**：通过 Task History 页面查看任务历史、日志和检查点
+
+# 快速开始
+
+## 安装
+
+### 使用 conda
+
 ```bash
-git clone https://github.com/LeapLabTHU/cooragent.git
-cd cooragent
+git clone https://github.com/LeapLabTHU/SuperAgent.git
+cd SuperAgent
 
-conda create -n cooragent python=3.12
-conda activate cooragent
+conda create -n superagent python=3.12
+conda activate superagent
 
 pip install -e .
 
-# Optional: 使用 browser 工具时需要安装
+# 可选：使用 browser 工具时需要安装
 playwright install
 
-# 配置 API keys 和其他环境变量
+# 配置环境变量
 cp .env.example .env
-# Edit .env file and fill in your API keys
+# 编辑 .env 文件，填入你的 API keys
 
-# 通过 CLi 本地运行
-python cli.py 
+# 启动 CLI
+python cli.py
 ```
 
+### 使用 venv
 
-2. Installation using venv
 ```bash
-git clone https://github.com/LeapLabTHU/cooragent.git
-cd cooragent
+git clone https://github.com/LeapLabTHU/SuperAgent.git
+cd SuperAgent
 
 uv python install 3.12
 uv venv --python 3.12
-
-source .venv/bin/activate  # For Windows: .venv\Scripts\activate
+source .venv/bin/activate  # Windows: .venv\Scripts\activate
 
 uv sync
 
-# Optional: 使用 browser 工具时需要安装
+# 可选：使用 browser 工具时需要安装
 playwright install
 
-# 配置 API keys 和其他环境变量
-# 注意 Browse tool 等待时间较长，默认是关闭的。可以通过设置  `USE_BROWSER=True` 开启
+# 配置环境变量
 cp .env.example .env
-# Edit .env file and fill in your API keys
+# 编辑 .env 文件，填入你的 API keys
 
-# 通过 CLi 本地运行
-uv run cli.py 
+# 启动 CLI
+uv run cli.py
 ```
-**注意**：如果在 windows 平台运行本项目 cli 工具，除了上述步骤外，还需要安装额外依赖，详见[windows-平台支持](./docs/QA_zh.md#windows-平台支持)。
+
+**注意**：Windows 平台需要安装额外依赖，详见 [Windows 平台支持](./docs/QA_zh.md#windows-平台支持)
 
 ## 配置
 
-在项目根目录创建 `.env` 文件并配置以下环境变量：
+在 `.env` 文件中配置以下环境变量：
 
 ```bash
-cp .env.example .env
+# 推理模型（用于复杂推理任务）
+REASONING_MODEL=qwen-max-latest
+
+# 基础模型（用于简单任务）
+BASIC_MODEL=qwen-max-latest
+
+# 代码模型
+CODE_MODEL=deepseek-chat
+
+# 视觉语言模型
+VL_MODEL=qwen2.5-vl-72b-instruct
+
+# 浏览器工具（默认关闭，因为耗时较长）
+USE_BROWSER=False
+
+# 可选：搜索 API Key
+# TAVILY_API_KEY=
+# JINA_API_KEY=
 ```
 
+# CLI 工具使用
 
-# CLI 工具
-Cooragent 提供了一系列开发者工具，帮助开发者快速构建智能体。通过 CLI 工具，开发者可以快速创建，编辑，删除智能体。CLI 的设计注重效率和易用性，大幅减少了手动操作的繁琐，让开发者能更专注于智能体本身的设计与优化。
+## 启动交互式界面
 
-## 使用 Cli 工具一句话创建智能体
-进入 cooragent 命令工具界面
-```
+```bash
 python cli.py
 ```
-<p align="center">
-<img src="./assets/cli.png" alt="Cooragent cli 工具" />
-</p>
 
-## 一句话创建小米股票分析智能体
-```
-run-l -t agent_workflow -u test -m '创建一个股票分析专家 agent. 今天是 2025年 4 月 22 日，查看过去一个月的小米股票走势，分析当前小米的热点新闻，预测下个交易日的股价走势，并给出买入或卖出的建议。'
+## Launch 模式 - 创建股票分析工作流
+
+```bash
+run-l -u test -m '创建一个股票分析专家 agent. 今天是 2025年 4 月 22 日，查看过去一个月的小米股票走势，分析当前小米的热点新闻，预测下个交易日的股价走势，并给出买入或卖出的建议。'
 ```
 
-## 打磨智能体工作流
-```
-run-o -u <user-id>
-```
+## Polish 模式 - 打磨工作流
 
-## 以 Production 模式运行智能体工作流
-```
-run-p -u <user-id> -w <workflow-id> -m <message>
+```bash
+run-o -u test
 ```
 
-## 查询智能体
-```
-list-agents -u <user-id> -m <regex>
+## Production 模式 - 运行生产工作流
 
-```
-## 删除智能体
-
-```
-remove-agent -n <agent_name> -u <user-id>
+```bash
+run-p -u test -w <workflow-id>
 ```
 
-## 使用一组智能体协作完成复杂任务
+## 断点恢复
+
+```bash
+resume -w <workflow-id> -s <step-number> -u test
 ```
-run-l -t agent_workflow -u test -m '综合运用任务规划智能体，爬虫智能体，代码运行智能体，浏览器操作智能体，报告撰写智能体，文件操作智能体为我规划一个 2025 年五一期间去云南旅游的行程。首先运行爬虫智能体爬取云南旅游的景点信息，并使用浏览器操作智能体浏览景点信息，选取最值得去的 10 个景点。然后规划一个 5 天的旅游的行程，使用报告撰写智能体生成一份旅游报告，最后使用文件操作智能体将报告保存为 pdf 文件。'
+
+## 管理 Agent
+
+```bash
+# 列出 Agent
+list-agents -u test
+
+# 编辑 Agent
+edit-agent -n <agent-name> -u test
+
+# 删除 Agent
+remove-agent -n <agent-name> -u test
 ```
 
-## 集成 MCP 服务 (类似 Claude Desktop)
+## 查看工具列表
 
-通过模型上下文协议 (MCP) 集成外部服务和工具，以增强您的智能体 (Agent) 的能力。这类似于某些桌面 AI 助手 (如 Claude Desktop) 管理外部功能的方式。
+```bash
+list-default-tools
+```
 
-**配置方法：**
+# Web UI
 
-1.  **定位/创建配置文件**：
-    在您的项目根目录中找到或创建 `config/mcp.json` 文件。
+## 启动 Web 服务
 
-    ```bash
-    cd ./config
-    cp mcp.json.example mcp.json
-    ```
+```bash
+python cli.py web --host 0.0.0.0 --port 8001
+```
 
-2.  **添加 MCP 服务**：
-    在此 JSON 文件中定义您的 MCP 服务。每个服务都有一个唯一的键 (key) 和一个配置对象。
+访问 `http://localhost:8001` 使用 Web 界面。
 
-    配置文件 (`config/mcp.json`) 示例：
-    ```json
-    {
-        "mcpServers": {
-          "aws-kb-retrieval": {
-            "command": "npx",
-            "args": ["-y", "@modelcontextprotocol/server-aws-kb-retrieval"],
-            "env": {
-              "AWS_ACCESS_KEY_ID": "YOUR_ACCESS_KEY_HERE",
-              "AWS_SECRET_ACCESS_KEY": "YOUR_SECRET_ACCESS_KEY_HERE",
-              "AWS_REGION": "YOUR_AWS_REGION_HERE"
-            }
-          },
-          "AMAP": {
-            "url": "https://mcp.amap.com/sse",
-            "env": {
-              "AMAP_MAPS_API_KEY": "AMAP_MAPS_API_KEY"
-            }
-          }
-        }
+Web UI 提供：
+- 任务执行面板
+- Agent/Tool/Workflow 管理
+- 任务历史查看
+- 检查点可视化
+- 断点恢复操作
+
+详见 [Web UI 使用指南](./docs/web_ui_guide_zh.md)
+
+# MCP 服务集成
+
+SuperAgent 支持通过 Model Context Protocol (MCP) 集成外部服务和工具。
+
+## 配置方法
+
+1. 创建配置文件：
+```bash
+cd ./config
+cp mcp.json.example mcp.json
+```
+
+2. 添加 MCP 服务：
+```json
+{
+  "mcpServers": {
+    "AMAP": {
+      "url": "https://mcp.amap.com/sse",
+      "env": {
+        "AMAP_MAPS_API_KEY": "YOUR_API_KEY"
+      }
     }
-    ```
-
-**工作原理：**
-
-配置完成后，Cooragent 会自动将您在 `mcp.json` 中定义的这些 MCP 服务注册为可用工具。之后，智能体 (Agent) 在规划和执行任务时便可以选择和使用这些工具，从而实现更复杂的功能。
-如上配置好高德地图相关工具后，你可以尝试如下的使用案例：
-```
-创建一个导航智能体，专注于导航，使用地图相关工具，规划如何从北京西站到故宫。
+  }
+}
 ```
 
+配置完成后，SuperAgent 会自动将 MCP 服务注册为可用工具，智能体可以在任务执行时调用这些工具。
 
-## 文档 & 支持
+示例：
+```bash
+run-l -u test -m '创建一个导航智能体，使用地图相关工具，规划如何从北京西站到故宫。'
+```
+
+# 文档
+
+- [架构说明](./docs/architecture.md)
 - [常见问题 (FAQ)](./docs/QA_zh.md)
+- [任务执行追踪与恢复](./docs/task_execution_tracking_zh(taskLog_CheckpointResume).md)
+- [远程调用说明](./docs/remote_invocation_zh.md)
 - [商业支持计划](./docs/business_support_zh.md)
 
+# 贡献
 
-## 贡献
+我们欢迎各种形式的贡献！请查看 [贡献指南](CONTRIBUTING.md) 了解如何开始。
 
-我们欢迎各种形式的贡献！无论是修复错别字、改进文档，还是添加新功能，您的帮助都将备受感激。请查看我们的[贡献指南](CONTRIBUTING.md)了解如何开始。
+# 社区
 
+欢迎加入我们的微信群，随时提问、分享、交流。
 
-欢迎加入我们的 wechat 群，随时提问，分享，吐槽。
-
-<div align="center" style="display: flex; gap: 20px;">
-    <img src="assets/wechat_community.jpg" alt="Cooragent group" width="300" />
+<div align="center">
+    <img src="assets/wechat_community.jpg" alt="SuperAgent 微信群" width="300" />
 </div>
 
+# 引用
 
-## Citation
+核心贡献者：Zheng Wang, Shenzhi Wang, Yue Wu, Shiji Song, Gao Huang
 
-Core contributors: Zheng Wang,  Shenzhi Wang, Yue Wu, Shiji Song, Gao Huang
-
-```
-@misc{wang2025cooragent,
-  title        = {Cooragent: An AI Agent Collaboration Community},
+```bibtex
+@misc{wang2025superagent,
+  title        = {SuperAgent: An AI Multi-Agent Collaboration System},
   author       = {Zheng Wang, Shenzhi Wang, Yue Wu, Chi Zhang, Shiji Song, Gao Huang},
-  howpublished = {\url{https://github.com/LeapLabTHU/cooragent}},
+  howpublished = {\url{https://github.com/LeapLabTHU/SuperAgent}},
   year         = {2025}
 }
 ```
 
-## Star History
-![Star History Chart](https://api.star-history.com/svg?repos=LeapLabTHU/cooragent&type=Date)
+# Star History
 
+![Star History Chart](https://api.star-history.com/svg?repos=LeapLabTHU/SuperAgent&type=Date)
 
-## 致谢
-特别感谢所有让 cooragent 成为可能的开源项目和贡献者。我们站在巨人的肩膀上。
+# 致谢
 
+特别感谢所有让 SuperAgent 成为可能的开源项目和贡献者。

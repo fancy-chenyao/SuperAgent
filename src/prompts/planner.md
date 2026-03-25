@@ -99,25 +99,35 @@ For each step, you MUST specify the `inputs` field to map the agent's required p
    - `description`: A clear description of what this data represents
 
 **CRITICAL RULES**:
-- **NEVER leave `inputs` empty if the agent has a "Requires" field**
-- **NO implicit parameters**: Every required parameter MUST have an explicit InputMapping
+- **Remote agents without "Requires" field are autonomous**: They extract parameters from the conversation context themselves. Leave `inputs` empty for these agents.
+- **For agents WITH "Requires" field**: Every required parameter MUST have an explicit InputMapping
+- **NO implicit parameters**: If an agent has a "Requires" field, every parameter must be mapped
 - **NO "through instruction parsing"**: If a parameter comes from user instructions, you must still create a mapping (use a special source_step like "user_instruction" if needed, but prefer to have a dedicated step that extracts this information)
 - **If a required parameter has no source**: Add a new step to fetch/extract that data BEFORE the current step
 - **User-provided data**: If data comes from user input (like "行长秘书"), create a step that extracts or queries this information, then map it
 
-**Example - WRONG**:
+**Example - Autonomous Remote Agent (NO "Requires" field)**:
 ```json
 {
-  "agent_name": "RemotePersonInfoAgent",
+  "agent_name": "RemoteWeatherAgent",
+  "description": "Query weather for location mentioned in user instruction",
+  "inputs": []  // ✓ CORRECT: Autonomous agent extracts location itself
+}
+```
+
+**Example - WRONG (Agent with "Requires" field)**:
+```json
+{
+  "agent_name": "SomeStructuredAgent",
   "description": "Query person info (person.query implicitly from user instruction)",
   "inputs": []  // ❌ WRONG: Missing mapping for person.query
 }
 ```
 
-**Example - CORRECT**:
+**Example - CORRECT (Agent with "Requires" field)**:
 ```json
 {
-  "agent_name": "RemotePersonInfoAgent",
+  "agent_name": "SomeStructuredAgent",
   "description": "Query person info for '行长秘书'",
   "inputs": [
     {
