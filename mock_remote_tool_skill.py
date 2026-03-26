@@ -1007,108 +1007,67 @@ async def tool(req: ToolRequest, authorization: Optional[str] = Header(default=N
             salary_records = data.get("salary_records", [])
             employee_id = req.arguments.get("employee_id")
             employee_name = req.arguments.get("employee_name")
-            id_number = req.arguments.get("id_number")
-            employee_id_list = req.arguments.get("employee_id_list") or []
-            employee_name_list = req.arguments.get("employee_name_list") or []
-            id_number_list = req.arguments.get("id_number_list") or []
-            min_monthly_salary = _get_float_value(req.arguments.get("min_monthly_salary"))
-            max_monthly_salary = _get_float_value(req.arguments.get("max_monthly_salary"))
-            min_annual_salary = _get_float_value(req.arguments.get("min_annual_salary"))
-            max_annual_salary = _get_float_value(req.arguments.get("max_annual_salary"))
-            last_updated_after = req.arguments.get("last_updated_after")
-            last_updated_before = req.arguments.get("last_updated_before")
+            employee_id_list = req.arguments.get("employee_id_list")
             include_breakdown = req.arguments.get("include_breakdown", True)
-            return_list = bool(req.arguments.get("return_list", False))
+            return_list = req.arguments.get("return_list", False)
 
-            def _as_list(value: Any) -> List[str]:
-                if value is None:
-                    return []
-                if isinstance(value, list):
-                    return [str(v) for v in value if v is not None]
-                return [str(value)]
+            logger.info(f"Salary query - employee_id: {employee_id}, employee_name: {employee_name}, employee_id_list: {employee_id_list}")
 
-            employee_id_list = _as_list(employee_id_list)
-            employee_name_list = _as_list(employee_name_list)
-            id_number_list = _as_list(id_number_list)
+            # 如果提供了 employee_id_list，批量查询
+            if employee_id_list and isinstance(employee_id_list, list):
+                matched_records = []
+                for record in salary_records:
+                    record_id = str(record.get("employee_id"))
+                    if record_id in [str(eid) for eid in employee_id_list]:
+                        salary_record = {
+                            "status": "success",
+                            "employee_id": record.get("employee_id"),
+                            "employee_name": record.get("employee_name"),
+                            "id_number": record.get("id_number"),
+                            "monthly_salary": record.get("monthly_salary"),
+                            "annual_salary": record.get("annual_salary"),
+                            "currency": record.get("currency", "CNY"),
+                            "last_updated": record.get("last_updated")
+                        }
+                        if include_breakdown:
+                            salary_record["salary_breakdown"] = record.get("salary_breakdown", {})
+                        matched_records.append(salary_record)
 
-            logger.info(
-                "Salary query - employee_id=%s, employee_name=%s, id_number=%s, id_list=%s, name_list=%s",
-                employee_id,
-                employee_name,
-                id_number,
-                employee_id_list,
-                employee_name_list,
-            )
-
-            def _matches(record: Dict[str, Any]) -> bool:
-                if employee_id and str(record.get("employee_id")) != str(employee_id):
-                    return False
-                if employee_name and str(record.get("employee_name")) != str(employee_name):
-                    return False
-                if id_number and str(record.get("id_number")) != str(id_number):
-                    return False
-                if employee_id_list and str(record.get("employee_id")) not in employee_id_list:
-                    return False
-                if employee_name_list and str(record.get("employee_name")) not in employee_name_list:
-                    return False
-                if id_number_list and str(record.get("id_number")) not in id_number_list:
-                    return False
-                monthly = _get_float_value(record.get("monthly_salary"))
-                annual = _get_float_value(record.get("annual_salary"))
-                if min_monthly_salary is not None and (monthly is None or monthly < min_monthly_salary):
-                    return False
-                if max_monthly_salary is not None and (monthly is None or monthly > max_monthly_salary):
-                    return False
-                if min_annual_salary is not None and (annual is None or annual < min_annual_salary):
-                    return False
-                if max_annual_salary is not None and (annual is None or annual > max_annual_salary):
-                    return False
-                if last_updated_after and str(record.get("last_updated")) < str(last_updated_after):
-                    return False
-                if last_updated_before and str(record.get("last_updated")) > str(last_updated_before):
-                    return False
-                return True
-
-            matched = [record for record in salary_records if _matches(record)]
-
-            if not matched:
-                result = {
-                    "status": "not_found",
-                    "error": (
-                        "No salary record found for given conditions"
-                    ),
-                    "searched_records": len(salary_records),
-                }
+                logger.info(f"Batch salary query: found {len(matched_records)} records out of {len(employee_id_list)} requested")
+                result = matched_records
             else:
-                def _build_payload(record: Dict[str, Any]) -> Dict[str, Any]:
-                    payload = {
-                        "employee_id": record.get("employee_id"),
-                        "employee_name": record.get("employee_name"),
-                        "id_number": record.get("id_number"),
-                        "monthly_salary": record.get("monthly_salary"),
-                        "annual_salary": record.get("annual_salary"),
-                        "currency": record.get("currency", "CNY"),
-                        "last_updated": record.get("last_updated"),
-                    }
-                    if include_breakdown:
-                        payload["salary_breakdown"] = record.get("salary_breakdown", {})
-                    return payload
+                # 单个查询（原有逻辑）
+                matched_record = None
+                for record in salary_records:
+                    if employee_id and str(record.get("employee_id")) == str(employee_id):
+                        matched_record = record
+                        break
+                    if employee_name and record.get("employee_name") == employee_name:
+                        matched_record = record
+                        break
 
-                if return_list or len(matched) != 1:
+                if not matched_record:
                     result = {
-                        "status": "success",
-                        "matched_count": len(matched),
-                        "records": [_build_payload(item) for item in matched],
+                        "status": "not_found",
+                        "error": f"No salary record found for employee_id={employee_id}, employee_name={employee_name}",
+                        "searched_records": len(salary_records)
                     }
                 else:
-                    payload = _build_payload(matched[0])
-                    result = {"status": "success", **payload}
+                    result = {
+                        "status": "success",
+                        "employee_id": matched_record.get("employee_id"),
+                        "employee_name": matched_record.get("employee_name"),
+                        "id_number": matched_record.get("id_number"),
+                        "monthly_salary": matched_record.get("monthly_salary"),
+                        "annual_salary": matched_record.get("annual_salary"),
+                        "currency": matched_record.get("currency", "CNY"),
+                        "last_updated": matched_record.get("last_updated")
+                    }
 
-                logger.info(
-                    "Salary matched: %s records, first=%s",
-                    len(matched),
-                    matched[0].get("employee_name") if matched else "N/A",
-                )
+                    if include_breakdown:
+                        result["salary_breakdown"] = matched_record.get("salary_breakdown", {})
+
+                    logger.info(f"Salary found: {result['employee_name']} - Monthly: {result['monthly_salary']}")
 
         except Exception as exc:
             import traceback

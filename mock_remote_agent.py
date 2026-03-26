@@ -13,10 +13,23 @@ import logging
 from openai import AsyncOpenAI
 from dotenv import load_dotenv
 
+# Import agent factory
+from remote_agents.factory import AgentFactory
+
 # 加载.env文件
 load_dotenv()
 
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
+
+# Set log level for remote_agents module
+logging.getLogger('remote_agents').setLevel(logging.INFO)
+logging.getLogger('remote_agents.hr_assistant_agent').setLevel(logging.INFO)
+logging.getLogger('remote_agents.base_agent').setLevel(logging.INFO)
 
 app = FastAPI()
 
@@ -170,6 +183,13 @@ Special Extraction Rules for {tool_name}:
 - For compound organization names, split into key components:
   * "二级分支行" -> "org_keywords": ["二级", "分行"]
   * "一级支行" -> "org_keywords": ["一级", "支行"]
+- For document generation tools (remote_docx_generator_tool):
+  * Extract employee data from previous agent results in the conversation history
+  * Look for employee information in JSON format from RemoteHRAssistantAgent
+  * The "data" parameter should contain: name, id_number, position, join_date, monthly_salary, annual_salary
+  * Extract these fields from the employee record in previous messages
+  * If generating income_proof, use template_name="income_proof"
+  * If generating employment_certificate, use template_name="employment_certificate"
 
 Examples:
 User: "查询二级分支行80后行长"
@@ -180,6 +200,10 @@ Output: {{"job_keywords": ["经理"], "gender": "女", "birth_year_range": [1990
 
 User: "查询行长秘书"
 Output: {{"job_keywords": ["行长", "秘书"]}}
+
+User: "帮王强开买房用的个人收入证明"
+Previous Agent Result: {{"adtEmpeNm": "王强", "idvId": "86000103", "tcoPostNm": "支行行长", "jnUnitDt": "2005-07-01", "monthly_salary": 28000.0, "annual_salary": 336000.0}}
+Output: {{"template_name": "income_proof", "data": {{"name": "王强", "id_number": "86000103", "position": "支行行长", "join_date": "2005年7月1日", "monthly_salary": "28000.00", "annual_salary": "336000.00"}}, "output_filename": "income_proof_王强_20260326"}}
 
 Output Format:
 {{
@@ -313,15 +337,17 @@ async def health():
 @app.post("/agent")
 async def agent(req: RemoteRequest, authorization: Optional[str] = Header(default=None)):
     """
-    远程Agent执行endpoint - 使用LLM提取参数
+    远程Agent执行endpoint - 使用模块化Agent架构
 
     流程:
     1. 接收请求
-    2. 使用LLM从消息历史中提取参数
-    3. 调用工具
+    2. 根据agent_name获取对应的Agent实例
+    3. Agent内部处理多工具调用和结果合并
     4. 返回结果
     """
-    logger.info(f"Received request for agent: {req.agent_name}, message count: {len(req.messages)}")
+    logger.info(f"Received request for agent: {req.agent_name}, message count: {len(req.messages)}, tools: {len(req.tools or [])}")
+    if req.tools:
+        logger.info(f"Tools list: {[t.get('name') for t in req.tools]}")
 
     # 检查是否有工具需要调用
     if not req.tools or len(req.tools) == 0:
@@ -335,56 +361,42 @@ async def agent(req: RemoteRequest, authorization: Optional[str] = Header(defaul
             }
         }
 
-    tool_def = req.tools[0]
-    tool_name = tool_def.get("name", "unknown")
-    logger.info(f"Tool to call: {tool_name}")
-
     try:
-        # 使用LLM提取参数
-        logger.info("Extracting parameters using LLM...")
+        # 获取Agent实例
+        agent = AgentFactory.get_agent(req.agent_name)
+        logger.info(f"Using agent: {agent.__class__.__name__}")
 
-        arguments = await parameter_extractor.extract(
-            agent_name=req.agent_name,
-            agent_prompt=req.prompt or "",
-            tool=tool_def,
-            messages=req.messages
+        # 执行Agent
+        result = await agent.execute(
+            tools=req.tools,
+            messages=req.messages,
+            context=req.context,
+            parameter_extractor=parameter_extractor
         )
-
-        logger.info(f"Extracted parameters: {list(arguments.keys()) if isinstance(arguments, dict) else 'N/A'}")
-
-        # 检查是否为空
-        if not arguments or (isinstance(arguments, dict) and len(arguments) == 0):
-            logger.warning("Extracted parameters is empty")
-
-        # 调用工具
-        logger.info(f"Calling tool: {tool_name}")
-        timeout_seconds = 60 if req.agent_name in {"RemoteReportAgent", "RemoteKnowledgeAgent"} else 10
-
-        async with httpx.AsyncClient(timeout=httpx.Timeout(timeout_seconds, read=timeout_seconds)) as client:
-            resp = await client.post(
-                "http://127.0.0.1:8011/tool",
-                json={"tool": tool_name, "arguments": arguments},
-                headers={"Content-Type": "application/json"},
-            )
-            tool_result = resp.json().get("result")
-            logger.info("Tool call succeeded")
-
-            # 完整展示返回结果
-            if isinstance(tool_result, dict):
-                logger.info(f"Tool result: {json.dumps(tool_result, ensure_ascii=False, indent=2)}")
-            else:
-                logger.info(f"Tool result: {tool_result}")
 
         # 返回结果
         return {
             "status": "success",
-            "result": tool_result,
+            "result": result,
             "metadata": {
                 "agent_name": req.agent_name,
-                "tool_called": tool_name,
+                "agent_class": agent.__class__.__name__,
+                "tools_count": len(req.tools),
                 "has_auth": bool(authorization),
                 "message_count": len(req.messages),
-                "extracted_params": list(arguments.keys()) if isinstance(arguments, dict) else [],
+            },
+        }
+
+    except ValueError as e:
+        # Agent not found
+        logger.error(f"Agent not found: {e}")
+        return {
+            "status": "failed",
+            "error": str(e),
+            "metadata": {
+                "agent_name": req.agent_name,
+                "has_auth": bool(authorization),
+                "message_count": len(req.messages),
             },
         }
 
@@ -399,7 +411,6 @@ async def agent(req: RemoteRequest, authorization: Optional[str] = Header(defaul
             "error": error_msg,
             "metadata": {
                 "agent_name": req.agent_name,
-                "tool": tool_name,
                 "has_auth": bool(authorization),
                 "message_count": len(req.messages),
             },

@@ -246,6 +246,7 @@ class PersonInfoQueryTool(BaseTool):
         return self._run(**kwargs)
 
 
-PersonInfoQueryTool = create_logged_tool(PersonInfoQueryTool)
-person_info_query_tool = PersonInfoQueryTool()
+# PersonInfoQueryTool = create_logged_tool(PersonInfoQueryTool)
+# person_info_query_tool = PersonInfoQueryTool()
+# NOTE: This local tool is disabled in favor of remote_person_info_tool
 

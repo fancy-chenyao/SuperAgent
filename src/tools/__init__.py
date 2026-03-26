@@ -6,7 +6,7 @@ from .bash_tool import bash_tool
 from .browser import browser_tool
 from .avatar_tool import avatar_tool
 from .web_preview_tool import web_preview_tool
-from .person_info_query import person_info_query_tool
+# from .person_info_query import person_info_query_tool  # Disabled: use remote_person_info_tool instead
 
 
 
@@ -19,5 +19,5 @@ __all__ = [
     "browser_tool",
     "avatar_tool",
     "web_preview_tool",
-    "person_info_query_tool",
+    # "person_info_query_tool",  # Disabled: use remote_person_info_tool instead
 ]

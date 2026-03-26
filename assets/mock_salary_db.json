@@ -44,6 +44,21 @@
       },
       "currency": "CNY",
       "last_updated": "2026-03-01"
+    },
+    {
+      "employee_id": "86000103",
+      "employee_name": "王强",
+      "id_number": "110101198211051234",
+      "monthly_salary": 28000.00,
+      "annual_salary": 336000.00,
+      "salary_breakdown": {
+        "base_salary": 20000.00,
+        "performance_bonus": 6000.00,
+        "position_allowance": 1500.00,
+        "meal_allowance": 500.00
+      },
+      "currency": "CNY",
+      "last_updated": "2026-03-01"
     }
   ]
 }

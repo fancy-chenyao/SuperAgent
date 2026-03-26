@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"from remote_agents.factory import AgentFactory; print\\(''Agents registered:'', list\\(AgentFactory._agents.keys\\(\\)\\)\\)\")",
+      "Bash(python -c \"import mock_remote_agent; print\\(''mock_remote_agent imported successfully''\\)\")",
+      "Bash(python -m py_compile mock_remote_agent.py)",
+      "Bash(python -m py_compile *.py)"
+    ]
+  }
+}
