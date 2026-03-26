@@ -323,6 +323,36 @@
       }
     },
     {
+      "type": "agent",
+      "name": "RemoteKnowledgeAgent",
+      "version": "1.0.0",
+      "endpoint": "http://127.0.0.1:8010/agent",
+      "protocol": "http",
+      "server_id": "remote-demo",
+      "health_url": "http://127.0.0.1:8010/health",
+      "metadata": {
+        "description": "Remote knowledge base agent for querying HR policies, labor laws, and general knowledge. This agent can answer questions about annual leave, pension, social security, and other HR-related topics. It autonomously extracts query information from the conversation context.",
+        "llm_type": "basic",
+        "prompt": "You are a professional knowledge base query assistant. Use the knowledge_search_tool to search the knowledge base and provide detailed, accurate answers to user questions.",
+        "selected_tools": [
+          {
+            "name": "knowledge_search_tool",
+            "description": "Search the knowledge base for HR policies, labor laws, and general knowledge",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "query": {
+                  "type": "string",
+                  "description": "The user's question or query, e.g., '入行12年能休多少天年假', '个人养老金账号怎么缴存'"
+                }
+              },
+              "required": ["query"]
+            }
+          }
+        ]
+      }
+    },
+    {
       "type": "tool",
       "name": "remote_weather_tool",
       "version": "1.0.0",
@@ -392,6 +422,18 @@
       "health_url": "http://127.0.0.1:8011/health",
       "metadata": {
         "description": "Remote schedule tool"
+      }
+    },
+    {
+      "type": "tool",
+      "name": "knowledge_search_tool",
+      "version": "1.0.0",
+      "endpoint": "http://127.0.0.1:8011/tool",
+      "protocol": "http",
+      "server_id": "remote-demo",
+      "health_url": "http://127.0.0.1:8011/health",
+      "metadata": {
+        "description": "Knowledge base search tool for HR policies and labor laws"
       }
     },
     {

@@ -4,8 +4,11 @@ from typing import Any, Dict, List, Optional, Tuple
 from pathlib import Path
 import concurrent.futures
 import json
+import logging
 import re
 import time
+
+logger = logging.getLogger(__name__)
 
 try:
     from src.llm.llm import get_llm_by_type
@@ -32,6 +35,7 @@ _UNICORN_CACHE: Optional[Dict[str, Any]] = None
 _RISK_CACHE: Optional[Dict[str, Any]] = None
 _EMAIL_CACHE: Optional[Dict[str, Any]] = None
 _SCHEDULE_CACHE: Optional[Dict[str, Any]] = None
+_KNOWLEDGE_CACHE: Optional[Dict[str, Any]] = None
 
 
 def _read_json(path: Path) -> Dict[str, Any]:
@@ -135,6 +139,21 @@ def _load_schedules() -> Dict[str, Any]:
         raise FileNotFoundError(f"Schedule DB not found: {path}")
     _SCHEDULE_CACHE = _read_json(path)
     return _SCHEDULE_CACHE
+
+
+def _knowledge_path() -> Path:
+    return Path(__file__).resolve().parent / "assets" / "knowledge_base.json"
+
+
+def _load_knowledge() -> Dict[str, Any]:
+    global _KNOWLEDGE_CACHE
+    if _KNOWLEDGE_CACHE is not None:
+        return _KNOWLEDGE_CACHE
+    path = _knowledge_path()
+    if not path.exists():
+        raise FileNotFoundError(f"Knowledge base not found: {path}")
+    _KNOWLEDGE_CACHE = _read_json(path)
+    return _KNOWLEDGE_CACHE
 
 
 def _flatten_text(person: Dict[str, Any]) -> str:
@@ -893,6 +912,72 @@ async def tool(req: ToolRequest, authorization: Optional[str] = Header(default=N
                 result = {"status": "success", "matched_count": len(filtered), "schedules": filtered}
         except Exception as exc:
             result = {"status": "error", "error": str(exc)}
+    elif req.tool == "knowledge_search_tool":
+        try:
+            data = _load_knowledge()
+            knowledge_items = data.get("knowledge_items", [])
+            query = req.arguments.get("query", "")
+
+            if not query:
+                raise ValueError("query parameter is required")
+
+            # 使用LLM理解问题并从知识库中检索答案
+            llm = get_llm_by_type("basic")
+
+            # 构建知识库内容字符串
+            knowledge_content = []
+            for idx, item in enumerate(knowledge_items, 1):
+                knowledge_content.append(f"[知识条目 {idx}]")
+                knowledge_content.append(f"类别: {item.get('category', '')}")
+                knowledge_content.append(f"问题: {item.get('question', '')}")
+                knowledge_content.append(f"内容:\n{item.get('content', '')}")
+                knowledge_content.append("")
+
+            knowledge_text = "\n".join(knowledge_content)
+
+            # 构建prompt
+            prompt = f"""你是一位专业的知识库查询助手。用户提出了一个问题，请从以下知识库中找到相关信息，并生成详细的回答。
+
+# 用户问题
+{query}
+
+# 知识库内容
+{knowledge_text}
+
+# 回答要求
+1. 仔细分析用户问题，理解其真实意图
+2. 从知识库中找到最相关的信息
+3. 基于知识库内容生成详细、准确的回答
+4. 如果知识库中有法律法规依据，请在回答中引用
+5. 回答应该完整、专业，包含必要的说明和注意事项
+6. 如果知识库中没有相关信息，请明确告知用户
+
+请直接输出回答内容，不要添加任何前缀或解释。"""
+
+            # 调用LLM
+            response = llm.invoke(prompt) if hasattr(llm, "invoke") else None
+            if hasattr(response, "content"):
+                answer = response.content
+            else:
+                answer = str(response) if response is not None else "无法生成回答"
+
+            # 记录完整答案
+            logger.info(f"Knowledge search completed for query: {query}")
+            logger.info(f"Full answer:\n{answer}")
+
+            result = {
+                "status": "success",
+                "query": query,
+                "answer": answer,
+                "knowledge_items_count": len(knowledge_items)
+            }
+        except Exception as exc:
+            import traceback
+            result = {
+                "status": "error",
+                "error": str(exc),
+                "traceback": traceback.format_exc()
+            }
     else:
         result = f"[remote-tool:{req.tool}] ok"
 

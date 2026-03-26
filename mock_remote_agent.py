@@ -43,7 +43,7 @@ def load_config() -> RemoteAgentConfig:
     """从环境变量加载配置"""
     api_key = os.getenv("REMOTE_API_KEY", "")
     base_url = os.getenv("REMOTE_BASE_URL", "")
-    model = os.getenv("REMOTE_MODEL", "gpt-4o-mini")
+    model = os.getenv("REMOTE_MODEL", "deepseek-v3.2")
 
     # 验证必需配置
     if not api_key:
@@ -337,9 +337,9 @@ async def agent(req: RemoteRequest, authorization: Optional[str] = Header(defaul
 
         # 调用工具
         logger.info(f"Calling tool: {tool_name}")
-        timeout = 60 if req.agent_name in {"RemoteReportAgent"} else 10
+        timeout_seconds = 60 if req.agent_name in {"RemoteReportAgent", "RemoteKnowledgeAgent"} else 10
 
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(timeout_seconds, read=timeout_seconds)) as client:
             resp = await client.post(
                 "http://127.0.0.1:8011/tool",
                 json={"tool": tool_name, "arguments": arguments},
@@ -347,6 +347,12 @@ async def agent(req: RemoteRequest, authorization: Optional[str] = Header(defaul
             )
             tool_result = resp.json().get("result")
             logger.info("Tool call succeeded")
+
+            # 完整展示返回结果
+            if isinstance(tool_result, dict):
+                logger.info(f"Tool result: {json.dumps(tool_result, ensure_ascii=False, indent=2)}")
+            else:
+                logger.info(f"Tool result: {tool_result}")
 
         # 返回结果
         return {
@@ -363,9 +369,9 @@ async def agent(req: RemoteRequest, authorization: Optional[str] = Header(defaul
 
     except Exception as e:
         import traceback
-        error_msg = str(e)
-        logger.error(f"Error: {error_msg}")
-        logger.debug(f"Traceback:\n{traceback.format_exc()}")
+        error_msg = str(e) or f"{type(e).__name__}: (empty error message)"
+        logger.error(f"Error [{type(e).__name__}]: {error_msg}")
+        logger.error(f"Traceback:\n{traceback.format_exc()}")
 
         return {
             "status": "failed",
