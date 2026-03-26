@@ -15,7 +15,8 @@ const clearOutputBtn = document.getElementById("clearOutput");
 const autoScrollBtn = document.getElementById("autoScrollBtn");
 const exportTxtBtn = document.getElementById("exportTxtBtn");
 
-const streamOutput = document.getElementById("streamOutput");
+const planningOutput = document.getElementById("planningOutput");
+const executionOutput = document.getElementById("executionOutput");
 const summaryFlow = document.getElementById("summaryFlow");
 const summaryHint = document.getElementById("summaryHint");
 const refreshAgentsBtn = document.getElementById("refreshAgents");
@@ -68,7 +69,8 @@ const planNlInput = document.getElementById("planNlInput");
 const planNlHint = document.getElementById("planNlHint");
 
 let currentAbortController = null;
-let outputBlocks = new Map();
+let planningOutputBlocks = new Map();
+let executionOutputBlocks = new Map();
 let flowSteps = [];
 let activeStepIndex = -1;
 const MAX_FLOW_STEPS = 40;
@@ -96,6 +98,8 @@ let plannerOnlyController = null;
 let plannerOnlyTimeoutId = null;
 let plannerOnlyStepsUpdated = false;
 let instructionHistory = [];
+let currentRunContext = null;
+let executionInProgress = false;
 let workflowsPage = 1;
 let workflowsPageSize = 5;
 let workflowsTotal = 0;
@@ -187,12 +191,24 @@ const showPlanValidationHint = (text, isError = false) => {
 };
 
 const updateConfirmExecuteState = () => {
-  if (!confirmExecuteBtn) return;
+  if (confirmExecuteBtn) {
+    const hasPlan = planSteps.length > 0;
+    const hasWorkflowId = workflowIdInput && workflowIdInput.value.trim();
+    confirmExecuteBtn.disabled = executionInProgress || !(hasPlan && hasWorkflowId);
+    confirmExecuteBtn.textContent = executionInProgress ? "执行中..." : "确认执行";
+  }
+  if (nlPlanEditBtn) {
+    nlPlanEditBtn.disabled = executionInProgress;
+  }
+  if (validatePlanBtn) {
+    validatePlanBtn.disabled = executionInProgress;
+  }
   const hasPlan = planSteps.length > 0;
-  const hasWorkflowId = workflowIdInput && workflowIdInput.value.trim();
-  confirmExecuteBtn.disabled = !(hasPlan && hasWorkflowId);
   if (retryPlanBtn) {
-    retryPlanBtn.disabled = !instructionHistory.length;
+    retryPlanBtn.disabled = executionInProgress || !instructionHistory.length;
+  }
+  if (addPlanStepBtn) {
+    addPlanStepBtn.disabled = executionInProgress;
   }
 };
 
@@ -223,6 +239,10 @@ const closePlanModal = () => {
     planNlHint.textContent = "";
   }
 };
+
+const getOutputContainer = (phase = "planning") => (phase === "executing" ? executionOutput : planningOutput);
+
+const getOutputBlocks = (phase = "planning") => (phase === "executing" ? executionOutputBlocks : planningOutputBlocks);
 
 const updateAutoScrollBtn = () => {
   autoScrollBtn.textContent = autoScrollEnabled ? "Auto-scroll: On" : "Auto-scroll: Off";
@@ -591,7 +611,10 @@ tabs.forEach((tab) => {
   tab.addEventListener("click", () => switchTab(tab.dataset.tab));
 });
 
-const ensureOutputBlock = (agentName) => {
+const ensureOutputBlock = (agentName, phase = "planning") => {
+  const outputContainer = getOutputContainer(phase);
+  const outputBlocks = getOutputBlocks(phase);
+  if (!outputContainer) return null;
   if (!outputBlocks.has(agentName)) {
     const block = document.createElement("div");
     block.className = "output-block";
@@ -601,22 +624,24 @@ const ensureOutputBlock = (agentName) => {
     pre.textContent = "";
     block.appendChild(title);
     block.appendChild(pre);
-    streamOutput.appendChild(block);
+    outputContainer.appendChild(block);
     outputBlocks.set(agentName, pre);
   }
   return outputBlocks.get(agentName);
 };
 
-const appendOutputImmediate = (agentName, content) => {
-  const target = ensureOutputBlock(agentName || "system");
+const appendOutputImmediate = (agentName, content, phase = "planning") => {
+  const outputContainer = getOutputContainer(phase);
+  const target = ensureOutputBlock(agentName || "system", phase);
+  if (!target || !outputContainer) return;
   target.textContent += content;
   if (autoScrollEnabled) {
-    streamOutput.scrollTop = streamOutput.scrollHeight;
+    outputContainer.scrollTop = outputContainer.scrollHeight;
   }
 };
 
-const appendOutput = (agentName, content) => {
-  appendOutputImmediate(agentName, content);
+const appendOutput = (agentName, content, phase = currentRunContext === "executing" ? "executing" : "planning") => {
+  appendOutputImmediate(agentName, content, phase);
 };
 
 const refreshPlannerTimeout = () => {
@@ -661,8 +686,20 @@ const applyPlannerStepsFromBuffer = (buffer, options = {}) => {
 };
 
 const clearOutput = () => {
-  streamOutput.innerHTML = "";
-  outputBlocks = new Map();
+  if (planningOutput) planningOutput.innerHTML = "";
+  if (executionOutput) executionOutput.innerHTML = "";
+  planningOutputBlocks = new Map();
+  executionOutputBlocks = new Map();
+};
+
+const clearOutputPhase = (phase = "planning") => {
+  const outputContainer = getOutputContainer(phase);
+  if (outputContainer) outputContainer.innerHTML = "";
+  if (phase === "executing") {
+    executionOutputBlocks = new Map();
+  } else {
+    planningOutputBlocks = new Map();
+  }
 };
 
 const parseSse = (buffer, onEvent) => {
@@ -726,11 +763,13 @@ const handleEvent = (eventName, payload) => {
   if (eventName === "start_of_workflow") {
     if (!plannerOnlyMode) {
       resetSummary();
-      resetPlan();
+      if (currentRunContext !== "executing") {
+        resetPlan();
+      }
       appendOutput("system", `\n[workflow] ${payload.data?.workflow_id || ""}\n`);
     }
     const wfId = payload.data?.workflow_id;
-    if (wfId && workflowIdInput && !workflowIdInput.value.trim()) {
+    if (wfId && workflowIdInput) {
       workflowIdInput.value = wfId;
     }
     updateConfirmExecuteState();
@@ -774,6 +813,10 @@ const handleEvent = (eventName, payload) => {
   if (eventName === "end_of_workflow") {
     if (!plannerOnlyMode) {
       showSummaryHint("Workflow completed.");
+      if (currentRunContext === "executing") {
+        showPlanValidationHint("执行完成，可查看执行日志。");
+        showPlanHint("计划执行完成。");
+      }
       appendOutput("system", "\n[workflow] completed\n");
     } else if (!plannerOnlyStepsUpdated) {
       showPlanNlHint("规划完成，但未生成可用步骤。请调整指令后重试。", true);
@@ -814,9 +857,15 @@ const runWorkflow = async () => {
   }
 
   setStatus("Running", true);
+  clearOutputPhase("planning");
+  clearOutputPhase("executing");
   resetSummary();
   resetPlan();
   instructionHistory = [message];
+  currentRunContext = "planning";
+  if (workflowIdInput) {
+    workflowIdInput.value = "";
+  }
   runBtn.disabled = true;
   stopBtn.disabled = false;
   if (confirmExecuteBtn) confirmExecuteBtn.disabled = true;
@@ -833,7 +882,7 @@ const runWorkflow = async () => {
     deep_thinking_mode: deepThinkingInput.checked,
     search_before_planning: searchBeforeInput.checked,
     coor_agents: selectedCoorAgents.size ? Array.from(selectedCoorAgents) : null,
-    workflow_id: workflowIdInput.value.trim() || null,
+    workflow_id: null,
   };
 
   currentAbortController = new AbortController();
@@ -864,6 +913,7 @@ const runWorkflow = async () => {
     setStatus("Error", false);
     showSummaryHint("Workflow error.", true);
   } finally {
+    currentRunContext = null;
     runBtn.disabled = false;
     stopBtn.disabled = true;
     currentAbortController = null;
@@ -888,10 +938,15 @@ const runExecution = async () => {
   }
 
   setStatus("Executing", true);
+  clearOutputPhase("executing");
   resetSummary();
+  currentRunContext = "executing";
+  executionInProgress = true;
+  showPlanValidationHint("执行中，请勿重复点击。");
+  showPlanHint("计划执行中，请查看执行日志。");
+  updateConfirmExecuteState();
   runBtn.disabled = true;
   stopBtn.disabled = false;
-  if (confirmExecuteBtn) confirmExecuteBtn.disabled = true;
 
   const payload = {
     user_id: userId,
@@ -935,7 +990,10 @@ const runExecution = async () => {
     appendOutput("system", `\n[error] ${err.message || err}\n`);
     setStatus("Error", false);
     showSummaryHint("Workflow error.", true);
+    showPlanValidationHint("执行失败，请检查执行日志后重试。", true);
   } finally {
+    currentRunContext = null;
+    executionInProgress = false;
     runBtn.disabled = false;
     stopBtn.disabled = true;
     currentAbortController = null;
@@ -998,8 +1056,11 @@ if (validatePlanBtn) {
 const stopWorkflow = () => {
   if (currentAbortController) {
     currentAbortController.abort();
+    executionInProgress = false;
     setStatus("Stopped", false);
     showSummaryHint("Workflow stopped.");
+    showPlanValidationHint("执行已停止，可重新执行。", true);
+    updateConfirmExecuteState();
   }
 };
 
@@ -2049,22 +2110,33 @@ const toggleAutoScroll = () => {
   autoScrollEnabled = !autoScrollEnabled;
   updateAutoScrollBtn();
   if (autoScrollEnabled) {
-    streamOutput.scrollTop = streamOutput.scrollHeight;
+    if (planningOutput) {
+      planningOutput.scrollTop = planningOutput.scrollHeight;
+    }
+    if (executionOutput) {
+      executionOutput.scrollTop = executionOutput.scrollHeight;
+    }
   }
 };
 
 const exportOutputTxt = () => {
-  if (!outputBlocks.size) {
+  if (!planningOutputBlocks.size && !executionOutputBlocks.size) {
     flashButton(exportTxtBtn, "Empty");
     return;
   }
 
   const parts = [];
-  outputBlocks.forEach((pre, agentName) => {
-    parts.push(`[${agentName}]`);
-    parts.push(pre.textContent.trimEnd());
-    parts.push("");
-  });
+  const appendSection = (title, blocks) => {
+    if (!blocks.size) return;
+    parts.push(`=== ${title} ===`);
+    blocks.forEach((pre, agentName) => {
+      parts.push(`[${agentName}]`);
+      parts.push(pre.textContent.trimEnd());
+      parts.push("");
+    });
+  };
+  appendSection("规划日志", planningOutputBlocks);
+  appendSection("执行日志", executionOutputBlocks);
   const text = parts.join("\n");
   const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
   const url = URL.createObjectURL(blob);

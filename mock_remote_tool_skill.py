@@ -36,6 +36,7 @@ _RISK_CACHE: Optional[Dict[str, Any]] = None
 _EMAIL_CACHE: Optional[Dict[str, Any]] = None
 _SCHEDULE_CACHE: Optional[Dict[str, Any]] = None
 _KNOWLEDGE_CACHE: Optional[Dict[str, Any]] = None
+_CALENDAR_CACHE: Optional[Dict[str, Any]] = None
 
 
 def _read_json(path: Path) -> Dict[str, Any]:
@@ -139,6 +140,27 @@ def _load_schedules() -> Dict[str, Any]:
         raise FileNotFoundError(f"Schedule DB not found: {path}")
     _SCHEDULE_CACHE = _read_json(path)
     return _SCHEDULE_CACHE
+
+
+def _calendar_path() -> Path:
+    return Path(__file__).resolve().parent / "assets" / "calendar_events.json"
+
+
+def _load_calendar_events() -> Dict[str, Any]:
+    global _CALENDAR_CACHE
+    if _CALENDAR_CACHE is not None:
+        return _CALENDAR_CACHE
+    path = _calendar_path()
+    if not path.exists():
+        raise FileNotFoundError(f"Calendar events data not found: {path}")
+    _CALENDAR_CACHE = _read_json(path)
+    return _CALENDAR_CACHE
+
+
+def _save_calendar_events(data: Dict[str, Any]) -> None:
+    global _CALENDAR_CACHE
+    _CALENDAR_CACHE = data
+    _calendar_path().write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def _knowledge_path() -> Path:
@@ -910,6 +932,67 @@ async def tool(req: ToolRequest, authorization: Optional[str] = Header(default=N
                         continue
                     filtered.append(item)
                 result = {"status": "success", "matched_count": len(filtered), "schedules": filtered}
+        except Exception as exc:
+            result = {"status": "error", "error": str(exc)}
+    elif req.tool == "get_calendar_events_tool":
+        try:
+            data = _load_calendar_events()
+            events = data.get("events", [])
+            start_date = req.arguments.get("start_date")
+            end_date = req.arguments.get("end_date")
+
+            if not start_date or not end_date:
+                raise ValueError("start_date and end_date are required")
+
+            filtered = []
+            for item in events:
+                event_date = item.get("start_date")
+                if event_date and event_date < start_date:
+                    continue
+                if event_date and event_date > end_date:
+                    continue
+                filtered.append(item)
+
+            filtered.sort(key=lambda item: (item.get("start_date", ""), item.get("start_time", "")))
+            result = {
+                "status": "success",
+                "matched_count": len(filtered),
+                "range": {"start_date": start_date, "end_date": end_date},
+                "events": filtered,
+            }
+        except Exception as exc:
+            result = {"status": "error", "error": str(exc)}
+    elif req.tool == "create_calendar_event_tool":
+        try:
+            data = _load_calendar_events()
+            events = data.get("events", [])
+            summary = req.arguments.get("summary")
+            start_date = req.arguments.get("start_date")
+            start_time = req.arguments.get("start_time")
+            notes = req.arguments.get("notes")
+            category = req.arguments.get("category", "日程")
+
+            if not summary:
+                raise ValueError("summary is required")
+            if not start_date:
+                raise ValueError("start_date is required")
+
+            payload = {
+                "id": f"event-{len(events)+1:03d}",
+                "summary": summary,
+                "start_date": start_date,
+                "category": category,
+            }
+            if start_time:
+                payload["start_time"] = start_time
+            if notes:
+                payload["notes"] = notes
+
+            events.append(payload)
+            events.sort(key=lambda item: (item.get("start_date", ""), item.get("start_time", "")))
+            data["events"] = events
+            _save_calendar_events(data)
+            result = {"status": "success", "created": payload}
         except Exception as exc:
             result = {"status": "error", "error": str(exc)}
     elif req.tool == "knowledge_search_tool":

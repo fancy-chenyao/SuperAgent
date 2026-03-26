@@ -1,1 +1,10 @@
-﻿{"schedules": []}
+{
+  "schedules": [
+    {
+      "title": "会客日程",
+      "date": "周三10点",
+      "location": null,
+      "id": "visit-0001"
+    }
+  ]
+}

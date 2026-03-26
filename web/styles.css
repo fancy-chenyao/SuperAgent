@@ -526,6 +526,29 @@ button:disabled {
   gap: 8px;
 }
 
+.output-panels {
+  margin-top: 14px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.output-panel {
+  min-width: 0;
+}
+
+.output-panel-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.output-panel .output-body {
+  margin-top: 8px;
+  max-height: 420px;
+  padding-right: 2px;
+}
+
 .summary-card {
   display: flex;
   flex-direction: column;
@@ -617,6 +640,12 @@ button:disabled {
   white-space: pre-wrap;
   color: #30354a;
   line-height: 1.5;
+}
+
+@media (max-width: 900px) {
+  .output-panels {
+    grid-template-columns: 1fr;
+  }
 }
 
 .panel-actions {
