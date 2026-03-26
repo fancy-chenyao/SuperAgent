@@ -36,6 +36,8 @@ _RISK_CACHE: Optional[Dict[str, Any]] = None
 _EMAIL_CACHE: Optional[Dict[str, Any]] = None
 _SCHEDULE_CACHE: Optional[Dict[str, Any]] = None
 _KNOWLEDGE_CACHE: Optional[Dict[str, Any]] = None
+_SALARY_CACHE: Optional[Dict[str, Any]] = None
+_TEMPLATE_CACHE: Optional[Dict[str, Any]] = None
 
 
 def _read_json(path: Path) -> Dict[str, Any]:
@@ -139,6 +141,76 @@ def _load_schedules() -> Dict[str, Any]:
         raise FileNotFoundError(f"Schedule DB not found: {path}")
     _SCHEDULE_CACHE = _read_json(path)
     return _SCHEDULE_CACHE
+
+
+def _salary_path() -> Path:
+    return Path(__file__).resolve().parent / "assets" / "mock_salary_db.json"
+
+
+def _load_salary() -> Dict[str, Any]:
+    global _SALARY_CACHE
+    if _SALARY_CACHE is not None:
+        return _SALARY_CACHE
+    path = _salary_path()
+    if not path.exists():
+        raise FileNotFoundError(f"Salary DB not found: {path}")
+    _SALARY_CACHE = _read_json(path)
+    return _SALARY_CACHE
+
+
+def _template_path() -> Path:
+    return Path(__file__).resolve().parent / "assets" / "document_templates.json"
+
+
+def _load_templates() -> Dict[str, Any]:
+    global _TEMPLATE_CACHE
+    if _TEMPLATE_CACHE is not None:
+        return _TEMPLATE_CACHE
+    path = _template_path()
+    if not path.exists():
+        raise FileNotFoundError(f"Template file not found: {path}")
+    _TEMPLATE_CACHE = _read_json(path)
+    return _TEMPLATE_CACHE
+
+
+def _number_to_chinese(num: float) -> str:
+    """Convert number to Chinese uppercase format"""
+    if num == 0:
+        return "零元整"
+
+    units = ["", "拾", "佰", "仟", "万", "拾", "佰", "仟", "亿"]
+    digits = ["零", "壹", "贰", "叁", "肆", "伍", "陆", "柒", "捌", "玖"]
+
+    # Split into integer and decimal parts
+    int_part = int(num)
+    decimal_part = round((num - int_part) * 100)
+
+    # Convert integer part
+    result = ""
+    str_num = str(int_part)
+    length = len(str_num)
+
+    for i, digit in enumerate(str_num):
+        digit_val = int(digit)
+        if digit_val != 0:
+            result += digits[digit_val] + units[length - i - 1]
+        elif result and result[-1] != "零":
+            result += "零"
+
+    result = result.rstrip("零") + "元"
+
+    # Add decimal part
+    if decimal_part > 0:
+        jiao = decimal_part // 10
+        fen = decimal_part % 10
+        if jiao > 0:
+            result += digits[jiao] + "角"
+        if fen > 0:
+            result += digits[fen] + "分"
+    else:
+        result += "整"
+
+    return result
 
 
 def _knowledge_path() -> Path:
@@ -357,7 +429,8 @@ def _filter_people(
                     str(person.get("pstCtlg") or ""),
                 ]
             )
-            if not all(k in job_text for k in job_keywords):
+            # 改为"任意包含"：只要有一个关键词匹配即可
+            if not any(k in job_text for k in job_keywords):
                 continue
 
         if org_keywords:
@@ -367,9 +440,11 @@ def _filter_people(
                     str(person.get("instFullNm") or ""),
                     str(person.get("boFullnm") or ""),
                     str(person.get("instAttrChnNm") or ""),
+                    str(person.get("mngbkInstLvlNm") or ""),  # 添加机构级别字段
                 ]
             )
-            if not all(k in org_text for k in org_keywords):
+            # 改为"任意包含"：只要有一个关键词匹配即可
+            if not any(k in org_text for k in org_keywords):
                 continue
 
         if education_any_keywords:
@@ -530,6 +605,14 @@ async def tool(req: ToolRequest, authorization: Optional[str] = Header(default=N
             base_years_min = _get_float_value(req.arguments.get("base_years_min"))
             base_years_max = _get_float_value(req.arguments.get("base_years_max"))
 
+            # 记录提取的参数
+            logger.info(f"Person query parameters:")
+            logger.info(f"  - job_keywords: {job_keywords}")
+            logger.info(f"  - org_keywords: {org_keywords}")
+            logger.info(f"  - birth_year_range: {birth_range}")
+            logger.info(f"  - gender: {gender}")
+            logger.info(f"  - keyword: {keyword}")
+
             birth_year_range: Optional[Tuple[int, int]] = None
             if isinstance(birth_range, (list, tuple)) and len(birth_range) == 2:
                 try:
@@ -538,6 +621,8 @@ async def tool(req: ToolRequest, authorization: Optional[str] = Header(default=N
                     birth_year_range = None
 
             people = sample.get("personInfoList", [])
+            logger.info(f"Total people in database: {len(people)}")
+
             filtered = _filter_people(
                 people,
                 conditions,
@@ -560,6 +645,10 @@ async def tool(req: ToolRequest, authorization: Optional[str] = Header(default=N
                 base_years_min,
                 base_years_max,
             )
+
+            logger.info(f"Filtered results: {len(filtered)} people matched")
+            if len(filtered) > 0:
+                logger.info(f"First matched person: {filtered[0].get('adtEmpeNm', 'N/A')}")
 
             limit = req.arguments.get("limit")
             if isinstance(limit, int) and limit > 0:
@@ -912,6 +1001,228 @@ async def tool(req: ToolRequest, authorization: Optional[str] = Header(default=N
                 result = {"status": "success", "matched_count": len(filtered), "schedules": filtered}
         except Exception as exc:
             result = {"status": "error", "error": str(exc)}
+    elif req.tool == "remote_salary_info_tool":
+        try:
+            data = _load_salary()
+            salary_records = data.get("salary_records", [])
+            employee_id = req.arguments.get("employee_id")
+            employee_name = req.arguments.get("employee_name")
+            include_breakdown = req.arguments.get("include_breakdown", True)
+
+            logger.info(f"Salary query - employee_id: {employee_id}, employee_name: {employee_name}")
+
+            # 查找匹配的员工
+            matched_record = None
+            for record in salary_records:
+                if employee_id and str(record.get("employee_id")) == str(employee_id):
+                    matched_record = record
+                    break
+                if employee_name and record.get("employee_name") == employee_name:
+                    matched_record = record
+                    break
+
+            if not matched_record:
+                result = {
+                    "status": "not_found",
+                    "error": f"No salary record found for employee_id={employee_id}, employee_name={employee_name}",
+                    "searched_records": len(salary_records)
+                }
+            else:
+                result = {
+                    "status": "success",
+                    "employee_id": matched_record.get("employee_id"),
+                    "employee_name": matched_record.get("employee_name"),
+                    "id_number": matched_record.get("id_number"),
+                    "monthly_salary": matched_record.get("monthly_salary"),
+                    "annual_salary": matched_record.get("annual_salary"),
+                    "currency": matched_record.get("currency", "CNY"),
+                    "last_updated": matched_record.get("last_updated")
+                }
+
+                if include_breakdown:
+                    result["salary_breakdown"] = matched_record.get("salary_breakdown", {})
+
+                logger.info(f"Salary found: {result['employee_name']} - Monthly: {result['monthly_salary']}")
+
+        except Exception as exc:
+            import traceback
+            logger.error(f"Salary query error: {exc}")
+            logger.error(traceback.format_exc())
+            result = {"status": "error", "error": str(exc)}
+    elif req.tool == "remote_hr_complete_info_tool":
+        try:
+            # 这个工具同时查询人员信息和工资信息
+            employee_name = req.arguments.get("employee_name")
+            employee_id = req.arguments.get("employee_id")
+
+            logger.info(f"HR complete info query - employee_name: {employee_name}, employee_id: {employee_id}")
+
+            # 1. 查询人员信息
+            person_sample = _load_sample()
+            people = person_sample.get("personInfoList", [])
+
+            matched_person = None
+            for person in people:
+                if employee_name and person.get("adtEmpeNm") == employee_name:
+                    matched_person = person
+                    break
+                if employee_id and str(person.get("idvId")) == str(employee_id):
+                    matched_person = person
+                    break
+
+            if not matched_person:
+                result = {
+                    "status": "not_found",
+                    "error": f"No employee found for name={employee_name}, id={employee_id}"
+                }
+            else:
+                # 2. 查询工资信息
+                salary_data = _load_salary()
+                salary_records = salary_data.get("salary_records", [])
+
+                matched_salary = None
+                person_name = matched_person.get("adtEmpeNm")
+                person_id = matched_person.get("idvId")
+
+                for record in salary_records:
+                    if record.get("employee_name") == person_name:
+                        matched_salary = record
+                        break
+                    if str(record.get("employee_id")) == str(person_id):
+                        matched_salary = record
+                        break
+
+                # 3. 合并结果
+                result = {
+                    "status": "success",
+                    "employee_info": {
+                        "name": matched_person.get("adtEmpeNm"),
+                        "id_number": matched_person.get("a001735"),  # 15位工号作为身份证号的替代
+                        "employee_id": matched_person.get("idvId"),
+                        "gender": matched_person.get("gnd"),
+                        "birth_date": matched_person.get("brthDt"),
+                        "age": matched_person.get("age"),
+                        "position": matched_person.get("tcoPostNm"),
+                        "department": matched_person.get("holdposInstNm"),
+                        "join_date": matched_person.get("jnCcbDt"),
+                        "work_years": matched_person.get("pcsTrdYrlmt"),
+                        "education": matched_person.get("hgstEddgrNm"),
+                        "phone": matched_person.get("officePhone"),
+                        "email": matched_person.get("internalMaiBox")
+                    }
+                }
+
+                if matched_salary:
+                    result["salary_info"] = {
+                        "monthly_salary": matched_salary.get("monthly_salary"),
+                        "annual_salary": matched_salary.get("annual_salary"),
+                        "currency": matched_salary.get("currency", "CNY"),
+                        "salary_breakdown": matched_salary.get("salary_breakdown", {})
+                    }
+                    logger.info(f"Complete info found: {person_name} - Monthly: {matched_salary.get('monthly_salary')}")
+                else:
+                    result["salary_info"] = None
+                    logger.warning(f"Salary info not found for {person_name}")
+
+        except Exception as exc:
+            import traceback
+            logger.error(f"HR complete info query error: {exc}")
+            logger.error(traceback.format_exc())
+            result = {"status": "error", "error": str(exc)}
+    elif req.tool == "remote_docx_generator_tool":
+        try:
+            import datetime
+            from docx import Document
+            from docx.shared import Pt, Inches
+            from docx.enum.text import WD_PARAGRAPH_ALIGNMENT
+
+            template_name = req.arguments.get("template_name")
+            data = req.arguments.get("data", {})
+            output_filename = req.arguments.get("output_filename") or f"document_{int(time.time())}"
+
+            logger.info(f"Generating document: template={template_name}, filename={output_filename}")
+
+            # Load template configuration
+            templates = _load_templates()
+            template_config = templates.get("templates", {}).get(template_name)
+
+            if not template_config:
+                raise ValueError(f"Template '{template_name}' not found")
+
+            # Prepare data with defaults
+            current_date = datetime.datetime.now().strftime("%Y年%m月%d日")
+            company_name = data.get("company_name", "中国建设银行股份有限公司")
+
+            # Convert salary to Chinese if needed
+            if "monthly_salary" in data and "monthly_salary_cn" not in data:
+                data["monthly_salary_cn"] = _number_to_chinese(float(data["monthly_salary"]))
+            if "annual_salary" in data and "annual_salary_cn" not in data:
+                data["annual_salary_cn"] = _number_to_chinese(float(data["annual_salary"]))
+
+            data["current_date"] = current_date
+            data["company_name"] = company_name
+
+            # Create document
+            doc = Document()
+
+            # Set default font
+            style = doc.styles['Normal']
+            style.font.name = '宋体'
+            style.font.size = Pt(12)
+
+            # Generate content from template
+            for item in template_config.get("content", []):
+                item_type = item.get("type")
+                text = item.get("text", "")
+
+                # Replace placeholders
+                for key, value in data.items():
+                    placeholder = "{{" + key + "}}"
+                    if placeholder in text:
+                        text = text.replace(placeholder, str(value))
+
+                if item_type == "heading":
+                    level = item.get("level", 1)
+                    para = doc.add_heading(text, level=level)
+                    align = item.get("align", "left")
+                    if align == "center":
+                        para.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
+                    elif align == "right":
+                        para.alignment = WD_PARAGRAPH_ALIGNMENT.RIGHT
+                elif item_type == "paragraph":
+                    para = doc.add_paragraph(text)
+                    align = item.get("align", "left")
+                    if align == "center":
+                        para.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
+                    elif align == "right":
+                        para.alignment = WD_PARAGRAPH_ALIGNMENT.RIGHT
+
+                    indent = item.get("indent", 0)
+                    if indent > 0:
+                        para.paragraph_format.first_line_indent = Inches(indent * 0.5)
+
+            # Save document
+            output_dir = Path(__file__).resolve().parent / "output"
+            output_dir.mkdir(exist_ok=True)
+            output_path = output_dir / f"{output_filename}.docx"
+
+            doc.save(str(output_path))
+
+            logger.info(f"Document generated successfully: {output_path}")
+
+            result = {
+                "status": "success",
+                "file_path": str(output_path),
+                "file_name": f"{output_filename}.docx",
+                "template_used": template_name,
+                "message": f"文档已生成：{output_filename}.docx"
+            }
+
+        except Exception as exc:
+            import traceback
+            logger.error(f"Document generation error: {exc}")
+            logger.error(traceback.format_exc())
+            result = {"status": "error", "error": str(exc), "traceback": traceback.format_exc()}
     elif req.tool == "knowledge_search_tool":
         try:
             data = _load_knowledge()

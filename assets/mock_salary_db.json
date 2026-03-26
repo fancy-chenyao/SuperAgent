@@ -1,0 +1,49 @@
+{
+  "salary_records": [
+    {
+      "employee_id": "1234567",
+      "employee_name": "张三",
+      "id_number": "110101198501011234",
+      "monthly_salary": 15000.00,
+      "annual_salary": 180000.00,
+      "salary_breakdown": {
+        "base_salary": 10000.00,
+        "performance_bonus": 3000.00,
+        "position_allowance": 1500.00,
+        "meal_allowance": 500.00
+      },
+      "currency": "CNY",
+      "last_updated": "2026-03-01"
+    },
+    {
+      "employee_id": "1234568",
+      "employee_name": "李四",
+      "id_number": "110101198802021234",
+      "monthly_salary": 18000.00,
+      "annual_salary": 216000.00,
+      "salary_breakdown": {
+        "base_salary": 12000.00,
+        "performance_bonus": 4000.00,
+        "position_allowance": 1500.00,
+        "meal_allowance": 500.00
+      },
+      "currency": "CNY",
+      "last_updated": "2026-03-01"
+    },
+    {
+      "employee_id": "1234569",
+      "employee_name": "王五",
+      "id_number": "110101198305151234",
+      "monthly_salary": 25000.00,
+      "annual_salary": 300000.00,
+      "salary_breakdown": {
+        "base_salary": 18000.00,
+        "performance_bonus": 5000.00,
+        "position_allowance": 1500.00,
+        "meal_allowance": 500.00
+      },
+      "currency": "CNY",
+      "last_updated": "2026-03-01"
+    }
+  ]
+}

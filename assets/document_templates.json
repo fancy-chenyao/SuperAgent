@@ -1,0 +1,117 @@
+{
+  "templates": {
+    "income_proof": {
+      "title": "收入证明",
+      "content": [
+        {
+          "type": "heading",
+          "text": "收入证明",
+          "level": 1,
+          "align": "center"
+        },
+        {
+          "type": "paragraph",
+          "text": ""
+        },
+        {
+          "type": "paragraph",
+          "text": "兹证明 {{name}}（身份证号：{{id_number}}）为我单位正式员工，现任 {{position}} 职务，于 {{join_date}} 入职。",
+          "indent": 2
+        },
+        {
+          "type": "paragraph",
+          "text": ""
+        },
+        {
+          "type": "paragraph",
+          "text": "该员工月收入为人民币 {{monthly_salary}} 元（大写：{{monthly_salary_cn}}），年收入为人民币 {{annual_salary}} 元（大写：{{annual_salary_cn}}）。",
+          "indent": 2
+        },
+        {
+          "type": "paragraph",
+          "text": ""
+        },
+        {
+          "type": "paragraph",
+          "text": "特此证明。",
+          "indent": 2
+        },
+        {
+          "type": "paragraph",
+          "text": ""
+        },
+        {
+          "type": "paragraph",
+          "text": ""
+        },
+        {
+          "type": "paragraph",
+          "text": "{{company_name}}",
+          "align": "right"
+        },
+        {
+          "type": "paragraph",
+          "text": "{{current_date}}",
+          "align": "right"
+        },
+        {
+          "type": "paragraph",
+          "text": "（盖章）",
+          "align": "right"
+        }
+      ]
+    },
+    "employment_certificate": {
+      "title": "在职证明",
+      "content": [
+        {
+          "type": "heading",
+          "text": "在职证明",
+          "level": 1,
+          "align": "center"
+        },
+        {
+          "type": "paragraph",
+          "text": ""
+        },
+        {
+          "type": "paragraph",
+          "text": "兹证明 {{name}}（身份证号：{{id_number}}）为我单位正式员工，现任 {{position}} 职务，于 {{join_date}} 入职至今。",
+          "indent": 2
+        },
+        {
+          "type": "paragraph",
+          "text": ""
+        },
+        {
+          "type": "paragraph",
+          "text": "特此证明。",
+          "indent": 2
+        },
+        {
+          "type": "paragraph",
+          "text": ""
+        },
+        {
+          "type": "paragraph",
+          "text": ""
+        },
+        {
+          "type": "paragraph",
+          "text": "{{company_name}}",
+          "align": "right"
+        },
+        {
+          "type": "paragraph",
+          "text": "{{current_date}}",
+          "align": "right"
+        },
+        {
+          "type": "paragraph",
+          "text": "（盖章）",
+          "align": "right"
+        }
+      ]
+    }
+  }
+}

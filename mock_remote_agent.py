@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python
+﻿ #!/usr/bin/env python
 """Mock remote agent server for testing RemoteExecutor."""
 
 from typing import Any, Dict, List, Optional
@@ -159,6 +159,27 @@ Instructions:
 5. Follow the parameter types and requirements defined in the schema
 6. For array parameters, extract all relevant items from the conversation
 7. Output ONLY a valid JSON object with the extracted parameters
+
+Special Extraction Rules for {tool_name}:
+- For age/generation expressions like "80后", "90后", "70后", convert to birth_year_range:
+  * "80后" -> "birth_year_range": [1980, 1989]
+  * "90后" -> "birth_year_range": [1990, 1999]
+  * "70后" -> "birth_year_range": [1970, 1979]
+- For compound job titles like "行长秘书", split into separate keywords:
+  * "行长秘书" -> "job_keywords": ["行长", "秘书"]
+- For compound organization names, split into key components:
+  * "二级分支行" -> "org_keywords": ["二级", "分行"]
+  * "一级支行" -> "org_keywords": ["一级", "支行"]
+
+Examples:
+User: "查询二级分支行80后行长"
+Output: {{"job_keywords": ["行长"], "org_keywords": ["二级", "分行"], "birth_year_range": [1980, 1989]}}
+
+User: "找一下90后的女性经理"
+Output: {{"job_keywords": ["经理"], "gender": "女", "birth_year_range": [1990, 1999]}}
+
+User: "查询行长秘书"
+Output: {{"job_keywords": ["行长", "秘书"]}}
 
 Output Format:
 {{
