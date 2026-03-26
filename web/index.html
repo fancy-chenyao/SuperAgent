@@ -103,13 +103,28 @@
                     <button id="clearOutput" class="ghost">Clear</button>
                   </div>
                 </div>
-                <div
-                  id="streamOutput"
-                  class="output-body"
-                  role="log"
-                  aria-live="polite"
-                  aria-relevant="additions"
-                ></div>
+                <div class="output-panels">
+                  <section class="output-panel">
+                    <div class="output-panel-title">规划日志</div>
+                    <div
+                      id="planningOutput"
+                      class="output-body"
+                      role="log"
+                      aria-live="polite"
+                      aria-relevant="additions"
+                    ></div>
+                  </section>
+                  <section class="output-panel">
+                    <div class="output-panel-title">执行日志</div>
+                    <div
+                      id="executionOutput"
+                      class="output-body"
+                      role="log"
+                      aria-live="polite"
+                      aria-relevant="additions"
+                    ></div>
+                  </section>
+                </div>
               </div>
 
               <div class="summary-card">

@@ -10,6 +10,7 @@ import re
 import datetime
 import os
 import logging
+import traceback
 from openai import AsyncOpenAI
 from dotenv import load_dotenv
 
@@ -130,6 +131,37 @@ class LLMParameterExtractor:
             logger.error(f"Parameter extraction failed: {e}")
             raise
 
+    async def select_tool_and_extract(
+        self,
+        agent_name: str,
+        agent_prompt: str,
+        tools: List[Dict[str, Any]],
+        messages: List[Dict[str, Any]],
+    ) -> tuple[Dict[str, Any], Dict[str, Any]]:
+        """当Agent配置了多个工具时，先选择工具，再提取参数。"""
+        selection_prompt = self._build_tool_selection_prompt(
+            agent_name=agent_name,
+            agent_prompt=agent_prompt,
+            tools=tools,
+            messages=messages,
+        )
+        llm_response = await self._call_llm(selection_prompt)
+        selection = self._parse_llm_response(llm_response)
+        selected_tool_name = selection.get("tool_name")
+        arguments = selection.get("arguments", {})
+
+        if not isinstance(arguments, dict):
+            arguments = {}
+
+        for tool in tools:
+            if tool.get("name") == selected_tool_name:
+                return tool, self._validate_parameters(arguments)
+
+        available_tools = [tool.get("name", "") for tool in tools]
+        raise ValueError(
+            f"Selected tool '{selected_tool_name}' is invalid. Available tools: {available_tools}"
+        )
+
     def _build_extraction_prompt(
         self,
         agent_name: str,
@@ -220,6 +252,68 @@ CRITICAL Requirements:
 - Ensure all values are properly formatted (strings, numbers, arrays, objects, etc.)
 """
 
+        return prompt
+
+    def _build_tool_selection_prompt(
+        self,
+        agent_name: str,
+        agent_prompt: str,
+        tools: List[Dict[str, Any]],
+        messages: List[Dict[str, Any]],
+    ) -> str:
+        """构建多工具选择与参数提取 prompt。"""
+        formatted_messages = self._format_messages(messages)
+
+        tool_blocks = []
+        for tool in tools:
+            tool_name = tool.get("name", "unknown")
+            tool_desc = tool.get("description", "No description")
+            tool_params = tool.get("parameters", {})
+            schema_str = json.dumps(tool_params, indent=2, ensure_ascii=False) if tool_params else "{}"
+            tool_blocks.append(
+                f"- Tool Name: {tool_name}\n"
+                f"  Description: {tool_desc}\n"
+                f"  Parameters Schema:\n```json\n{schema_str}\n```"
+            )
+
+        tools_text = "\n\n".join(tool_blocks)
+
+        prompt = f"""You are {agent_name}, a specialized AI agent.
+
+Your role: {agent_prompt}
+
+Task: Based on the conversation history, choose the single best tool to use and extract the parameters needed for that tool.
+
+Available Tools:
+{tools_text}
+
+Conversation History:
+{formatted_messages}
+
+Instructions:
+1. Analyze the user's latest intent carefully.
+2. Choose exactly ONE best matching tool.
+3. Extract the parameters needed by the chosen tool according to its schema.
+4. If a parameter is mentioned in multiple messages, use the most recent value.
+5. If a parameter is required by the schema, you must provide it whenever it can be reasonably inferred from the conversation.
+6. For date calculations, follow the agent instructions strictly.
+7. Output ONLY a valid JSON object in the following format.
+
+Output Format:
+{{
+  "tool_name": "chosen_tool_name",
+  "arguments": {{
+    "parameter_name": "value"
+  }}
+}}
+
+CRITICAL Requirements:
+- Output ONLY the JSON object, no additional text or explanation.
+- tool_name must exactly match one of the available tools.
+- arguments must be an object.
+- Match parameter names EXACTLY as defined in the chosen tool schema.
+- Use the correct data types for every parameter.
+"""
         return prompt
 
     def _format_messages(self, messages: List[Dict[str, Any]]) -> str:
@@ -329,6 +423,18 @@ config = load_config()
 parameter_extractor = LLMParameterExtractor(config)
 
 
+def _render_agent_prompt(agent_prompt: str) -> str:
+    """替换提示词中的时间占位符。"""
+    now = datetime.datetime.now()
+    current_time = now.strftime("%Y-%m-%d %H:%M:%S")
+    current_date = now.strftime("%Y-%m-%d")
+    return (
+        agent_prompt
+        .replace("<<CURRENT_TIME>>", current_time)
+        .replace("<<CURRENT_DATE>>", current_date)
+    )
+
+
 @app.get("/health")
 async def health():
     return {"status": "ok"}
@@ -401,7 +507,6 @@ async def agent(req: RemoteRequest, authorization: Optional[str] = Header(defaul
         }
 
     except Exception as e:
-        import traceback
         error_msg = str(e) or f"{type(e).__name__}: (empty error message)"
         logger.error(f"Error [{type(e).__name__}]: {error_msg}")
         logger.error(f"Traceback:\n{traceback.format_exc()}")

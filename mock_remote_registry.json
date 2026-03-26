@@ -361,6 +361,70 @@
     },
     {
       "type": "agent",
+      "name": "RemoteHRCalendarAgent",
+      "version": "1.0.0",
+      "endpoint": "http://127.0.0.1:8010/agent",
+      "protocol": "http",
+      "server_id": "remote-demo",
+      "health_url": "http://127.0.0.1:8010/health",
+      "metadata": {
+        "description": "Remote HR calendar assistant for querying and creating employee schedules. It can check upcoming events and create reminder or visitor schedules from conversation context.",
+        "llm_type": "basic",
+        "prompt": "你是一个高效的日程助理（Calendar Assistant）。你的任务是帮助用户查询和创建他们的待办事项。\n\n# 任务流程\n\n## 查询日程\n1. 理解时间范围：分析用户的提问，理解他们想要查询的时间范围（例如：今天、明天、本周、下周）。\n2. 将这个时间范围转换为具体的 start_date 和 end_date，格式必须为 YYYY-MM-DD。\n3. 今天是 <<CURRENT_TIME>>。请基于这个日期进行计算。\n4. 使用 get_calendar_events_tool 工具，并传入你计算出的 start_date 和 end_date。\n5. 将工具返回的结果清晰地呈现给用户。\n\n## 创建日程\n1. 识别用户想要创建、安排、提醒或预定一个新日程。\n2. 从用户描述中提取 summary、start_date、start_time（可选）以及 notes（可选）。\n3. 如果用户的问题很模糊，例如最近有什么事，默认查询未来7天。\n4. 如果用户已经提供了创建所需的必要信息，就直接使用 create_calendar_event_tool。\n5. 优先判断用户意图是查询还是创建。\n\n# 行为准则\n- 你必须自己计算出准确的日期范围，不要询问用户。\n- 查询意图使用 get_calendar_events_tool。\n- 创建意图使用 create_calendar_event_tool。\n- 输出给工具的日期格式必须是 YYYY-MM-DD，时间格式优先使用 HH:MM。",
+        "selected_tools": [
+          {
+            "name": "get_calendar_events_tool",
+            "description": "根据日期范围查询模拟日程数据文件中的日程列表",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "start_date": {
+                  "type": "string",
+                  "description": "查询开始日期，格式 YYYY-MM-DD"
+                },
+                "end_date": {
+                  "type": "string",
+                  "description": "查询结束日期，格式 YYYY-MM-DD"
+                }
+              },
+              "required": ["start_date", "end_date"]
+            }
+          },
+          {
+            "name": "create_calendar_event_tool",
+            "description": "根据用户提供的日期和事项创建新的日程并写入模拟日程数据文件",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "summary": {
+                  "type": "string",
+                  "description": "日程事由，例如 周三10点提醒会客"
+                },
+                "start_date": {
+                  "type": "string",
+                  "description": "日程日期，格式 YYYY-MM-DD"
+                },
+                "start_time": {
+                  "type": "string",
+                  "description": "日程时间，格式 HH:MM"
+                },
+                "notes": {
+                  "type": "string",
+                  "description": "补充说明或提醒内容"
+                },
+                "category": {
+                  "type": "string",
+                  "description": "日程分类，默认 日程"
+                }
+              },
+              "required": ["summary", "start_date"]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "agent",
       "name": "RemoteKnowledgeAgent",
       "version": "1.0.0",
       "endpoint": "http://127.0.0.1:8010/agent",
@@ -426,6 +490,30 @@
             }
           }
         ]
+      }
+    },
+    {
+      "type": "tool",
+      "name": "get_calendar_events_tool",
+      "version": "1.0.0",
+      "endpoint": "http://127.0.0.1:8011/tool",
+      "protocol": "http",
+      "server_id": "remote-demo",
+      "health_url": "http://127.0.0.1:8011/health",
+      "metadata": {
+        "description": "Calendar query tool for reading simulated schedule data by date range"
+      }
+    },
+    {
+      "type": "tool",
+      "name": "create_calendar_event_tool",
+      "version": "1.0.0",
+      "endpoint": "http://127.0.0.1:8011/tool",
+      "protocol": "http",
+      "server_id": "remote-demo",
+      "health_url": "http://127.0.0.1:8011/health",
+      "metadata": {
+        "description": "Calendar creation tool for writing new schedule events into the simulated data file"
       }
     },
     {

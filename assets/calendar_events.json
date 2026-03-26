@@ -1,0 +1,44 @@
+{
+  "events": [
+    {
+      "id": "event-004",
+      "summary": "周三10点提醒会客",
+      "start_date": "2026-03-26",
+      "category": "日程",
+      "start_time": "10:00",
+      "notes": "会客日程"
+    },
+    {
+      "id": "event-005",
+      "summary": "周三10点提醒会客",
+      "start_date": "2026-03-26",
+      "category": "日程",
+      "start_time": "10:00",
+      "notes": "会客日程"
+    },
+    {
+      "id": "event-001",
+      "summary": "部门例会",
+      "start_date": "2026-03-30",
+      "start_time": "09:30",
+      "category": "工作",
+      "notes": "同步本周招聘与培训安排"
+    },
+    {
+      "id": "event-002",
+      "summary": "员工入职材料复核",
+      "start_date": "2026-04-01",
+      "start_time": "14:00",
+      "category": "人力资源",
+      "notes": "核对新员工合同与社保资料"
+    },
+    {
+      "id": "event-003",
+      "summary": "月度绩效沟通",
+      "start_date": "2026-04-02",
+      "start_time": "16:00",
+      "category": "人力资源",
+      "notes": "与业务负责人确认绩效反馈节奏"
+    }
+  ]
+}
