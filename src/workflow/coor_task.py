@@ -24,7 +24,6 @@ from src.workflow.cache import workflow_cache as cache
 from src.utils.content_process import clean_response_tags
 from src.manager.executor.base import ExecutionContext
 from src.manager.executor.factory import execute_agent
-from src.workflow.parameter_extractor import extract_parameters_for_step
 
 try:
     from src.llm.llm import get_llm_by_type
@@ -135,6 +134,109 @@ def _extract_plan_steps(content: str) -> list | None:
     return None
 
 
+async def _validate_plan_data_flow(steps: list, user_id: str) -> tuple[bool, list[str]]:
+    """
+    Validate that all data dependencies in the plan are satisfied.
+
+    Returns:
+        (is_valid, error_messages): True if valid, False otherwise with error details
+    """
+    if not steps:
+        return True, []
+
+    errors = []
+
+    # Build agent metadata cache
+    agent_metadata = {}
+    agents = await agent_manager.agent_registry.list()
+    for agent in agents:
+        if agent.user_id == "share" or agent.user_id == user_id:
+            agent_metadata[agent.agent_name] = {
+                "requires": getattr(agent, "requires", []),
+                "produces": getattr(agent, "produces", []),
+            }
+
+    # Track what data is available at each step
+    available_outputs = set()
+
+    for step_idx, step in enumerate(steps):
+        agent_name = step.get("agent_name")
+        if not agent_name:
+            errors.append(f"Step {step_idx + 1}: Missing agent_name")
+            continue
+
+        metadata = agent_metadata.get(agent_name)
+        if not metadata:
+            # Agent not found in registry, skip validation
+            logger.warning(f"Step {step_idx + 1}: Agent '{agent_name}' not found in registry")
+            continue
+
+        required_params = metadata["requires"]
+        produced_outputs = metadata["produces"]
+
+        # If agent has no requirements, it's autonomous
+        if not required_params:
+            # Add this agent's outputs to available data
+            for output in produced_outputs:
+                available_outputs.add(output)
+            continue
+
+        # Check if all required parameters are mapped
+        inputs = step.get("inputs", [])
+        mapped_params = set()
+
+        for input_mapping in inputs:
+            param_name = input_mapping.get("parameter_name")
+            source_step = input_mapping.get("source_step")
+            source_output = input_mapping.get("source_output")
+
+            if not param_name or not source_step or not source_output:
+                errors.append(
+                    f"Step {step_idx + 1} ({agent_name}): Incomplete input mapping - "
+                    f"parameter_name={param_name}, source_step={source_step}, source_output={source_output}"
+                )
+                continue
+
+            mapped_params.add(param_name)
+
+            # Verify source_step exists in previous steps
+            source_found = False
+            for prev_idx in range(step_idx):
+                prev_step = steps[prev_idx]
+                if prev_step.get("agent_name") == source_step:
+                    source_found = True
+                    # Verify source_output is in the source agent's produces
+                    source_metadata = agent_metadata.get(source_step)
+                    if source_metadata and source_output not in source_metadata["produces"]:
+                        errors.append(
+                            f"Step {step_idx + 1} ({agent_name}): Input mapping references "
+                            f"'{source_output}' from '{source_step}', but '{source_step}' "
+                            f"does not produce '{source_output}'. Available outputs: {source_metadata['produces']}"
+                        )
+                    break
+
+            if not source_found:
+                errors.append(
+                    f"Step {step_idx + 1} ({agent_name}): Input mapping references "
+                    f"source_step '{source_step}' which does not exist in previous steps"
+                )
+
+        # Check if all required parameters are mapped
+        unmapped_params = set(required_params) - mapped_params
+        if unmapped_params:
+            errors.append(
+                f"Step {step_idx + 1} ({agent_name}): Missing input mappings for required parameters: "
+                f"{list(unmapped_params)}. Agent requires: {required_params}"
+            )
+
+        # Add this agent's outputs to available data
+        for output in produced_outputs:
+            available_outputs.add(output)
+
+    is_valid = len(errors) == 0
+    return is_valid, errors
+
+
 async def publisher_node(
     state: State,
 ) -> Command[Literal["agent_proxy", "__end__"]]:
@@ -226,69 +328,9 @@ async def agent_proxy_node(state: State) -> Command[Literal["publisher", "__end_
         deep_thinking_mode=state.get("deep_thinking_mode", False),
     )
 
-    # Try to extract parameters if agent has requirements and plan has input mappings
-    agent_requires = getattr(_agent, "requires", [])
+    # Remote agents receive full message history and extract parameters themselves
+    # using their own LLM. No local parameter extraction needed.
     messages_to_send = state["messages"]
-
-    if agent_requires and _agent.source.value == "remote":
-        # Find current step in planning_steps
-        planning_steps = state.get("planning_steps", [])
-        current_step = None
-        for step in planning_steps:
-            if step.get("agent_name") == state["next"]:
-                current_step = step
-                break
-
-        # Try to extract parameters if:
-        # 1. Step has explicit input mappings, OR
-        # 2. Agent requires parameters but step has no inputs (fallback to context extraction)
-        should_extract = current_step and (
-            current_step.get("inputs") or
-            (agent_requires and not current_step.get("inputs"))
-        )
-
-        if should_extract:
-            try:
-                # If step has explicit input mappings, use them
-                if current_step.get("inputs"):
-                    # Extract parameters based on input mappings
-                    parameters = extract_parameters_for_step(
-                        current_step,
-                        agent_requires,
-                        state["messages"]
-                    )
-                else:
-                    # Remote agents in autonomous mode don't need parameter extraction
-                    # They will extract parameters from the full message context themselves
-                    parameters = {}
-
-                if parameters:
-                    # Transform parameter names using agent's parameter_mapping
-                    # This ensures compatibility with tools that expect specific field names
-                    transformed_params = {}
-                    parameter_mapping = getattr(_agent, "parameter_mapping", None) or {}
-
-                    if parameter_mapping:
-                        for param_name, param_value in parameters.items():
-                            # Use mapping if available, otherwise keep original name
-                            mapped_name = parameter_mapping.get(param_name, param_name)
-                            transformed_params[mapped_name] = param_value
-                    else:
-                        # Fallback: remove prefix (e.g., "email.to" -> "to")
-                        for param_name, param_value in parameters.items():
-                            simple_name = param_name.split(".")[-1] if "." in param_name else param_name
-                            transformed_params[simple_name] = param_value
-
-                    # Create a clean message with just the transformed parameters
-                    messages_to_send = [
-                        {
-                            "role": "user",
-                            "content": json.dumps(transformed_params, ensure_ascii=False)
-                        }
-                    ]
-            except Exception as e:
-                logger.error(f"Failed to extract parameters: {e}")
-                # Fallback to sending all messages
 
     execute_result = await execute_agent(_agent, messages_to_send, context)
     response_content = execute_result.result if execute_result.is_success else execute_result.error
@@ -591,6 +633,71 @@ async def planner_node(state: State) -> Command[Literal["publisher", "__end__"]]
                         logger.warning("[PERF] Retry failed: still cannot parse JSON")
             except Exception as exc:
                 logger.warning("[PERF] Retry exception: %s", exc)
+
+        # Validate plan data flow
+        if steps is not None and state["workflow_mode"] == "launch":
+            validation_start = time.time()
+            is_valid, validation_errors = await _validate_plan_data_flow(
+                steps, state.get("user_id", "")
+            )
+            validation_time = time.time() - validation_start
+            logger.info("[PERF] Plan validation: %.2fs", validation_time)
+
+            if not is_valid:
+                logger.warning("Plan validation failed with errors:")
+                for error in validation_errors:
+                    logger.warning(f"  - {error}")
+
+                # Try to fix the plan by asking LLM to correct it
+                if retry_messages and retry_llm:
+                    try:
+                        fix_start = time.time()
+                        logger.info("[PERF] Attempting to fix plan validation errors...")
+
+                        error_summary = "\n".join(f"- {err}" for err in validation_errors)
+                        fix_note = (
+                            f"你生成的计划存在数据流错误，请修正：\n\n{error_summary}\n\n"
+                            "修正要求：\n"
+                            "1. 如果某个Agent需要的参数（在'Requires'字段中）没有来源，你必须在它之前添加一个步骤来获取这些数据\n"
+                            "2. 每个有'Requires'字段的Agent都必须在inputs中明确映射所有必需参数\n"
+                            "3. 每个InputMapping的source_step必须是之前步骤中存在的agent_name\n"
+                            "4. 每个InputMapping的source_output必须在source_step的'Produces'字段中\n"
+                            "5. 如果用户只提供了姓名但Agent需要employee_id，你必须先添加RemoteHRAssistantAgent来查询员工信息\n\n"
+                            "请输出修正后的完整计划，仅输出JSON格式，不要解释。"
+                        )
+
+                        fix_payload = deepcopy(retry_messages)
+                        fix_payload.append({"role": "assistant", "content": raw_content})
+                        fix_payload.append({"role": "user", "content": fix_note})
+
+                        fix_response = await retry_llm.ainvoke(fix_payload)
+                        fix_content = clean_response_tags(getattr(fix_response, "content", ""))
+
+                        fix_time = time.time() - fix_start
+                        logger.info("[PERF] Plan fix LLM call: %.2fs", fix_time)
+
+                        if fix_content:
+                            fixed_steps = _extract_plan_steps(fix_content)
+                            if fixed_steps is not None:
+                                # Validate the fixed plan
+                                is_fixed_valid, fixed_errors = await _validate_plan_data_flow(
+                                    fixed_steps, state.get("user_id", "")
+                                )
+                                if is_fixed_valid:
+                                    steps = fixed_steps
+                                    raw_content = fix_content
+                                    logger.info("[PERF] Plan fix succeeded")
+                                else:
+                                    logger.warning(
+                                        f"[PERF] Plan fix failed: still has {len(fixed_errors)} errors"
+                                    )
+                                    for error in fixed_errors:
+                                        logger.warning(f"  - {error}")
+                            else:
+                                logger.warning("[PERF] Plan fix failed: cannot parse JSON")
+                    except Exception as exc:
+                        logger.warning(f"[PERF] Plan fix exception: {exc}")
+
         if steps is not None:
             cache.restore_planning_steps(state["workflow_id"], steps, state["user_id"])
             message_content = json.dumps({"steps": steps}, indent=2, ensure_ascii=False)

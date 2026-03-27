@@ -210,8 +210,10 @@ Special Extraction Rules for {tool_name}:
   * "80后" -> "birth_year_range": [1980, 1989]
   * "90后" -> "birth_year_range": [1990, 1999]
   * "70后" -> "birth_year_range": [1970, 1979]
-- For compound job titles like "行长秘书", split into separate keywords:
-  * "行长秘书" -> "job_keywords": ["行长", "秘书"]
+- For job title queries:
+  * IMPORTANT: Use "keyword" for complete job titles like "行长秘书", "副行长", "支行行长"
+  * ONLY use "job_keywords" array when user explicitly wants OR matching (e.g., "行长或秘书")
+  * Complete job titles should NOT be split into separate keywords
 - For compound organization names, split into key components:
   * "二级分支行" -> "org_keywords": ["二级", "分行"]
   * "一级支行" -> "org_keywords": ["一级", "支行"]
@@ -225,12 +227,15 @@ Special Extraction Rules for {tool_name}:
 
 Examples:
 User: "查询二级分支行80后行长"
-Output: {{"job_keywords": ["行长"], "org_keywords": ["二级", "分行"], "birth_year_range": [1980, 1989]}}
+Output: {{"keyword": "行长", "org_keywords": ["二级", "分行"], "birth_year_range": [1980, 1989]}}
 
 User: "找一下90后的女性经理"
-Output: {{"job_keywords": ["经理"], "gender": "女", "birth_year_range": [1990, 1999]}}
+Output: {{"keyword": "经理", "gender": "女", "birth_year_range": [1990, 1999]}}
 
 User: "查询行长秘书"
+Output: {{"keyword": "行长秘书"}}
+
+User: "查询行长或秘书"
 Output: {{"job_keywords": ["行长", "秘书"]}}
 
 User: "帮王强开买房用的个人收入证明"
@@ -385,11 +390,19 @@ CRITICAL Requirements:
         # 移除可能的markdown代码块
         response = response.strip()
 
-        # 尝试提取JSON
-        json_match = re.search(r'```json\s*(\{.*?\})\s*```', response, re.DOTALL)
-        if json_match:
-            json_str = json_match.group(1)
-        elif response.startswith('{') and response.endswith('}'):
+        # 尝试提取JSON - 使用更健壮的方法
+        # 1. 先尝试移除markdown代码块标记
+        if response.startswith('```json'):
+            response = response[7:]  # 移除 ```json
+        if response.startswith('```'):
+            response = response[3:]  # 移除 ```
+        if response.endswith('```'):
+            response = response[:-3]  # 移除结尾的 ```
+
+        response = response.strip()
+
+        # 2. 现在尝试解析JSON
+        if response.startswith('{') and response.endswith('}'):
             json_str = response
         else:
             # 尝试找到第一个{和最后一个}
@@ -398,7 +411,7 @@ CRITICAL Requirements:
             if start != -1 and end != -1:
                 json_str = response[start:end+1]
             else:
-                logger.warning(f"Cannot find valid JSON in response: {response}")
+                logger.warning(f"Cannot find valid JSON in response: {response[:200]}...")
                 return {}
 
         # 解析JSON

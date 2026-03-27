@@ -39,6 +39,8 @@ _KNOWLEDGE_CACHE: Optional[Dict[str, Any]] = None
 _SALARY_CACHE: Optional[Dict[str, Any]] = None
 _TEMPLATE_CACHE: Optional[Dict[str, Any]] = None
 _CALENDAR_CACHE: Optional[Dict[str, Any]] = None
+_LEAVE_CACHE: Optional[List[Dict[str, Any]]] = None
+_TRAVEL_CACHE: Optional[List[Dict[str, Any]]] = None
 
 
 def _read_json(path: Path) -> Dict[str, Any]:
@@ -233,6 +235,60 @@ def _save_calendar_events(data: Dict[str, Any]) -> None:
     global _CALENDAR_CACHE
     _CALENDAR_CACHE = data
     _calendar_path().write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _leave_applications_path() -> Path:
+    return Path(__file__).resolve().parent / "assets" / "leave_applications.json"
+
+
+def _load_leave_applications() -> List[Dict[str, Any]]:
+    global _LEAVE_CACHE
+    if _LEAVE_CACHE is not None:
+        return _LEAVE_CACHE
+    path = _leave_applications_path()
+    if not path.exists():
+        # Auto-create empty file
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("[]", encoding="utf-8")
+        _LEAVE_CACHE = []
+        return _LEAVE_CACHE
+    _LEAVE_CACHE = json.loads(path.read_text(encoding="utf-8"))
+    return _LEAVE_CACHE
+
+
+def _save_leave_applications(data: List[Dict[str, Any]]) -> None:
+    global _LEAVE_CACHE
+    _LEAVE_CACHE = data
+    path = _leave_applications_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _travel_applications_path() -> Path:
+    return Path(__file__).resolve().parent / "assets" / "travel_applications.json"
+
+
+def _load_travel_applications() -> List[Dict[str, Any]]:
+    global _TRAVEL_CACHE
+    if _TRAVEL_CACHE is not None:
+        return _TRAVEL_CACHE
+    path = _travel_applications_path()
+    if not path.exists():
+        # Auto-create empty file
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("[]", encoding="utf-8")
+        _TRAVEL_CACHE = []
+        return _TRAVEL_CACHE
+    _TRAVEL_CACHE = json.loads(path.read_text(encoding="utf-8"))
+    return _TRAVEL_CACHE
+
+
+def _save_travel_applications(data: List[Dict[str, Any]]) -> None:
+    global _TRAVEL_CACHE
+    _TRAVEL_CACHE = data
+    path = _travel_applications_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def _knowledge_path() -> Path:
@@ -1394,6 +1450,186 @@ async def tool(req: ToolRequest, authorization: Optional[str] = Header(default=N
             import traceback
             result = {
                 "status": "error",
+                "error": str(exc),
+                "traceback": traceback.format_exc()
+            }
+    elif req.tool == "save_leave_record":
+        try:
+            import datetime
+
+            employee_id = req.arguments.get("employee_id")
+            employee_name = req.arguments.get("employee_name")
+            leave_data = req.arguments.get("leave_data", {})
+
+            if not employee_id or not employee_name:
+                raise ValueError("employee_id and employee_name are required")
+
+            if not leave_data:
+                raise ValueError("leave_data is required")
+
+            # Generate record ID with timestamp
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            record_id = f"LEAVE_{timestamp}"
+            created_at = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+            # Build record
+            record = {
+                "record_id": record_id,
+                "employee_id": employee_id,
+                "employee_name": employee_name,
+                "leave_type": leave_data.get("leave_type"),
+                "start_date": leave_data.get("start_date"),
+                "end_date": leave_data.get("end_date"),
+                "reason": leave_data.get("reason"),
+                "status": "待审批",
+                "created_at": created_at
+            }
+
+            # Load existing records and append
+            records = _load_leave_applications()
+            records.append(record)
+            _save_leave_applications(records)
+
+            result = {
+                "status": "success",
+                "record_id": record_id,
+                "message": f"已为{employee_name}保存请假申请记录"
+            }
+        except Exception as exc:
+            import traceback
+            result = {
+                "status": "failed",
+                "error": str(exc),
+                "traceback": traceback.format_exc()
+            }
+    elif req.tool == "query_leave_record":
+        try:
+            employee_id = req.arguments.get("employee_id")
+            employee_name = req.arguments.get("employee_name")
+            filters = req.arguments.get("filters", {})
+
+            if not employee_id:
+                raise ValueError("employee_id is required")
+
+            # Load all records
+            all_records = _load_leave_applications()
+
+            # Filter by employee_id
+            records = [r for r in all_records if r.get("employee_id") == employee_id]
+
+            # Apply additional filters
+            if filters:
+                if "leave_type" in filters:
+                    records = [r for r in records if r.get("leave_type") == filters["leave_type"]]
+                if "status" in filters:
+                    records = [r for r in records if r.get("status") == filters["status"]]
+                if "start_date" in filters:
+                    records = [r for r in records if r.get("start_date", "") >= filters["start_date"]]
+                if "end_date" in filters:
+                    records = [r for r in records if r.get("end_date", "") <= filters["end_date"]]
+
+            message = f"未找到相关记录" if len(records) == 0 else f"找到{len(records)}条记录"
+
+            result = {
+                "status": "success",
+                "count": len(records),
+                "records": records,
+                "message": message
+            }
+        except Exception as exc:
+            import traceback
+            result = {
+                "status": "failed",
+                "error": str(exc),
+                "traceback": traceback.format_exc()
+            }
+    elif req.tool == "save_travel_record":
+        try:
+            import datetime
+
+            employee_id = req.arguments.get("employee_id")
+            employee_name = req.arguments.get("employee_name")
+            travel_data = req.arguments.get("travel_data", {})
+
+            if not employee_id or not employee_name:
+                raise ValueError("employee_id and employee_name are required")
+
+            if not travel_data:
+                raise ValueError("travel_data is required")
+
+            # Generate record ID with timestamp
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            record_id = f"TRAVEL_{timestamp}"
+            created_at = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+            # Build record
+            record = {
+                "record_id": record_id,
+                "employee_id": employee_id,
+                "employee_name": employee_name,
+                "destination": travel_data.get("destination"),
+                "start_date": travel_data.get("start_date"),
+                "end_date": travel_data.get("end_date"),
+                "purpose": travel_data.get("purpose", ""),
+                "status": "待审批",
+                "created_at": created_at
+            }
+
+            # Load existing records and append
+            records = _load_travel_applications()
+            records.append(record)
+            _save_travel_applications(records)
+
+            result = {
+                "status": "success",
+                "record_id": record_id,
+                "message": f"已为{employee_name}保存出差申请记录"
+            }
+        except Exception as exc:
+            import traceback
+            result = {
+                "status": "failed",
+                "error": str(exc),
+                "traceback": traceback.format_exc()
+            }
+    elif req.tool == "query_travel_record":
+        try:
+            employee_id = req.arguments.get("employee_id")
+            employee_name = req.arguments.get("employee_name")
+            filters = req.arguments.get("filters", {})
+
+            if not employee_id:
+                raise ValueError("employee_id is required")
+
+            # Load all records
+            all_records = _load_travel_applications()
+
+            # Filter by employee_id
+            records = [r for r in all_records if r.get("employee_id") == employee_id]
+
+            # Apply additional filters
+            if filters:
+                if "destination" in filters:
+                    records = [r for r in records if r.get("destination") == filters["destination"]]
+                if "status" in filters:
+                    records = [r for r in records if r.get("status") == filters["status"]]
+                if "start_date" in filters:
+                    records = [r for r in records if r.get("start_date", "") >= filters["start_date"]]
+                if "end_date" in filters:
+                    records = [r for r in records if r.get("end_date", "") <= filters["end_date"]]
+
+            message = f"未找到相关记录" if len(records) == 0 else f"找到{len(records)}条记录"
+
+            result = {
+                "status": "success",
+                "count": len(records),
+                "records": records,
+                "message": message
+            }
+        except Exception as exc:
+            import traceback
+            result = {
+                "status": "failed",
                 "error": str(exc),
                 "traceback": traceback.format_exc()
             }
