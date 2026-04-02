@@ -674,6 +674,127 @@
       }
     },
     {
+      "type": "agent",
+      "name": "RemoteMeetingManagerAgent",
+      "version": "1.0.0",
+      "endpoint": "http://127.0.0.1:8010/agent",
+      "protocol": "http",
+      "server_id": "remote-demo",
+      "health_url": "http://127.0.0.1:8010/health",
+      "metadata": {
+        "description": "Remote meeting manager agent for scheduling meetings. Can create and manage meeting schedules.",
+        "llm_type": "basic",
+        "prompt": "You are a professional meeting manager. Your task is to schedule meetings based on user requests and manage meeting data.",
+        "selected_tools": [
+          {
+            "name": "remote_meeting_scheduling_tool",
+            "description": "Schedule a meeting with date, time, participants and agenda",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "action": {
+                  "type": "string",
+                  "enum": ["create", "query"],
+                  "description": "Action to perform",
+                  "default": "create"
+                },
+                "meeting": {
+                  "type": "object",
+                  "description": "Meeting details",
+                  "properties": {
+                    "title": {
+                      "type": "string",
+                      "description": "Meeting title"
+                    },
+                    "date": {
+                      "type": "string",
+                      "description": "Meeting date in YYYY-MM-DD format"
+                    },
+                    "time": {
+                      "type": "string",
+                      "description": "Meeting time in HH:MM format"
+                    },
+                    "participants": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      },
+                      "description": "List of participant emails"
+                    },
+                    "agenda": {
+                      "type": "string",
+                      "description": "Meeting agenda"
+                    }
+                  },
+                  "required": ["title", "date", "time"]
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "agent",
+      "name": "RemoteCommunicationAgent",
+      "version": "1.0.0",
+      "endpoint": "http://127.0.0.1:8010/agent",
+      "protocol": "http",
+      "server_id": "remote-demo",
+      "health_url": "http://127.0.0.1:8010/health",
+      "metadata": {
+        "description": "Remote communication agent for managing contacts and sending emails. Can query contact information and send emails to relevant personnel.",
+        "llm_type": "basic",
+        "prompt": "You are a professional communication officer. Your task is to query contact information and send emails to relevant personnel.",
+        "selected_tools": [
+          {
+            "name": "remote_contact_query_tool",
+            "description": "Query contact information for personnel",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "position": {
+                  "type": "string",
+                  "description": "Position filter (e.g., '综合处处长')"
+                },
+                "department": {
+                  "type": "string",
+                  "description": "Department filter"
+                },
+                "name": {
+                  "type": "string",
+                  "description": "Name filter"
+                }
+              }
+            }
+          },
+          {
+            "name": "remote_email_tool",
+            "description": "Send email with specified recipient and content",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "to": {
+                  "type": "string",
+                  "description": "Recipient email address"
+                },
+                "subject": {
+                  "type": "string",
+                  "description": "Email subject",
+                  "default": "会议通知"
+                },
+                "body": {
+                  "type": "string",
+                  "description": "Email body content"
+                }
+              },
+              "required": ["to", "body"]
+            }
+          }
+        ]
+      }
+    },
+    {
       "type": "tool",
       "name": "get_calendar_events_tool",
       "version": "1.0.0",
@@ -875,6 +996,30 @@
       "health_url": "http://127.0.0.1:8011/health",
       "metadata": {
         "description": "Query travel application records"
+      }
+    },
+    {
+      "type": "tool",
+      "name": "remote_meeting_scheduling_tool",
+      "version": "1.0.0",
+      "endpoint": "http://127.0.0.1:8011/tool",
+      "protocol": "http",
+      "server_id": "remote-demo",
+      "health_url": "http://127.0.0.1:8011/health",
+      "metadata": {
+        "description": "Meeting scheduling tool for creating and querying meetings"
+      }
+    },
+    {
+      "type": "tool",
+      "name": "remote_contact_query_tool",
+      "version": "1.0.0",
+      "endpoint": "http://127.0.0.1:8011/tool",
+      "protocol": "http",
+      "server_id": "remote-demo",
+      "health_url": "http://127.0.0.1:8011/health",
+      "metadata": {
+        "description": "Contact information query tool"
       }
     },
     {

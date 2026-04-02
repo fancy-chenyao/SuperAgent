@@ -11,6 +11,8 @@ from .office_assistant_agent import RemoteOfficeAssistantAgent
 from .business_risk_agent import RemoteBusinessRiskAgent
 from .email_dispatch_agent import RemoteEmailDispatchAgent
 from .unicorn_selector_agent import RemoteUnicornSelectorAgent
+from .meeting_manager_agent import RemoteMeetingManagerAgent
+from .communication_agent import RemoteCommunicationAgent
 
 
 class AgentFactory:
@@ -41,6 +43,8 @@ class AgentFactory:
         cls.register_agent(RemoteBusinessRiskAgent())
         cls.register_agent(RemoteEmailDispatchAgent())
         cls.register_agent(RemoteUnicornSelectorAgent())
+        cls.register_agent(RemoteMeetingManagerAgent())
+        cls.register_agent(RemoteCommunicationAgent())
 
 
 # Initialize all agents on module import

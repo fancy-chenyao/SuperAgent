@@ -1,4 +1,4 @@
-﻿from fastapi import FastAPI, Header
+from fastapi import FastAPI, Header
 from pydantic import BaseModel
 from typing import Any, Dict, List, Optional, Tuple
 from pathlib import Path
@@ -41,6 +41,8 @@ _TEMPLATE_CACHE: Optional[Dict[str, Any]] = None
 _CALENDAR_CACHE: Optional[Dict[str, Any]] = None
 _LEAVE_CACHE: Optional[List[Dict[str, Any]]] = None
 _TRAVEL_CACHE: Optional[List[Dict[str, Any]]] = None
+_MEETING_CACHE: Optional[List[Dict[str, Any]]] = None
+_CONTACT_CACHE: Optional[Dict[str, Any]] = None
 
 
 def _read_json(path: Path) -> Dict[str, Any]:
@@ -289,6 +291,84 @@ def _save_travel_applications(data: List[Dict[str, Any]]) -> None:
     path = _travel_applications_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _meeting_path() -> Path:
+    return Path(__file__).resolve().parent / "assets" / "meetings.json"
+
+
+def _load_meetings() -> List[Dict[str, Any]]:
+    global _MEETING_CACHE
+    if _MEETING_CACHE is not None:
+        return _MEETING_CACHE
+    path = _meeting_path()
+    if not path.exists():
+        # Auto-create empty file
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("[]", encoding="utf-8")
+        _MEETING_CACHE = []
+        return _MEETING_CACHE
+    _MEETING_CACHE = json.loads(path.read_text(encoding="utf-8"))
+    return _MEETING_CACHE
+
+
+def _save_meetings(data: List[Dict[str, Any]]) -> None:
+    global _MEETING_CACHE
+    _MEETING_CACHE = data
+    path = _meeting_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _contact_path() -> Path:
+    return Path(__file__).resolve().parent / "assets" / "contacts.json"
+
+
+def _load_contacts() -> Dict[str, Any]:
+    global _CONTACT_CACHE
+    if _CONTACT_CACHE is not None:
+        return _CONTACT_CACHE
+    path = _contact_path()
+    if not path.exists():
+        # Auto-create sample contact data
+        sample_data = {
+            "contacts": [
+                {
+                    "name": "张三",
+                    "position": "综合处处长",
+                    "department": "人力资源部",
+                    "email": "zhangsan@example.com",
+                    "phone": "13800138001"
+                },
+                {
+                    "name": "李四",
+                    "position": "综合处处长",
+                    "department": "财务部",
+                    "email": "lisi@example.com",
+                    "phone": "13900139001"
+                },
+                {
+                    "name": "王五",
+                    "position": "综合处处长",
+                    "department": "市场部",
+                    "email": "wangwu@example.com",
+                    "phone": "13700137001"
+                },
+                {
+                    "name": "赵六",
+                    "position": "综合处处长",
+                    "department": "技术部",
+                    "email": "zhaoliu@example.com",
+                    "phone": "13600136001"
+                }
+            ]
+        }
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(sample_data, ensure_ascii=False, indent=2), encoding="utf-8")
+        _CONTACT_CACHE = sample_data
+        return _CONTACT_CACHE
+    _CONTACT_CACHE = _read_json(path)
+    return _CONTACT_CACHE
 
 
 def _knowledge_path() -> Path:
@@ -1150,6 +1230,101 @@ async def tool(req: ToolRequest, authorization: Optional[str] = Header(default=N
         except Exception as exc:
             import traceback
             logger.error(f"Salary query error: {exc}")
+            logger.error(traceback.format_exc())
+            result = {"status": "error", "error": str(exc)}
+    elif req.tool == "remote_meeting_scheduling_tool":
+        try:
+            data = _load_meetings()
+            meetings = data.get("meetings", [])
+            action = req.arguments.get("action", "create")
+
+            if action == "create":
+                meeting_data = req.arguments.get("meeting") or {}
+                if not isinstance(meeting_data, dict):
+                    raise ValueError("meeting must be an object")
+                
+                # 提取会议信息
+                title = meeting_data.get("title", "视频会议")
+                date = meeting_data.get("date")
+                time = meeting_data.get("time")
+                participants = meeting_data.get("participants", [])
+                agenda = meeting_data.get("agenda", "")
+                
+                if not date or not time:
+                    raise ValueError("date and time are required")
+                
+                # 创建会议记录
+                new_meeting = {
+                    "id": f"meeting-{len(meetings)+1:04d}",
+                    "title": title,
+                    "date": date,
+                    "time": time,
+                    "participants": participants,
+                    "agenda": agenda,
+                    "status": "scheduled",
+                    "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                }
+                
+                meetings.append(new_meeting)
+                data["meetings"] = meetings
+                _save_meetings(data)
+                
+                result = {
+                    "status": "success",
+                    "message": "会议预定成功",
+                    "meeting": new_meeting
+                }
+            else:
+                # 查询会议
+                date = req.arguments.get("date")
+                status = req.arguments.get("status")
+                
+                filtered = []
+                for meeting in meetings:
+                    if date and meeting.get("date") != date:
+                        continue
+                    if status and meeting.get("status") != status:
+                        continue
+                    filtered.append(meeting)
+                
+                result = {
+                    "status": "success",
+                    "matched_count": len(filtered),
+                    "meetings": filtered
+                }
+        except Exception as exc:
+            import traceback
+            logger.error(f"Meeting scheduling error: {exc}")
+            logger.error(traceback.format_exc())
+            result = {"status": "error", "error": str(exc)}
+    elif req.tool == "remote_contact_query_tool":
+        try:
+            data = _load_contacts()
+            contacts = data.get("contacts", [])
+            
+            # 提取查询参数
+            position = req.arguments.get("position")
+            department = req.arguments.get("department")
+            name = req.arguments.get("name")
+            
+            filtered = []
+            for contact in contacts:
+                if position and contact.get("position") != position:
+                    continue
+                if department and contact.get("department") != department:
+                    continue
+                if name and name not in contact.get("name", ""):
+                    continue
+                filtered.append(contact)
+            
+            result = {
+                "status": "success",
+                "matched_count": len(filtered),
+                "contacts": filtered
+            }
+        except Exception as exc:
+            import traceback
+            logger.error(f"Contact query error: {exc}")
             logger.error(traceback.format_exc())
             result = {"status": "error", "error": str(exc)}
     elif req.tool == "remote_hr_complete_info_tool":
