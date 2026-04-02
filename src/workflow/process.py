@@ -458,6 +458,11 @@ async def run_agent_workflow(
     global is_handoff_case
     is_handoff_case = False
 
+    # 判断执行阶段（调用TaskLogger的静态方法）
+    instruction_history_list = cache.get_instruction_history(workflow_id) or []
+    execution_phase = TaskLogger.determine_execution_phase(workmode, instruction_history_list)
+    logger.info(f"Execution phase determined: {execution_phase}")
+
     async for event_data in _process_workflow(
         graph,
         {
@@ -479,12 +484,17 @@ async def run_agent_workflow(
         },
         resume_step=resume_step,
         task_id=task_id,
+        execution_phase=execution_phase,  # 新增：传递执行阶段
     ):
         yield event_data
 
 
 async def _process_workflow(
-    workflow: CompiledWorkflow, initial_state: dict[str, Any], resume_step: int = None, task_id: str = None
+    workflow: CompiledWorkflow, 
+    initial_state: dict[str, Any], 
+    resume_step: int = None, 
+    task_id: str = None,
+    execution_phase: str = "initial_planning"  # 新增：执行阶段参数
 ) -> AsyncGenerator[dict[str, Any], None]:
     """处理自定义工作流的事件流
     
@@ -492,6 +502,7 @@ async def _process_workflow(
         resume_step: The step to START executing (not the checkpoint step).
                      So resume_step=5 means: load checkpoint from step 4, then execute step 5.
                      Must be >= 1.
+        execution_phase: 执行阶段 ("initial_planning" | "re_planning" | "execution")
     """
     current_node = None
 
@@ -526,8 +537,10 @@ async def _process_workflow(
             logger.info(f"Resumed TaskLogger for task {task_id}, truncated to step {resume_step - 1}")
         else:
             task_logger = TaskLogger(task_id=task_id, workflow_id=workflow_id, user_query=user_query)
+            task_logger.set_execution_phase(execution_phase)  # 设置执行阶段
     else:
         task_logger = TaskLogger(task_id=task_id, workflow_id=workflow_id, user_query=user_query)
+        task_logger.set_execution_phase(execution_phase)  # 设置执行阶段
 
     # Initialize hook system (controlled by AUTO_RECOVERY_ENABLED)
     hook_engine = None
@@ -781,7 +794,7 @@ async def _process_workflow(
         traceback.print_exc()
         logger.error("Error in Agent workflow: %s", str(e))
         task_logger.log_error(error=str(e), node_name=current_node or "system", step=step_count)
-        
+
         # === Hook: ERROR ===
         if hook_engine:
             hook_ctx = HookContext(

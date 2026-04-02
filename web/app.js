@@ -2374,6 +2374,15 @@ const statusBadgeClass = (status) => {
   return "badge-muted";
 };
 
+const executionPhaseLabel = (phase) => {
+  const labels = {
+    'initial_planning': '初次规划',
+    're_planning': '重规划',
+    'execution': '执行'
+  };
+  return labels[phase] || phase;
+};
+
 const fetchTasks = async () => {
   setListState(tasksList, "Loading...", "loading");
   try {
@@ -2401,12 +2410,25 @@ const fetchTasks = async () => {
         ? task.user_query.slice(0, 60) + (task.user_query.length > 60 ? "..." : "")
         : task.task_id;
 
-      const badge = document.createElement("span");
-      badge.className = `status-badge ${statusBadgeClass(task.status)}`;
-      badge.textContent = task.status;
+      // Create badges container
+      const badgesContainer = document.createElement("div");
+      badgesContainer.className = "badges";
+
+      // Execution phase badge
+      const phaseBadge = document.createElement("span");
+      phaseBadge.className = "phase-badge";
+      phaseBadge.textContent = executionPhaseLabel(task.execution_phase);
+
+      // Status badge (use task.status directly)
+      const statusBadge = document.createElement("span");
+      statusBadge.className = `status-badge ${statusBadgeClass(task.status)}`;
+      statusBadge.textContent = task.status;
+
+      badgesContainer.appendChild(phaseBadge);
+      badgesContainer.appendChild(statusBadge);
 
       header.appendChild(titleEl);
-      header.appendChild(badge);
+      header.appendChild(badgesContainer);
 
       const meta = document.createElement("div");
       meta.className = "task-item-meta";
@@ -2572,7 +2594,8 @@ const loadTaskLog = async (taskId) => {
 
     logMeta.innerHTML = `
       <div class="log-meta-item"><b>Task ID</b><span>${log.task_id}</span></div>
-      <div class="log-meta-item"><b>Status</b><span class="status-badge ${statusBadgeClass(log.status)}">${log.status}</span></div>
+      <div class="log-meta-item"><b>执行阶段</b><span class="phase-badge">${executionPhaseLabel(log.execution_phase)}</span></div>
+      <div class="log-meta-item"><b>任务状态</b><span class="status-badge ${statusBadgeClass(log.status)}">${log.status}</span></div>
       <div class="log-meta-item"><b>Created</b><span>${formatDateTime(log.created_at)}</span></div>
       <div class="log-meta-item"><b>Finished</b><span>${formatDateTime(log.finished_at) || "-"}</span></div>
       ${log.error ? `<div class="log-meta-item error-text"><b>Error</b><span>${log.error}</span></div>` : ""}

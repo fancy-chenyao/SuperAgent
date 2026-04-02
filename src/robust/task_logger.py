@@ -60,6 +60,7 @@ class TaskLogger:
         self.history: List[Dict[str, Any]] = []
         self.status = "running"
         self.error: Optional[str] = None
+        self.execution_phase: str = "initial_planning"  # 新增: 执行阶段
         self._step_counter: Dict[str, int] = {}  # track per-node step
 
         self._logs_dir = _get_task_logs_dir()
@@ -156,11 +157,39 @@ class TaskLogger:
         self.log_event(node_name=node_name, event="error", content=error, step=step)
         self._flush()
 
+    def set_execution_phase(self, execution_phase: str) -> None:
+        """设置执行阶段"""
+        self.execution_phase = execution_phase
+        self._flush()
+
+    @staticmethod
+    def determine_execution_phase(workmode: str, instruction_history: List[str]) -> str:
+        """
+        判断执行阶段（静态方法，解耦主流程）
+
+        Args:
+            workmode: 工作模式 ("launch" 或 "production")
+            instruction_history: 指令历史列表
+
+        Returns:
+            执行阶段: "initial_planning" | "re_planning" | "execution"
+        """
+        # 优先级1: workmode="production" → 确认执行
+        if workmode == "production":
+            return "execution"
+
+        # 优先级2: instruction_history长度判断
+        if len(instruction_history) <= 1:
+            return "initial_planning"
+        else:
+            return "re_planning"
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "task_id": self.task_id,
             "workflow_id": self.workflow_id,
             "user_query": self.user_query,
+            "execution_phase": self.execution_phase,  # 新增
             "created_at": self.created_at,
             "finished_at": datetime.now().isoformat() if self.status != "running" else None,
             "status": self.status,
@@ -194,6 +223,10 @@ class TaskLogger:
             inst.history = data.get("history", [])
             inst.status = data.get("status", "unknown")
             inst.error = data.get("error")
+
+            # 兼容性处理：如果缺少新字段，设置默认值
+            inst.execution_phase = data.get("execution_phase", "initial_planning")
+
             inst._step_counter = {"__global__": len(inst.history)}
             inst._logs_dir = logs_dir
             inst._log_file = log_file
@@ -203,10 +236,10 @@ class TaskLogger:
             return None
 
     @classmethod
-    def list_tasks(cls, workflow_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    def list_tasks(cls, workflow_id: Optional[str] = None, execution_phase: Optional[str] = None) -> List[Dict[str, Any]]:
         """
         List all task log summaries (without full history).
-        Optionally filter by workflow_id.
+        Optionally filter by workflow_id and execution_phase.
         Returns list sorted newest first.
         """
         logs_dir = _get_task_logs_dir()
@@ -219,10 +252,17 @@ class TaskLogger:
                     data = json.load(f)
                 if workflow_id and data.get("workflow_id") != workflow_id:
                     continue
+                if execution_phase and data.get("execution_phase") != execution_phase:
+                    continue
+
+                # 兼容性处理：如果缺少新字段，设置默认值
+                task_execution_phase = data.get("execution_phase", "initial_planning")
+
                 results.append({
                     "task_id": data.get("task_id", log_file.stem),
                     "workflow_id": data.get("workflow_id", ""),
                     "user_query": data.get("user_query", ""),
+                    "execution_phase": task_execution_phase,
                     "created_at": data.get("created_at", ""),
                     "finished_at": data.get("finished_at"),
                     "status": data.get("status", "unknown"),

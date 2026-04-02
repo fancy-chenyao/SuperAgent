@@ -1575,6 +1575,13 @@ button:disabled {
   justify-content: space-between;
   gap: 8px;
   margin-bottom: 4px;
+  flex-wrap: wrap;
+}
+
+.task-item-header .badges {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
 }
 
 .task-item-header strong {
@@ -1645,6 +1652,18 @@ button:disabled {
   font-size: 0.72rem;
   font-weight: 600;
   white-space: nowrap;
+}
+
+/* Phase badge */
+.phase-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 20px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  white-space: nowrap;
+  background: rgba(59, 130, 246, 0.1);
+  color: #3b82f6;
 }
 
 .badge-success {

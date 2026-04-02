@@ -573,9 +573,18 @@ def create_app() -> FastAPI:
     # ---- Tasks (task execution instances) API ----
 
     @app.get("/api/tasks")
-    async def list_tasks(workflow_id: Optional[str] = None):
-        """List all task execution instances, optionally filtered by workflow_id."""
-        return TaskLogger.list_tasks(workflow_id=workflow_id)
+    async def list_tasks(
+        workflow_id: Optional[str] = None,
+        execution_phase: Optional[str] = None
+    ):
+        """
+        List all task execution instances, optionally filtered by workflow_id and execution_phase.
+        
+        Args:
+            workflow_id: Filter by workflow ID
+            execution_phase: Filter by execution phase ("initial_planning" | "re_planning" | "execution")
+        """
+        return TaskLogger.list_tasks(workflow_id=workflow_id, execution_phase=execution_phase)
 
     @app.get("/api/tasks/{task_id}/log")
     async def get_task_log(task_id: str):
