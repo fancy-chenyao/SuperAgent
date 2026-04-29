@@ -1,0 +1,32 @@
+{
+  "contacts": [
+    {
+      "name": "张三",
+      "position": "综合处处长",
+      "department": "人力资源部",
+      "email": "zhangsan@example.com",
+      "phone": "13800138001"
+    },
+    {
+      "name": "李四",
+      "position": "综合处处长",
+      "department": "财务部",
+      "email": "lisi@example.com",
+      "phone": "13900139001"
+    },
+    {
+      "name": "王五",
+      "position": "综合处处长",
+      "department": "市场部",
+      "email": "wangwu@example.com",
+      "phone": "13700137001"
+    },
+    {
+      "name": "赵六",
+      "position": "综合处处长",
+      "department": "技术部",
+      "email": "zhaoliu@example.com",
+      "phone": "13600136001"
+    }
+  ]
+}

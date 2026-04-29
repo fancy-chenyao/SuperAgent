@@ -648,6 +648,340 @@ button:disabled {
   }
 }
 
+/* ─── Step Cards (Execution Log) ────────────────────────────────────── */
+
+/* Execution output panel: taller and step-card-friendly */
+.output-panel .output-body {
+  margin-top: 8px;
+  max-height: 520px;
+  padding-right: 2px;
+}
+
+.step-card {
+  background: rgba(248, 249, 253, 0.98);
+  border-radius: 12px;
+  border: 1px solid rgba(20, 24, 40, 0.08);
+  overflow: hidden;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.step-card.running {
+  border-color: rgba(27, 143, 107, 0.5);
+  box-shadow: 0 0 0 1px rgba(27, 143, 107, 0.2);
+  animation: step-pulse 2s ease-in-out infinite;
+}
+
+.step-card.done {
+  border-color: rgba(20, 24, 40, 0.06);
+}
+
+.step-card.error {
+  border-color: rgba(217, 83, 79, 0.5);
+  box-shadow: 0 0 0 1px rgba(217, 83, 79, 0.2);
+}
+
+@keyframes step-pulse {
+  0%, 100% { box-shadow: 0 0 0 1px rgba(27, 143, 107, 0.2); }
+  50% { box-shadow: 0 0 0 2px rgba(27, 143, 107, 0.35); }
+}
+
+/* Header: one-row compact layout */
+.step-card-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.15s ease;
+}
+
+.step-card-header:hover {
+  background: rgba(27, 143, 107, 0.06);
+}
+
+.step-status-icon {
+  font-size: 14px;
+  flex-shrink: 0;
+  width: 18px;
+  text-align: center;
+}
+
+.step-index {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent);
+  background: rgba(27, 143, 107, 0.12);
+  border-radius: 6px;
+  padding: 2px 7px;
+  flex-shrink: 0;
+  min-width: 32px;
+  text-align: center;
+}
+
+.step-agent-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  flex-shrink: 0;
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.step-summary-text {
+  font-size: 12px;
+  color: var(--muted);
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.step-duration {
+  font-size: 11px;
+  color: var(--muted);
+  background: rgba(20, 24, 40, 0.06);
+  border-radius: 6px;
+  padding: 2px 6px;
+  flex-shrink: 0;
+}
+
+.step-toggle {
+  font-size: 11px;
+  color: var(--muted);
+  flex-shrink: 0;
+  width: 16px;
+  text-align: center;
+  transition: transform 0.15s ease;
+}
+
+/* Body */
+.step-card-body {
+  border-top: 1px solid rgba(20, 24, 40, 0.06);
+  padding: 10px 12px;
+  max-height: 420px;
+  overflow-y: auto;
+}
+
+.step-card-body.hidden {
+  display: none;
+}
+
+/* ─── Result Content ─────────────────────────────────────────────────── */
+
+.step-result {
+  font-size: 12px;
+  color: var(--text);
+}
+
+/* Table wrapper with horizontal scroll */
+.step-result-table-wrapper {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.step-result-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+
+.step-result-table thead {
+  background: rgba(27, 143, 107, 0.08);
+}
+
+.step-result-table th {
+  padding: 7px 10px;
+  text-align: left;
+  font-weight: 600;
+  color: #0f5f48;
+  white-space: nowrap;
+  border-bottom: 2px solid rgba(27, 143, 107, 0.2);
+}
+
+.step-result-table td {
+  padding: 6px 10px;
+  border-bottom: 1px solid rgba(20, 24, 40, 0.06);
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.step-result-table tbody tr:hover {
+  background: rgba(27, 143, 107, 0.04);
+}
+
+.step-result-hint {
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--muted);
+  font-style: italic;
+}
+
+/* Key-Value list */
+.step-result-kv {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 4px 12px;
+  margin: 0;
+}
+
+.step-result-kv dt {
+  font-weight: 600;
+  font-size: 11px;
+  color: var(--accent);
+  white-space: nowrap;
+  padding: 2px 0;
+}
+
+.step-result-kv dd {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text);
+  word-break: break-all;
+  padding: 2px 0;
+}
+
+.step-result-kv-nested {
+  margin: 4px 0 4px 12px;
+  padding: 8px;
+  background: rgba(20, 24, 40, 0.03);
+  border-radius: 8px;
+  border-left: 2px solid rgba(27, 143, 107, 0.3);
+}
+
+.step-result-kv-nested dt {
+  font-size: 10px;
+  color: var(--muted);
+}
+
+/* Raw text */
+.step-result-pre {
+  margin: 0;
+  font-family: "Microsoft YaHei Mono", "Consolas", "Monaco", monospace;
+  font-size: 11px;
+  white-space: pre-wrap;
+  color: #30354a;
+  line-height: 1.5;
+  max-height: 380px;
+  overflow-y: auto;
+  background: rgba(20, 24, 40, 0.03);
+  border-radius: 8px;
+  padding: 10px;
+}
+
+/* Rendered Markdown Content */
+.step-result-md {
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--text);
+  max-height: 540px;
+  overflow-y: auto;
+  padding: 4px 0;
+}
+
+.step-result-md .md-h1 {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--text);
+  margin: 16px 0 8px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid rgba(20, 24, 40, 0.1);
+}
+
+.step-result-md .md-h2 {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+  margin: 14px 0 6px;
+}
+
+.step-result-md .md-h3 {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--accent);
+  margin: 12px 0 4px;
+}
+
+.step-result-md .md-h4 {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  margin: 10px 0 4px;
+}
+
+.step-result-md .md-p {
+  margin: 6px 0;
+}
+
+.step-result-md .md-ul,
+.step-result-md .md-ol {
+  margin: 4px 0;
+  padding-left: 20px;
+}
+
+.step-result-md li {
+  margin: 2px 0;
+}
+
+.step-result-md .md-hr {
+  border: none;
+  border-top: 1px solid rgba(20, 24, 40, 0.08);
+  margin: 12px 0;
+}
+
+.step-result-md .md-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+  margin: 8px 0;
+}
+
+.step-result-md .md-table th,
+.step-result-md .md-table td {
+  border: 1px solid rgba(20, 24, 40, 0.12);
+  padding: 5px 8px;
+  text-align: left;
+}
+
+.step-result-md .md-table th {
+  background: rgba(20, 24, 40, 0.04);
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.step-result-md .md-table td {
+  color: var(--text);
+}
+
+.step-result-md .md-code {
+  margin: 8px 0;
+  background: rgba(20, 24, 40, 0.04);
+  border-radius: 6px;
+  padding: 10px;
+  font-family: "Microsoft YaHei Mono", "Consolas", "Monaco", monospace;
+  font-size: 11px;
+  overflow-x: auto;
+  white-space: pre;
+}
+
+.step-result-md .md-code code {
+  color: #30354a;
+}
+
+.step-result-md .md-inline-code {
+  background: rgba(20, 24, 40, 0.06);
+  border-radius: 3px;
+  padding: 1px 5px;
+  font-family: "Microsoft YaHei Mono", "Consolas", "Monaco", monospace;
+  font-size: 11px;
+  color: #c0392b;
+}
+
 .panel-actions {
   margin: 16px 0;
 }

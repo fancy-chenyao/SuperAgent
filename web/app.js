@@ -71,6 +71,9 @@ const planNlHint = document.getElementById("planNlHint");
 let currentAbortController = null;
 let planningOutputBlocks = new Map();
 let executionOutputBlocks = new Map();
+let executionStepCards = [];       // Step cards for execution log: {id, agentName, displayName, status, content, startTime, endTime, summary}
+let currentStepCard = null;        // Currently active (running) step card
+let executionStepCount = 0;        // Monotonic step counter
 let flowSteps = [];
 let activeStepIndex = -1;
 const MAX_FLOW_STEPS = 40;
@@ -136,6 +139,7 @@ const resetSummary = () => {
   summaryHint.textContent = "";
   flowSteps = [];
   activeStepIndex = -1;
+  clearStepCards();
 };
 
 const resetPlan = () => {
@@ -611,6 +615,457 @@ tabs.forEach((tab) => {
   tab.addEventListener("click", () => switchTab(tab.dataset.tab));
 });
 
+// ─── Step Card Functions (Execution Log) ───────────────────────────────
+
+const clearStepCards = () => {
+  executionStepCards = [];
+  currentStepCard = null;
+  executionStepCount = 0;
+  if (executionOutput) executionOutput.innerHTML = "";
+};
+
+const createStepCard = (displayName, subAgentName) => {
+  const card = {
+    id: ++executionStepCount,
+    agentName: subAgentName || displayName,
+    displayName: displayName,
+    status: "running",
+    content: "",
+    startTime: Date.now(),
+    endTime: null,
+    summary: "",
+  };
+  executionStepCards.push(card);
+  currentStepCard = card;
+  renderAllStepCards();
+  if (autoScrollEnabled && executionOutput) {
+    executionOutput.scrollTop = executionOutput.scrollHeight;
+  }
+  return card;
+};
+
+const appendStepContent = (content) => {
+  if (!currentStepCard) return;
+  currentStepCard.content += content;
+  const cardEl = executionOutput?.querySelector(`[data-step-id="${currentStepCard.id}"]`);
+  if (cardEl) {
+    const bodyEl = cardEl.querySelector(".step-card-body");
+    if (bodyEl && !bodyEl.classList.contains("hidden")) {
+      bodyEl.textContent = currentStepCard.content;
+    }
+  }
+  if (autoScrollEnabled && executionOutput) {
+    executionOutput.scrollTop = executionOutput.scrollHeight;
+  }
+};
+
+const finalizeStepCard = () => {
+  if (!currentStepCard) return;
+  currentStepCard.status = "done";
+  currentStepCard.endTime = Date.now();
+  currentStepCard.summary = generateStepSummary(currentStepCard);
+  currentStepCard = null;
+  renderAllStepCards();
+};
+
+const errorStepCard = (errMsg) => {
+  if (currentStepCard) {
+    currentStepCard.status = "error";
+    currentStepCard.endTime = Date.now();
+    currentStepCard.summary = errMsg || "执行出错";
+    currentStepCard = null;
+  }
+  renderAllStepCards();
+};
+
+const generateStepSummary = (card) => {
+  const duration = card.endTime ? `${Math.round((card.endTime - card.startTime) / 1000)}s` : "";
+  const raw = (card.content || "").trim();
+  if (!raw) return duration;
+
+  let parsed = null;
+  try { parsed = JSON.parse(raw); } catch (e) { /* not JSON */ }
+
+  // Unwrap {tool, result} wrapper
+  if (parsed && parsed.result !== undefined) {
+    parsed = parsed.result;
+  }
+
+  // Array of records
+  if (Array.isArray(parsed) && parsed.length > 0) {
+    const first = parsed[0];
+    if (first.adtEmpeNm || first.name) {
+      const name = first.adtEmpeNm || first.name;
+      const email = first.internalMaiBox || "";
+      return `${name}${email ? " (" + email + ")" : ""} 等${parsed.length}条 · ${duration}`;
+    }
+    return `返回 ${parsed.length} 条记录 · ${duration}`;
+  }
+
+  // Object result
+  if (parsed && typeof parsed === "object") {
+    if (parsed.status === "error") return `错误: ${parsed.message || ""} · ${duration}`;
+
+    // EmailDispatch: {status, sent: {id, to, subject}}
+    if (parsed.sent && typeof parsed.sent === "object") {
+      const s = parsed.sent;
+      return `已发送 → ${s.to || "?"} · ${s.id || ""} · ${duration}`;
+    }
+
+    // ReportAgent: {status, markdown: "..."}
+    if (parsed.markdown) {
+      const firstLine = (parsed.markdown || "").split("\n")[0].replace(/^#+\s*/, "");
+      return `已生成: ${firstLine.substring(0, 40)} · ${duration}`;
+    }
+
+    // Records with matched_count
+    if (parsed.matched_count) {
+      return `已匹配 ${parsed.matched_count} 条 · ${duration}`;
+    }
+
+    if (parsed.status === "success") return `执行成功 · ${duration}`;
+    return `返回数据 · ${duration}`;
+  }
+
+  // Fallback: first 80 chars
+  const preview = raw.replace(/\s+/g, " ").substring(0, 80);
+  return `${preview}${raw.length > 80 ? "…" : ""} · ${duration}`;
+};
+
+const renderAllStepCards = () => {
+  if (!executionOutput) return;
+  const frag = document.createDocumentFragment();
+  executionStepCards.forEach((card) => {
+    renderStepCardInto(card, frag);
+  });
+  executionOutput.innerHTML = "";
+  executionOutput.appendChild(frag);
+};
+
+const renderStepCardInto = (card, parent) => {
+  const total = planSteps.length > 0 ? planSteps.length : executionStepCards.length;
+  const duration = card.endTime
+    ? `${Math.round((card.endTime - card.startTime) / 1000)}s`
+    : (card.status === "running" ? "…" : "");
+
+  const iconMap = { running: "🔄", done: "✅", error: "❌", pending: "⏳" };
+  const icon = iconMap[card.status] || "⏳";
+
+  const cardEl = document.createElement("div");
+  cardEl.className = `step-card ${card.status}`;
+  cardEl.dataset.stepId = card.id;
+
+  // Header (clickable toggle)
+  const header = document.createElement("div");
+  header.className = "step-card-header";
+  header.addEventListener("click", () => {
+    const body = cardEl.querySelector(".step-card-body");
+    const toggle = cardEl.querySelector(".step-toggle");
+    if (body) body.classList.toggle("hidden");
+    if (toggle) toggle.textContent = body?.classList.contains("hidden") ? "▶" : "▼";
+  });
+
+  header.innerHTML =
+    `<span class="step-status-icon">${icon}</span>` +
+    `<span class="step-index">${card.id}/${total}</span>` +
+    `<span class="step-agent-name">${escapeHtml(card.agentName)}</span>` +
+    `<span class="step-summary-text">${escapeHtml(card.summary || (card.status === "running" ? "正在执行…" : ""))}</span>` +
+    `<span class="step-duration">${duration}</span>` +
+    `<span class="step-toggle">▶</span>`;
+
+  // Body (collapsed by default)
+  const body = document.createElement("div");
+  body.className = "step-card-body hidden";
+  if (card.content) {
+    body.appendChild(formatResult(card.content));
+  }
+
+  cardEl.appendChild(header);
+  cardEl.appendChild(body);
+  parent.appendChild(cardEl);
+};
+
+// ─── Result Formatting ─────────────────────────────────────────────────
+
+const formatResult = (rawContent) => {
+  const wrap = document.createElement("div");
+  wrap.className = "step-result";
+
+  let parsed = null;
+  try { parsed = JSON.parse(rawContent); } catch (e) { /* not JSON */ }
+
+  // Unwrap {tool, result} wrapper
+  if (parsed && parsed.result !== undefined) {
+    parsed = parsed.result;
+  }
+
+  if (parsed && Array.isArray(parsed) && parsed.length > 0 && typeof parsed[0] === "object") {
+    wrap.appendChild(buildResultTable(parsed));
+    return wrap;
+  }
+
+  if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+    wrap.appendChild(buildKeyValueList(parsed, 0));
+    return wrap;
+  }
+
+  const pre = document.createElement("pre");
+  pre.className = "step-result-pre";
+  pre.textContent = parsed ? JSON.stringify(parsed, null, 2) : rawContent;
+  wrap.appendChild(pre);
+  return wrap;
+};
+
+const buildResultTable = (records) => {
+  const wrapper = document.createElement("div");
+  wrapper.className = "step-result-table-wrapper";
+
+  const MAX_ROWS = 10;
+  const displayRecords = records.slice(0, MAX_ROWS);
+  const hasMore = records.length > MAX_ROWS;
+  const cols = Object.keys(displayRecords[0]);
+
+  const table = document.createElement("table");
+  table.className = "step-result-table";
+
+  const thead = document.createElement("thead");
+  const hr = document.createElement("tr");
+  cols.forEach((c) => { const th = document.createElement("th"); th.textContent = c; hr.appendChild(th); });
+  thead.appendChild(hr);
+  table.appendChild(thead);
+
+  const tbody = document.createElement("tbody");
+  displayRecords.forEach((row) => {
+    const tr = document.createElement("tr");
+    cols.forEach((col) => {
+      const td = document.createElement("td");
+      const val = row[col];
+      td.textContent = val === null || val === undefined ? "-" : maskSensitiveIfNeeded(col, String(val));
+      tr.appendChild(td);
+    });
+    tbody.appendChild(tr);
+  });
+  table.appendChild(tbody);
+  wrapper.appendChild(table);
+
+  if (hasMore) {
+    const hint = document.createElement("div");
+    hint.className = "step-result-hint";
+    hint.textContent = `共 ${records.length} 条记录，显示前 ${MAX_ROWS} 条`;
+    wrapper.appendChild(hint);
+  }
+  return wrapper;
+};
+
+const buildKeyValueList = (obj, depth) => {
+  depth = depth || 0;
+  const dl = document.createElement("dl");
+  dl.className = depth === 0 ? "step-result-kv" : "step-result-kv step-result-kv-nested";
+
+  const isTextField = (k, v) => {
+    const textKeys = /markdown|body|content|description|summary|report|text/i;
+    return typeof v === "string" && (textKeys.test(k) || v.length > 200);
+  };
+
+  const looksLikeMarkdown = (v) => {
+    return typeof v === "string" && (/^#{1,4}\s/m.test(v) || /\*\*/.test(v) || /\n[-*]\s/m.test(v) || /\n\d+\.\s/m.test(v));
+  };
+
+  Object.entries(obj).forEach(([k, v]) => {
+    const dt = document.createElement("dt");
+    dt.textContent = k;
+    const dd = document.createElement("dd");
+
+    if (v === null || v === undefined) {
+      dd.textContent = "-";
+    } else if (isTextField(k, v)) {
+      if (looksLikeMarkdown(v)) {
+        const mdDiv = document.createElement("div");
+        mdDiv.className = "step-result-md";
+        mdDiv.innerHTML = renderMarkdown(v);
+        dd.appendChild(mdDiv);
+      } else {
+        const pre = document.createElement("pre");
+        pre.className = "step-result-pre";
+        pre.textContent = v;
+        dd.appendChild(pre);
+      }
+    } else if (Array.isArray(v) && v.length > 0 && typeof v[0] === "object" && depth === 0) {
+      dd.appendChild(buildResultTable(v));
+    } else if (typeof v === "object" && depth < 1) {
+      dd.appendChild(buildKeyValueList(v, depth + 1));
+    } else if (typeof v === "object") {
+      const pre = document.createElement("pre");
+      pre.className = "step-result-pre";
+      pre.textContent = JSON.stringify(v, null, 2);
+      dd.appendChild(pre);
+    } else {
+      dd.textContent = maskSensitiveIfNeeded(k, String(v));
+    }
+
+    dl.appendChild(dt);
+    dl.appendChild(dd);
+  });
+  return dl;
+};
+
+const maskSensitiveIfNeeded = (fieldName, value) => {
+  const sensitivePattern = /身份证|id_card|idcard|ssn|密码|password|secret|token|phone|电话|手机|mobile|^a\d{5,}$|officePhone|internalMaiBox|idvId/i;
+  if (sensitivePattern.test(fieldName) && value.length > 4) {
+    return value.substring(0, 2) + "****" + value.substring(value.length - 2);
+  }
+  return value;
+};
+
+const escapeHtml = (str) => {
+  const div = document.createElement("div");
+  div.textContent = str || "";
+  return div.innerHTML;
+};
+
+// ─── Lightweight Markdown → HTML ──────────────────────────────────────
+
+const renderMarkdown = (md) => {
+  if (!md) return "";
+  const lines = md.split("\n");
+  const out = [];
+  let inTable = false;
+  let tableRows = [];
+  let inCodeBlock = false;
+  let codeBuf = [];
+  let inList = null;  // "ul" | "ol" | null
+
+  const flushTable = () => {
+    if (tableRows.length === 0) return;
+    const tbl = ["<table class=\"md-table\">"];
+    tableRows.forEach((row, i) => {
+      const tag = i === 0 ? "th" : "td";
+      tbl.push("<tr>");
+      row.forEach((cell) => {
+        tbl.push(`<${tag}>${inlineMarkdown(cell.trim())}</${tag}>`);
+      });
+      tbl.push("</tr>");
+    });
+    tbl.push("</table>");
+    out.push(tbl.join(""));
+    tableRows = [];
+    inTable = false;
+  };
+
+  const flushList = () => {
+    if (inList === "ul") out.push("</ul>");
+    if (inList === "ol") out.push("</ol>");
+    inList = null;
+  };
+
+  const flushCodeBlock = () => {
+    if (!inCodeBlock) return;
+    out.push("<pre class=\"md-code\"><code>" + escapeHtml(codeBuf.join("\n")) + "</code></pre>");
+    codeBuf = [];
+    inCodeBlock = false;
+  };
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+
+    // Code block toggle
+    if (line.startsWith("```")) {
+      if (inCodeBlock) {
+        flushCodeBlock();
+        continue;
+      } else {
+        flushList();
+        flushTable();
+        inCodeBlock = true;
+        continue;
+      }
+    }
+    if (inCodeBlock) {
+      codeBuf.push(line);
+      continue;
+    }
+
+    // Empty line — close lists / tables
+    if (line.trim() === "") {
+      flushList();
+      flushTable();
+      continue;
+    }
+
+    // Table row
+    if (line.includes("|")) {
+      flushList();
+      const cells = line.split("|").map((c) => c.trim()).filter((c) => c !== "");
+      // Skip separator rows like |---|---|
+      if (cells.every((c) => /^[-:]+$/.test(c))) {
+        continue;
+      }
+      if (!inTable) {
+        inTable = true;
+        tableRows = [];
+      }
+      tableRows.push(cells);
+      continue;
+    } else {
+      flushTable();
+    }
+
+    // Headings
+    const hMatch = line.match(/^(#{1,4})\s+(.+)/);
+    if (hMatch) {
+      flushList();
+      const level = hMatch[1].length;
+      out.push(`<h${level} class=\"md-h${level}\">${inlineMarkdown(hMatch[2])}</h${level}>`);
+      continue;
+    }
+
+    // Horizontal rule
+    if (/^[-*_]{3,}$/.test(line.trim())) {
+      flushList();
+      out.push("<hr class=\"md-hr\">");
+      continue;
+    }
+
+    // Unordered list
+    const ulMatch = line.match(/^(\s*)[-*]\s+(.+)/);
+    if (ulMatch) {
+      if (inList !== "ul") { flushList(); out.push("<ul class=\"md-ul\">"); inList = "ul"; }
+      out.push(`<li>${inlineMarkdown(ulMatch[2])}</li>`);
+      continue;
+    }
+
+    // Ordered list
+    const olMatch = line.match(/^(\s*)\d+\.\s+(.+)/);
+    if (olMatch) {
+      if (inList !== "ol") { flushList(); out.push("<ol class=\"md-ol\">"); inList = "ol"; }
+      out.push(`<li>${inlineMarkdown(olMatch[2])}</li>`);
+      continue;
+    }
+
+    // Paragraph
+    flushList();
+    out.push(`<p class=\"md-p\">${inlineMarkdown(line)}</p>`);
+  }
+
+  flushList();
+  flushTable();
+  flushCodeBlock();
+  return out.join("");
+};
+
+const inlineMarkdown = (text) => {
+  let t = escapeHtml(text);
+  // Bold **text**
+  t = t.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+  // Italic *text* (but not inside words)
+  t = t.replace(/(?<!\*)\*(?!\*)([^*]+?)\*(?!\*)/g, "<em>$1</em>");
+  // Inline code `text`
+  t = t.replace(/`([^`]+)`/g, "<code class=\"md-inline-code\">$1</code>");
+  return t;
+};
+
+// ─── Original Output Block (planning log) ──────────────────────────────
+
 const ensureOutputBlock = (agentName, phase = "planning") => {
   const outputContainer = getOutputContainer(phase);
   const outputBlocks = getOutputBlocks(phase);
@@ -690,6 +1145,7 @@ const clearOutput = () => {
   if (executionOutput) executionOutput.innerHTML = "";
   planningOutputBlocks = new Map();
   executionOutputBlocks = new Map();
+  clearStepCards();
 };
 
 const clearOutputPhase = (phase = "planning") => {
@@ -697,6 +1153,7 @@ const clearOutputPhase = (phase = "planning") => {
   if (outputContainer) outputContainer.innerHTML = "";
   if (phase === "executing") {
     executionOutputBlocks = new Map();
+    clearStepCards();
   } else {
     planningOutputBlocks = new Map();
   }
@@ -738,7 +1195,11 @@ const handleEvent = (eventName, payload) => {
       return;
     }
     if (!plannerOnlyMode) {
-      appendOutput(agentName, content);
+      if (currentRunContext === "executing" && currentStepCard) {
+        appendStepContent(content);
+      } else if (currentRunContext !== "executing") {
+        appendOutput(agentName, content);
+      }
     }
     return;
   }
@@ -765,8 +1226,8 @@ const handleEvent = (eventName, payload) => {
       resetSummary();
       if (currentRunContext !== "executing") {
         resetPlan();
+        appendOutput("system", `\n[workflow] ${payload.data?.workflow_id || ""}\n`);
       }
-      appendOutput("system", `\n[workflow] ${payload.data?.workflow_id || ""}\n`);
     }
     const wfId = payload.data?.workflow_id;
     if (wfId && workflowIdInput) {
@@ -777,6 +1238,7 @@ const handleEvent = (eventName, payload) => {
   }
   if (eventName === "start_of_agent") {
     const agentName = payload.data?.agent_name || payload.agent_name || "agent";
+    const subAgentName = payload.data?.sub_agent_name || null;
     if (!plannerOnlyMode) {
       pushFlowStep(agentName);
     }
@@ -787,7 +1249,12 @@ const handleEvent = (eventName, payload) => {
       showPlanHint("Collecting plan output...");
     }
     if (!plannerOnlyMode) {
-      appendOutput("system", `\n[start_of_agent] ${agentName}\n`);
+      const isExecAgent = currentRunContext === "executing" && agentName.includes("agent_proxy");
+      if (isExecAgent) {
+        createStepCard(agentName, subAgentName);
+      } else if (currentRunContext !== "executing") {
+        appendOutput("system", `\n[start_of_agent] ${agentName}\n`);
+      }
     }
     return;
   }
@@ -806,7 +1273,12 @@ const handleEvent = (eventName, payload) => {
       applyPlannerStepsFromBuffer(plannerBuffer, { finalize: true });
     }
     if (!plannerOnlyMode) {
-      appendOutput("system", `\n[end_of_agent] ${agentName}\n`);
+      const isExecAgent = currentRunContext === "executing" && agentName.includes("agent_proxy");
+      if (isExecAgent) {
+        finalizeStepCard();
+      } else if (currentRunContext !== "executing") {
+        appendOutput("system", `\n[end_of_agent] ${agentName}\n`);
+      }
     }
     return;
   }
@@ -814,10 +1286,12 @@ const handleEvent = (eventName, payload) => {
     if (!plannerOnlyMode) {
       showSummaryHint("Workflow completed.");
       if (currentRunContext === "executing") {
+        finalizeStepCard();
         showPlanValidationHint("执行完成，可查看执行日志。");
         showPlanHint("计划执行完成。");
+      } else {
+        appendOutput("system", "\n[workflow] completed\n");
       }
-      appendOutput("system", "\n[workflow] completed\n");
     } else if (!plannerOnlyStepsUpdated) {
       showPlanNlHint("规划完成，但未生成可用步骤。请调整指令后重试。", true);
     }
@@ -832,14 +1306,18 @@ const handleEvent = (eventName, payload) => {
   if (eventName === "error") {
     if (!plannerOnlyMode) {
       showSummaryHint("Workflow error.", true);
-      appendOutput("system", `\n[error] ${payload.data?.error || payload.raw || "unknown error"}\n`);
+      if (currentRunContext === "executing") {
+        errorStepCard(payload.data?.error || payload.raw || "unknown error");
+      } else {
+        appendOutput("system", `\n[error] ${payload.data?.error || payload.raw || "unknown error"}\n`);
+      }
       showPlanValidationHint("执行失败，可在 Task History 中恢复。", true);
     } else {
       showPlanNlHint(payload.data?.error || payload.raw || "unknown error", true);
     }
     return;
   }
-  if (!plannerOnlyMode) {
+  if (!plannerOnlyMode && currentRunContext !== "executing") {
     appendOutput("system", `\n[${eventName}] ${JSON.stringify(payload)}\n`);
   }
 };
