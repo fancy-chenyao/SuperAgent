@@ -142,7 +142,20 @@ async def execute_tool(
     resource_spec,
     tool_registry,
     arguments: Dict[str, Any],
+    agent: Any = None,
+    context: Any = None,
 ) -> Any:
+    if agent is not None and context is not None:
+        from src.security.enforcement import enforce_tool_call
+
+        await enforce_tool_call(
+            agent=agent,
+            tool_name=resource_spec.name,
+            arguments=arguments,
+            context=context,
+            resource_spec=resource_spec,
+        )
+
     protocol = getattr(resource_spec, "protocol", "local")
     if protocol == "local":
         executor = await ExecutorFactory.get_tool_executor(tool_registry)

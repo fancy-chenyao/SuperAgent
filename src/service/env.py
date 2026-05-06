@@ -70,6 +70,7 @@ DEBUG = _parse_bool("DEBUG", False)
 BROWSER_BACKEND = os.getenv("BROWSER_BACKEND")
 MAX_STEPS = _parse_int("MAX_STEPS", 25)
 AUTO_RECOVERY_ENABLED = _parse_bool("AUTO_RECOVERY_ENABLED", False)
+S_ABAC_ENABLED = _parse_bool("S_ABAC_ENABLED", False)
 
 if not DEBUG:
     logging.basicConfig(

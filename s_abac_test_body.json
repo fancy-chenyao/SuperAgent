@@ -1,0 +1,15 @@
+﻿{
+  "user_id": "test",
+  "lang": "zh",
+  "messages": [
+    {
+      "role": "user",
+      "content": "请调用 RemoteEmailDispatchAgent 给 hr@example.com 发送一封邮件，内容是：这是一封 S-ABAC 审批测试邮件。"
+    }
+  ],
+  "debug": true,
+  "deep_thinking_mode": false,
+  "search_before_planning": false,
+  "coor_agents": ["RemoteEmailDispatchAgent"],
+  "workmode": "launch"
+}

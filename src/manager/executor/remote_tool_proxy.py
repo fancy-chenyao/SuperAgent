@@ -36,9 +36,13 @@ class RemoteToolProxy(BaseTool):
         spec: ResourceSpec,
         tool_registry: Any,
         description: Optional[str] = None,
+        agent: Any = None,
+        context: Any = None,
     ):
         self._spec = spec
         self._tool_registry = tool_registry
+        self._agent = agent
+        self._context = context
         tool_desc = description or (spec.metadata or {}).get("description", "")
         super().__init__(name=spec.name, description=tool_desc or "")
 
@@ -52,7 +56,13 @@ class RemoteToolProxy(BaseTool):
         )
 
     async def _arun(self, **kwargs: Dict[str, Any]) -> Any:
-        return await execute_tool(self._spec, self._tool_registry, kwargs)
+        return await execute_tool(
+            self._spec,
+            self._tool_registry,
+            kwargs,
+            agent=self._agent,
+            context=self._context,
+        )
 
 
 __all__ = ["RemoteToolProxy"]

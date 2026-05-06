@@ -88,6 +88,7 @@ class LocalExecutor(AgentExecutor):
             from src.llm.llm import get_llm_by_type
             from src.prompts.template import apply_prompt
             from src.service.env import MAX_STEPS
+            from src.security.tool_wrapper import wrap_tools_for_agent
 
             llm = get_llm_by_type(agent.llm_type)
             prompt = apply_prompt(
@@ -95,7 +96,8 @@ class LocalExecutor(AgentExecutor):
                 agent.prompt,
             )
 
-            react_agent = create_react_agent(llm, tools=tools, prompt=prompt)
+            secure_tools = wrap_tools_for_agent(tools, agent, context)
+            react_agent = create_react_agent(llm, tools=secure_tools, prompt=prompt)
             config = {
                 "configurable": {"user_id": context.user_id},
                 "recursion_limit": int(MAX_STEPS),
@@ -117,11 +119,15 @@ class LocalExecutor(AgentExecutor):
                     "message_count": len(result_messages),
                     "workflow_id": context.workflow_id,
                     "workflow_mode": context.workflow_mode,
-                    "tool_count": len(tools),
+                    "tool_count": len(secure_tools),
                 },
             )
 
         except Exception as e:
+            from src.security.enforcement import ApprovalRequiredError, PermissionDeniedError
+
+            if isinstance(e, (ApprovalRequiredError, PermissionDeniedError)):
+                raise
             duration = time.time() - start_time
             logger.error("Error executing local agent %s: %s", getattr(agent, "agent_name", "unknown"), e)
             return ExecuteResult(
@@ -132,7 +138,7 @@ class LocalExecutor(AgentExecutor):
                     "duration": duration,
                 },
             )
-
+        
     async def execute_with_tools(
         self,
         agent: Any,
@@ -150,6 +156,7 @@ class LocalExecutor(AgentExecutor):
             from src.llm.llm import get_llm_by_type
             from src.prompts.template import apply_prompt
             from src.service.env import MAX_STEPS
+            from src.security.tool_wrapper import wrap_tools_for_agent
 
             llm = get_llm_by_type(agent.llm_type)
             prompt = apply_prompt(
@@ -157,7 +164,8 @@ class LocalExecutor(AgentExecutor):
                 agent.prompt,
             )
 
-            react_agent = create_react_agent(llm, tools=tools, prompt=prompt)
+            secure_tools = wrap_tools_for_agent(tools, agent, context)
+            react_agent = create_react_agent(llm, tools=secure_tools, prompt=prompt)
             config = {
                 "configurable": {"user_id": context.user_id},
                 "recursion_limit": int(MAX_STEPS),
@@ -177,11 +185,15 @@ class LocalExecutor(AgentExecutor):
                 metadata={
                     "agent_name": agent.agent_name,
                     "duration": duration,
-                    "tool_count": len(tools),
+                    "tool_count": len(secure_tools),
                 },
             )
 
         except Exception as e:
+            from src.security.enforcement import ApprovalRequiredError, PermissionDeniedError
+
+            if isinstance(e, (ApprovalRequiredError, PermissionDeniedError)):
+                raise
             duration = time.time() - start_time
             return ExecuteResult(
                 status=ExecutionStatus.FAILED,

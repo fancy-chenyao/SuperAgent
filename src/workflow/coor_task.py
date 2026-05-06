@@ -24,6 +24,7 @@ from src.workflow.cache import workflow_cache as cache
 from src.utils.content_process import clean_response_tags
 from src.manager.executor.base import ExecutionContext
 from src.manager.executor.factory import execute_agent
+from src.security.enforcement import enforce_agent_dispatch
 
 try:
     from src.llm.llm import get_llm_by_type
@@ -326,7 +327,16 @@ async def agent_proxy_node(state: State) -> Command[Literal["publisher", "__end_
         workflow_id=state.get("workflow_id"),
         workflow_mode=state.get("workflow_mode"),
         deep_thinking_mode=state.get("deep_thinking_mode", False),
+        metadata={
+            "task_id": state.get("task_id"),
+            "current_step": state.get("current_step"),
+            "node_name": "agent_proxy",
+            "workflow_id": state.get("workflow_id"),
+            "workflow_mode": state.get("workflow_mode"),
+            "USER_QUERY": state.get("USER_QUERY"),
+        },
     )
+    await enforce_agent_dispatch(_agent, context)
 
     # Remote agents receive full message history and extract parameters themselves
     # using their own LLM. No local parameter extraction needed.

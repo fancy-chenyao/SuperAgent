@@ -22,6 +22,7 @@ from src.utils.path_utils import get_project_root
 from src.workflow.cache import workflow_cache
 from src.robust.checkpoint import CheckpointManager
 from src.robust.task_logger import TaskLogger
+from src.security.approval import get_approval_store
 
 
 def _sse_format(event: str, data: dict[str, Any]) -> str:
@@ -716,6 +717,69 @@ def create_app() -> FastAPI:
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Failed to delete task: {str(e)}")
 
+    # ---- S-ABAC approval API ----
+
+    @app.get("/api/approvals")
+    async def list_approvals(
+        status: Optional[str] = None,
+        workflow_id: Optional[str] = None,
+        task_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+    ):
+        return get_approval_store().list(
+            status=status,
+            workflow_id=workflow_id,
+            task_id=task_id,
+            user_id=user_id,
+        )
+
+    @app.get("/api/approvals/{approval_id}")
+    async def get_approval(approval_id: str):
+        approval = get_approval_store().get(approval_id)
+        if approval is None:
+            raise HTTPException(status_code=404, detail="approval not found")
+        return approval.__dict__
+
+    @app.post("/api/approvals/{approval_id}/approve")
+    async def approve_approval(approval_id: str, body: "ApprovalDecisionRequest"):
+        try:
+            approval = get_approval_store().approve(
+                approval_id,
+                approver=body.approver,
+                comment=body.comment,
+            )
+            return {
+                "result": "success",
+                "approval": approval.__dict__,
+                "task_id": approval.task_id,
+                "workflow_id": approval.workflow_id,
+                "resume_step": approval.resume_step,
+            }
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail="approval not found")
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+
+    @app.post("/api/approvals/{approval_id}/reject")
+    async def reject_approval(approval_id: str, body: "ApprovalDecisionRequest"):
+        try:
+            approval = get_approval_store().reject(
+                approval_id,
+                approver=body.approver,
+                comment=body.comment,
+            )
+            return {
+                "result": "success",
+                "approval": approval.__dict__,
+                "task_id": approval.task_id,
+                "workflow_id": approval.workflow_id,
+                "resume_step": approval.resume_step,
+            }
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail="approval not found")
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+
     return app
 
 
@@ -729,6 +793,11 @@ class ResumeRequest(BaseModel):
     user_id: str = "test"
     lang: str = "en"
     workmode: str = "launch"
+
+
+class ApprovalDecisionRequest(BaseModel):
+    approver: str = "user"
+    comment: str = ""
 
 
 app = create_app()

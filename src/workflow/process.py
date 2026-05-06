@@ -26,6 +26,8 @@ from src.robust.hooks import (
     HookPoint,
     initialize_hook_system,
 )
+from src.security.approval import get_approval_store
+from src.security.enforcement import ApprovalRequiredError, PermissionDeniedError
 
 logging.basicConfig(
     level=logging.WARNING,
@@ -622,6 +624,8 @@ async def _process_workflow(
                 },
             }
             node_func = workflow.nodes[current_node]
+            state["task_id"] = task_id
+            state["current_step"] = step_count
             command = None
             async for runtime_result in _execute_node_with_runtime_events(
                 state,
@@ -787,6 +791,78 @@ async def _process_workflow(
         }
 
         cache.dump(workflow_id, initial_state["workflow_mode"])
+
+    except ApprovalRequiredError as e:
+        logger.warning("S-ABAC approval required: %s", str(e))
+        state_payload = dict(state) if 'state' in dir() else dict(initial_state)
+        resume_step = max(step_count, 1)
+        if step_count == 0:
+            try:
+                checkpoint_manager.save_checkpoint(
+                    workflow_id=workflow_id,
+                    task_id=task_id,
+                    step=0,
+                    node_name=current_node or "security",
+                    next_node=current_node,
+                    state=state_payload,
+                    metadata={"security_event": "approval_required"},
+                )
+                resume_step = 1
+            except Exception as checkpoint_error:
+                logger.error("Failed to save approval checkpoint: %s", checkpoint_error)
+
+        payload = dict(e.payload)
+        approval = get_approval_store().create(
+            user_id=initial_state.get("user_id", ""),
+            workflow_id=workflow_id,
+            task_id=task_id,
+            resume_step=resume_step,
+            node_name=current_node or "security",
+            subject=payload.get("subject", {}),
+            object=payload.get("object", {}),
+            scenario=payload.get("scenario", {}),
+            action=payload.get("action", {}),
+            policy_result=payload.get("policy_result", {}),
+        )
+        task_logger.log_error(
+            error=f"S-ABAC approval required: {approval.approval_id}",
+            node_name=current_node or "security",
+            step=step_count,
+        )
+        yield {
+            "event": "approval_required",
+            "data": {
+                "workflow_id": workflow_id,
+                "task_id": task_id,
+                "resume_step": approval.resume_step,
+                "approval_id": approval.approval_id,
+                "policy_result": approval.policy_result,
+                "subject": approval.subject,
+                "object": approval.object,
+                "action": approval.action,
+            },
+        }
+
+    except PermissionDeniedError as e:
+        logger.warning("S-ABAC permission denied: %s", str(e))
+        payload = dict(e.payload)
+        task_logger.log_error(
+            error=f"S-ABAC permission denied: {payload.get('policy_result', {}).get('reason', str(e))}",
+            node_name=current_node or "security",
+            step=step_count,
+        )
+        yield {
+            "event": "permission_denied",
+            "data": {
+                "workflow_id": workflow_id,
+                "task_id": task_id,
+                "error": str(e),
+                "policy_result": payload.get("policy_result", {}),
+                "subject": payload.get("subject", {}),
+                "object": payload.get("object", {}),
+                "action": payload.get("action", {}),
+            },
+        }
 
     except Exception as e:
         import traceback

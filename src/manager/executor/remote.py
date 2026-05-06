@@ -319,6 +319,14 @@ class RemoteExecutor(AgentExecutor):
                 if getattr(t, "name", "")
             ]
 
+        request["security_context"] = {
+            "user_id": context.user_id,
+            "workflow_id": context.workflow_id,
+            "workflow_mode": context.workflow_mode,
+            "task_id": (context.metadata or {}).get("task_id"),
+            "current_step": (context.metadata or {}).get("current_step"),
+        }
+
         return request
 
     async def _build_headers(self, agent: Any) -> Dict[str, str]:
