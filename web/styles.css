@@ -2465,3 +2465,452 @@ button.small {
     grid-template-columns: 1fr;
   }
 }
+ 
+/* ============================================================ Security Dashboard Panel ============================================================ */
+
+.security-body {
+  padding: 0;
+}
+
+.security-layout {
+  display: grid;
+  grid-template-columns: 360px 1fr;
+  gap: 16px;
+  align-items: start;
+}
+
+.security-left,
+.security-right {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.security-status {
+  padding: 12px;
+}
+
+.sec-status-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 16px;
+  margin-bottom: 12px;
+}
+
+.sec-status-dot {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.sec-status-dot.on {
+  background: #4be3ac;
+  box-shadow: 0 0 10px rgba(75, 227, 172, 0.6);
+}
+
+.sec-status-dot.off {
+  background: #ff6a6a;
+  box-shadow: 0 0 10px rgba(255, 106, 106, 0.6);
+}
+
+.sec-stats {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.sec-stat {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 10px 16px;
+  background: var(--bg-soft);
+  border-radius: 10px;
+  min-width: 80px;
+}
+
+.sec-stat span {
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--accent);
+}
+
+.sec-stat small {
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 2px;
+}
+
+.sec-error {
+  color: var(--danger);
+  padding: 10px;
+  background: rgba(217, 83, 79, 0.08);
+  border-radius: 8px;
+  font-size: 13px;
+}
+
+.sec-profile-card {
+  display: flex;
+  gap: 14px;
+  padding: 12px 0;
+}
+
+.sec-profile-icon {
+  font-size: 36px;
+}
+
+.sec-profile-info {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.sec-profile-info strong {
+  font-size: 15px;
+}
+
+.sec-clearance {
+  margin: 4px 0;
+}
+
+.clearance-bar {
+  display: inline-flex;
+  gap: 4px;
+  vertical-align: middle;
+  margin-right: 6px;
+}
+
+.clearance-seg {
+  width: 20px;
+  height: 8px;
+  border-radius: 4px;
+  background: var(--bg-soft);
+  border: 1px solid rgba(0, 0, 0, 0.08);
+}
+
+.clearance-seg.filled {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.clearance-text {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.sec-desc {
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.sec-agents {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.sec-agent-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: var(--bg-soft);
+  border-radius: 8px;
+  font-size: 13px;
+}
+
+.sec-agent-name {
+  font-weight: 600;
+  flex: 1;
+}
+
+.sec-empty {
+  padding: 16px;
+  text-align: center;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.sec-tool-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.sec-tool-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  font-size: 13px;
+  background: var(--bg-soft);
+}
+
+.sec-tool-row.allowed {
+  border-left: 3px solid #4be3ac;
+}
+
+.sec-tool-row.denied {
+  border-left: 3px solid var(--danger);
+  opacity: 0.7;
+}
+
+.sec-tool-icon {
+  font-size: 16px;
+  flex-shrink: 0;
+}
+
+.sec-tool-name {
+  font-weight: 600;
+  flex: 1;
+}
+
+.sec-tool-roles {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.sec-tool-approval {
+  font-size: 11px;
+  color: var(--accent-2);
+}
+
+.sec-policies {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.sec-policy-card {
+  padding: 10px;
+  background: var(--bg-soft);
+  border-radius: 10px;
+  border: 1px solid rgba(0, 0, 0, 0.05);
+}
+
+.sec-policy-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.sec-policy-header strong {
+  font-size: 13px;
+  font-family: "Microsoft YaHei Mono", "Consolas", "Monaco", monospace;
+}
+
+.sec-policy-desc {
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+
+.sec-policy-rule {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding: 6px 8px;
+  background: rgba(255, 255, 255, 0.6);
+  border-radius: 6px;
+  margin-top: 4px;
+  font-size: 11px;
+}
+
+.sec-cond {
+  font-size: 10px;
+  padding: 2px 6px;
+  background: rgba(0, 0, 0, 0.04);
+  border-radius: 4px;
+  font-family: "Microsoft YaHei Mono", "Consolas", "Monaco", monospace;
+}
+
+.sec-approvals {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.sec-approval-item {
+  padding: 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(0, 0, 0, 0.06);
+  background: var(--bg-soft);
+}
+
+.sec-approval-item.status-pending {
+  border-color: rgba(244, 163, 93, 0.4);
+}
+
+.sec-approval-item.status-approved {
+  border-color: rgba(75, 227, 172, 0.4);
+}
+
+.sec-approval-item.status-rejected {
+  border-color: rgba(217, 83, 79, 0.4);
+}
+
+.sec-approval-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.sec-approval-id {
+  font-size: 11px;
+  font-family: "Microsoft YaHei Mono", "Consolas", "Monaco", monospace;
+  color: var(--muted);
+}
+
+.sec-approval-body {
+  font-size: 11px;
+  color: var(--muted);
+  line-height: 1.6;
+  margin-bottom: 8px;
+}
+
+.sec-approval-body div {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sec-approval-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.sec-event-detail {
+  font-size: 12px;
+  line-height: 1.8;
+}
+
+/* Permission Summary (Run tab) */
+.security-perm-summary {
+  font-size: 12px;
+  padding: 4px 0;
+}
+
+.perm-summary-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+}
+
+.perm-summary-icon {
+  font-size: 24px;
+}
+
+.perm-summary-name {
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.perm-summary-stats {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.perm-stat {
+  flex: 1;
+  text-align: center;
+  padding: 8px 6px;
+  border-radius: 8px;
+  background: var(--bg-soft);
+}
+
+.perm-stat.green {
+  border-left: 3px solid #4be3ac;
+}
+
+.perm-stat.orange {
+  border-left: 3px solid var(--accent-2);
+}
+
+.perm-stat.red {
+  border-left: 3px solid var(--danger);
+}
+
+.perm-stat-num {
+  display: block;
+  font-size: 20px;
+  font-weight: 700;
+}
+
+.perm-stat.green .perm-stat-num { color: #2e9e6b; }
+.perm-stat.orange .perm-stat-num { color: #d4862e; }
+.perm-stat.red .perm-stat-num { color: var(--danger); }
+
+.perm-stat-label {
+  display: block;
+  font-size: 10px;
+  color: var(--muted);
+  margin-top: 2px;
+}
+
+.perm-blocked-list,
+.perm-approval-list {
+  margin-top: 8px;
+}
+
+.perm-blocked-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+
+.perm-blocked-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 4px 8px;
+  background: rgba(0, 0, 0, 0.02);
+  border-radius: 4px;
+  margin-bottom: 2px;
+}
+
+.perm-blocked-name {
+  font-family: "Microsoft YaHei Mono", "Consolas", "Monaco", monospace;
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.perm-blocked-reason {
+  font-size: 10px;
+  color: var(--muted);
+  text-align: right;
+  max-width: 50%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+button.danger {
+  background: rgba(217, 83, 79, 0.1);
+  border-color: rgba(217, 83, 79, 0.3);
+  color: var(--danger);
+}
+
+button.danger:hover {
+  background: rgba(217, 83, 79, 0.2);
+  border-color: var(--danger);
+}
+
+@media (max-width: 1024px) {
+  .security-layout {
+    grid-template-columns: 1fr;
+  }
+}

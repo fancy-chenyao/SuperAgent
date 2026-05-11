@@ -142,7 +142,6 @@ AGENT_SECURITY_ATTRIBUTES = {
 DEFAULT_OBJECT_ATTRIBUTES = {
     "sensitivity": "LOW",
     "allowed_roles": [],
-    "require_human_approval": False,
     "protocol": "local",
 }
 
@@ -153,8 +152,6 @@ DEFAULT_OBJECT_ATTRIBUTES = {
 # 常用字段含义：
 # - sensitivity：资源敏感度，取 LOW/MEDIUM/HIGH/CRITICAL。
 # - allowed_roles：允许访问该资源的角色列表；为空表示不限制角色。
-# - require_human_approval：即使角色和等级满足，也必须进入人工审批。
-# - irreversible：操作不可逆，例如发送邮件、执行 shell、写入业务记录。
 # - protocol/server_id/category 等字段可由运行时 metadata 补充，用于扩展策略。
 RESOURCE_SECURITY_ATTRIBUTES = {
     # 低敏研究类工具：普通搜索/爬虫，ResearchAgent 和系统助手可直接使用。
@@ -173,9 +170,7 @@ RESOURCE_SECURITY_ATTRIBUTES = {
     },
     "bash": {
         "sensitivity": "HIGH",
-        "allowed_roles": ["CodeAgent"],
-        "require_human_approval": True,
-        "irreversible": True,
+        "allowed_roles": ["CodeAgent", "UniversalAssistant"],
     },
     # 浏览器/文件写入类工具：可能访问外部页面或修改本地文件，设置为中敏。
     "browser": {
@@ -190,24 +185,21 @@ RESOURCE_SECURITY_ATTRIBUTES = {
     # 薪资信息额外要求人工审批。
     "remote_person_info_tool": {
         "sensitivity": "HIGH",
-        "allowed_roles": ["HRAgent"],
+        "allowed_roles": ["HRAgent", "UniversalAssistant"],
     },
     "remote_salary_info_tool": {
         "sensitivity": "HIGH",
-        "allowed_roles": ["HRAgent"],
-        "require_human_approval": True,
+        "allowed_roles": ["HRAgent", "UniversalAssistant"],
     },
     # 文档生成工具：允许文档 Agent 或 HR Agent 使用。
     "remote_docx_generator_tool": {
         "sensitivity": "MEDIUM",
-        "allowed_roles": ["DocumentAgent", "HRAgent"],
+        "allowed_roles": ["DocumentAgent", "HRAgent", "UniversalAssistant"],
     },
     # 邮件发送工具：外发动作不可逆，因此高敏并要求人工审批。
     "remote_email_tool": {
         "sensitivity": "HIGH",
-        "allowed_roles": ["CommunicationAgent"],
-        "require_human_approval": True,
-        "irreversible": True,
+        "allowed_roles": ["CommunicationAgent", "UniversalAssistant"],
     },
     # 知识检索工具：通常读内部知识库，按中敏处理。
     "knowledge_search_tool": {
@@ -217,29 +209,70 @@ RESOURCE_SECURITY_ATTRIBUTES = {
     # 业务写入类工具：请假、差旅等会写业务记录，因此高敏并进入审批。
     "save_leave_record": {
         "sensitivity": "HIGH",
-        "allowed_roles": ["OperationAgent", "HRAgent"],
-        "require_human_approval": True,
+        "allowed_roles": ["OperationAgent", "HRAgent", "UniversalAssistant"],
     },
     "save_travel_record": {
         "sensitivity": "HIGH",
-        "allowed_roles": ["OperationAgent", "HRAgent"],
-        "require_human_approval": True,
+        "allowed_roles": ["OperationAgent", "HRAgent", "UniversalAssistant"],
     },
     # 目标 Agent 本身也可以作为 Object。
     # agent_proxy_node 调度这些 Agent 前，会检查调度权限。
+    # allowed_roles 已扩展为包含对应的业务角色，使各用户能调度对应 Agent。
     "RemoteHRAssistantAgent": {
         "sensitivity": "HIGH",
-        "allowed_roles": ["UniversalAssistant"],
+        "allowed_roles": ["UniversalAssistant", "HRAgent"],
     },
     "RemoteDocumentGeneratorAgent": {
         "sensitivity": "MEDIUM",
-        "allowed_roles": ["UniversalAssistant"],
+        "allowed_roles": ["UniversalAssistant", "HRAgent", "DocumentAgent", "CommunicationAgent"],
     },
     "RemoteEmailDispatchAgent": {
         "sensitivity": "HIGH",
-        "allowed_roles": ["UniversalAssistant"],
-        "require_human_approval": True,
-        "irreversible": True,
+        "allowed_roles": ["UniversalAssistant", "CommunicationAgent"],
+    },
+    "RemoteCommunicationAgent": {
+        "sensitivity": "MEDIUM",
+        "allowed_roles": ["UniversalAssistant", "CommunicationAgent"],
+    },
+    "RemoteKnowledgeAgent": {
+        "sensitivity": "LOW",
+        "allowed_roles": ["UniversalAssistant", "KnowledgeAgent", "HRAgent", "ResearchAgent"],
+    },
+    "RemoteBusinessRiskAgent": {
+        "sensitivity": "HIGH",
+        "allowed_roles": ["UniversalAssistant", "RiskAgent"],
+    },
+    "RemoteUnicornSelectorAgent": {
+        "sensitivity": "LOW",
+        "allowed_roles": ["UniversalAssistant", "ResearchAgent"],
+    },
+    "RemoteReportAgent": {
+        "sensitivity": "LOW",
+        "allowed_roles": ["UniversalAssistant", "ReportAgent"],
+    },
+    "RemoteMeetingManagerAgent": {
+        "sensitivity": "MEDIUM",
+        "allowed_roles": ["UniversalAssistant", "OperationAgent"],
+    },
+    "RemoteOfficeAssistantAgent": {
+        "sensitivity": "MEDIUM",
+        "allowed_roles": ["UniversalAssistant", "OperationAgent", "CommunicationAgent"],
+    },
+    "researcher": {
+        "sensitivity": "LOW",
+        "allowed_roles": ["UniversalAssistant", "ResearchAgent", "HRAgent", "CodeAgent", "CommunicationAgent"],
+    },
+    "coder": {
+        "sensitivity": "MEDIUM",
+        "allowed_roles": ["UniversalAssistant", "CodeAgent"],
+    },
+    "browser": {
+        "sensitivity": "LOW",
+        "allowed_roles": ["UniversalAssistant", "BrowserAgent", "ResearchAgent", "CodeAgent"],
+    },
+    "reporter": {
+        "sensitivity": "LOW",
+        "allowed_roles": ["UniversalAssistant", "ReportAgent", "ResearchAgent", "HRAgent", "CodeAgent", "CommunicationAgent"],
     },
 }
 
@@ -253,19 +286,16 @@ RESOURCE_SECURITY_ATTRIBUTES = {
 # - condition.all：所有条件都满足才命中。
 # - condition.any：任意条件满足即可命中，目前此文件暂未使用。
 # - effect：ALLOW 表示满足条件后允许进入约束检查；未允许则默认拒绝。
-# - human_review_required：命中后强制进入人工审批。
 # - constraints：额外约束，例如 allowed_actions、金额阈值、工作时间要求等。
 S_ABAC_POLICIES = [
     {
         "policy_id": "P-SYSTEM-ORCHESTRATE-AGENTS",
-        "description": "The SuperAgent orchestrator can delegate to registered agents.",
+        "description": "The SuperAgent system orchestrator (no user context) can delegate to registered agents. User-based dispatch falls through to default clearance/role rules.",
         "rules": [
             {
-                # 系统编排器可以调度已注册 Agent。
-                # 若目标 Agent 的 Object 属性要求人工审批，仍会在命中后进入审批。
                 "condition": {
                     "all": [
-                        {"subject.attributes.role": "UniversalAssistant"},
+                        {"subject.subject_type": "system"},
                         {"action.verb": "orchestrate"},
                         {"object.attributes.type": "agent"},
                     ]
@@ -279,11 +309,9 @@ S_ABAC_POLICIES = [
     },
     {
         "policy_id": "P-HR-SENSITIVE-TOOLS",
-        "description": "HR agents can use HR sensitive tools, with review when configured.",
+        "description": "HR agents can use HR sensitive tools.",
         "rules": [
             {
-                # HR Agent 可以调用 HR 分类工具。
-                # 具体是否还要人审，由工具 Object 的 require_human_approval 等属性决定。
                 "condition": {
                     "all": [
                         {"subject.attributes.role": "HRAgent"},
@@ -301,11 +329,9 @@ S_ABAC_POLICIES = [
     },
     {
         "policy_id": "P-COMMUNICATION-SEND",
-        "description": "Communication agents can send messages and emails with review.",
+        "description": "Communication agents can send messages and emails.",
         "rules": [
             {
-                # 通信类 Agent 可以执行通信类工具，但发送消息/邮件属于外发动作，
-                # 这里强制 human_review_required=True。
                 "condition": {
                     "all": [
                         {"subject.attributes.role": "CommunicationAgent"},
@@ -314,7 +340,6 @@ S_ABAC_POLICIES = [
                     ]
                 },
                 "effect": "ALLOW",
-                "human_review_required": True,
                 "constraints": {
                     "allowed_actions": ["call", "execute"],
                 },

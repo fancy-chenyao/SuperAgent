@@ -1,4 +1,4 @@
-﻿const statusIndicator = document.getElementById("statusIndicator");
+const statusIndicator = document.getElementById("statusIndicator");
 const tabs = document.querySelectorAll(".tab");
 const panels = document.querySelectorAll(".panel");
 
@@ -672,7 +672,10 @@ const errorStepCard = (errMsg) => {
   if (currentStepCard) {
     currentStepCard.status = "error";
     currentStepCard.endTime = Date.now();
-    currentStepCard.summary = errMsg || "执行出错";
+    const plainText = errMsg.replace(/<[^>]*>/g, "").trim();
+    currentStepCard.summary = plainText.substring(0, 80) || "执行出错";
+    currentStepCard.content = errMsg;
+    currentStepCard._isHtml = true;
     currentStepCard = null;
   }
   renderAllStepCards();
@@ -773,16 +776,30 @@ const renderStepCardInto = (card, parent) => {
     `<span class="step-duration">${duration}</span>` +
     `<span class="step-toggle">▶</span>`;
 
-  // Body (collapsed by default)
+  // Body (collapsed by default, but expanded for error cards)
+  const isError = card.status === "error";
   const body = document.createElement("div");
-  body.className = "step-card-body hidden";
+  body.className = `step-card-body${isError ? "" : " hidden"}`;
   if (card.content) {
-    body.appendChild(formatResult(card.content));
+    if (card._isHtml) {
+      const div = document.createElement("div");
+      div.className = "step-result";
+      div.innerHTML = card.content;
+      body.appendChild(div);
+    } else {
+      body.appendChild(formatResult(card.content));
+    }
   }
 
   cardEl.appendChild(header);
   cardEl.appendChild(body);
   parent.appendChild(cardEl);
+
+  // Fix toggle icon for error cards (since header was rendered with innerHTML before body existed)
+  if (isError) {
+    const toggle = cardEl.querySelector(".step-toggle");
+    if (toggle) toggle.textContent = "▼";
+  }
 };
 
 // ─── Result Formatting ─────────────────────────────────────────────────
@@ -1280,6 +1297,39 @@ const handleEvent = (eventName, payload) => {
         appendOutput("system", `\n[end_of_agent] ${agentName}\n`);
       }
     }
+    return;
+  }
+  if (eventName === "permission_denied") {
+    const d = payload.data || {};
+    const policyResult = d.policy_result || {};
+    const subject = d.subject || {};
+    const object = d.object || {};
+    const action = d.action || {};
+    const subjectName = subject.subject_name || subject.attributes?.display_name || "?";
+    const subjectRole = subject.attributes?.role || "?";
+    const objectName = object.object_name || "?";
+    const objectSensitivity = object.attributes?.sensitivity || "?";
+    const actionVerb = action.verb || "?";
+    const deniedReason = policyResult.reason || d.error || "权限不足";
+
+    if (window.SecurityModule && window.SecurityModule.displaySecurityEvent) {
+      window.SecurityModule.displaySecurityEvent("permission_denied", d);
+    }
+
+    if (currentRunContext === "executing") {
+      errorStepCard(
+        `<strong>S-ABAC 权限拒绝</strong><br>` +
+        `<div style="margin-top:8px;font-size:13px;color:var(--muted)">` +
+        `<div>👤 <strong>用户:</strong> ${escapeHtml(subjectName)} <span class="tag accent">${escapeHtml(subjectRole)}</span></div>` +
+        `<div style="margin-top:4px"> <strong>操作:</strong> ${escapeHtml(actionVerb)} → ${escapeHtml(objectName)} <span class="tag">${escapeHtml(objectSensitivity)}</span></div>` +
+        `<div style="margin-top:4px;color:var(--danger)">🚫 <strong>拒绝原因:</strong> ${escapeHtml(deniedReason)}</div>` +
+        `</div>`
+      );
+    }
+
+    appendOutput("system", `\n[security] S-ABAC 权限拒绝: ${subjectName}(${subjectRole}) 尝试 ${actionVerb} ${objectName}(${objectSensitivity}) — ${deniedReason}\n`);
+    showSummaryHint(`S-ABAC: ${deniedReason}`, true);
+    setStatus("Permission Denied", false);
     return;
   }
   if (eventName === "end_of_workflow") {
@@ -3307,3 +3357,169 @@ resumeStopBtn.addEventListener("click", stopResume);
 clearResumeOutputBtn.addEventListener("click", () => {
   resumeOutput.textContent = "";
 });
+
+// ─── S-ABAC Demo: User role selector sync ──────────────────────
+(function() {
+  const demoRole = document.getElementById("demoUserRole");
+  if (demoRole) {
+    demoRole.addEventListener("change", function() {
+      const userIdInput = document.getElementById("userId");
+      if (userIdInput && demoRole.value) {
+        userIdInput.value = demoRole.value;
+      }
+      if (window.SecurityModule && window.SecurityModule.loadUserSecurityProfile && demoRole.value) {
+        window.SecurityModule.loadUserSecurityProfile(demoRole.value);
+      }
+      loadPermissionSummary(demoRole.value);
+    });
+  }
+})();
+
+// ─── S-ABAC Permission Summary for Run Tab ──────────────────────
+let currentUserPrecheck = null;
+
+async function loadPermissionSummary(userId) {
+  if (!userId) return;
+  try {
+    const resp = await fetch(`/api/security/users/${encodeURIComponent(userId)}/precheck`);
+    if (!resp.ok) return;
+    currentUserPrecheck = await resp.json();
+    renderPermissionSummary(currentUserPrecheck);
+    if (latestAgents.length) {
+      renderAgents(latestAgents);
+    }
+    if (latestTools.length) {
+      renderTools();
+    }
+  } catch (e) {
+    console.warn("Failed to load permission summary:", e);
+  }
+}
+
+function renderPermissionSummary(precheck) {
+  const card = document.getElementById("permissionSummaryCard");
+  const summary = document.getElementById("permissionSummary");
+  if (!card || !summary) return;
+
+  card.style.display = "";
+  const profile = precheck.profile || {};
+  const tools = precheck.tool_access || {};
+  const blocked = Object.entries(tools).filter(([, info]) => !info.can_access);
+  const accessible = Object.entries(tools).filter(([, info]) => info.can_access);
+
+  summary.innerHTML = `
+    <div class="perm-summary-row">
+      <span class="perm-summary-icon">${profile.icon || '👤'}</span>
+      <span class="perm-summary-name">${escapeHtml(profile.display_name || precheck.user_id)}</span>
+      <span class="tag accent">${escapeHtml(profile.role || '?')}</span>
+      <span class="tag">CL${profile.clearance_level || 0}</span>
+    </div>
+    <div class="perm-summary-stats">
+      <div class="perm-stat green">
+        <span class="perm-stat-num">${accessible.length}</span>
+        <span class="perm-stat-label">可直接访问</span>
+      </div>
+      <div class="perm-stat red">
+        <span class="perm-stat-num">${blocked.length}</span>
+        <span class="perm-stat-label">无权访问</span>
+      </div>
+    </div>
+    ${blocked.length > 0 ? `
+    <div class="perm-blocked-list">
+      <div class="perm-blocked-title">🚫 无权访问的工具：</div>
+      ${blocked.map(([name, info]) => `
+        <div class="perm-blocked-item">
+          <span class="perm-blocked-name">${escapeHtml(name)}</span>
+          <span class="perm-blocked-reason">${escapeHtml(info.blocked_reason || '权限不足')}</span>
+        </div>
+      `).join('')}
+    </div>` : ''}
+  `;
+}
+
+// ─── Update Agents Panel: filter by current user permissions ────
+const originalRenderAgents = renderAgents;
+renderAgents = function(agents) {
+  if (currentUserPrecheck && currentUserPrecheck.agent_access) {
+    const agentAccess = currentUserPrecheck.agent_access;
+    agents = agents.map(agent => {
+      const access = agentAccess[agent.agent_name];
+      if (access && !access.available_to_user) {
+        return Object.assign({}, agent, { _unavailable_to_user: true });
+      }
+      return agent;
+    });
+  }
+  return originalRenderAgents(agents);
+};
+
+// Override agent card rendering to show unavailable state
+const _origCreateAgentCard = function(card, agent) {
+  if (agent._unavailable_to_user) {
+    card.style.opacity = "0.45";
+    card.style.pointerEvents = "none";
+    card.title = "此 Agent 对当前用户不可用";
+    const badge = document.createElement("span");
+    badge.className = "tag warn";
+    badge.style.cssText = "position:absolute;top:4px;right:4px;font-size:10px;";
+    badge.textContent = "🔒 不可用";
+    card.style.position = "relative";
+    card.appendChild(badge);
+  }
+};
+
+// Hook into the existing renderAgents to add unavailable markers
+(function() {
+  const origRender = renderAgents;
+  renderAgents = function(agents) {
+    const result = origRender(agents);
+    if (agentsList) {
+      agentsList.querySelectorAll(".agent-card").forEach(card => {
+        const agentName = card.querySelector(".agent-name")?.textContent;
+        if (agentName && currentUserPrecheck && currentUserPrecheck.agent_access) {
+          const access = currentUserPrecheck.agent_access[agentName];
+          if (access && !access.available_to_user) {
+            card.style.opacity = "0.45";
+            card.style.pointerEvents = "none";
+            card.title = "此 Agent 对当前用户不可用";
+          }
+        }
+      });
+    }
+    return result;
+  };
+})();
+
+// ─── Update Tools Panel: show per-user access status ────────────
+(function() {
+  const origRender = renderTools;
+  renderTools = function() {
+    origRender();
+    if (toolsList && currentUserPrecheck && currentUserPrecheck.tool_access) {
+      const toolAccess = currentUserPrecheck.tool_access;
+      toolsList.querySelectorAll(".tool-card").forEach(card => {
+        const toolName = card.dataset.toolName;
+        const info = toolAccess[toolName];
+        if (!info) return;
+        if (!info.can_access) {
+          card.style.opacity = "0.45";
+          card.title = info.blocked_reason || "权限不足";
+          let badge = card.querySelector(".tool-perm-badge");
+          if (!badge) {
+            badge = document.createElement("span");
+            badge.className = "tag warn tool-perm-badge";
+            badge.style.cssText = "position:absolute;top:4px;right:4px;font-size:10px;";
+            badge.textContent = "🚫 无权";
+            card.style.position = "relative";
+            card.appendChild(badge);
+          }
+        } else {
+          card.style.opacity = "1";
+          const badge = card.querySelector(".tool-perm-badge");
+          if (badge) badge.remove();
+        }
+      });
+    }
+  };
+})();
+

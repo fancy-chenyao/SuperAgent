@@ -38,7 +38,7 @@ class Object:
         return list(roles or [])
 
     def requires_human_approval(self) -> bool:
-        return bool(self.attributes.get("require_human_approval", False))
+        return False
 
 
 @dataclass
@@ -76,7 +76,7 @@ class Action:
             return 0.0
 
     def is_irreversible(self) -> bool:
-        return bool(self.attributes.get("irreversible", False))
+        return False
 
 
 @dataclass
@@ -115,10 +115,6 @@ class PolicyEngine:
         result = {
             "allowed": False,
             "reason": "No matching policy found",
-            "human_review_required": False,
-            "approval_level": "NONE",
-            "approval_reason": "",
-            "required_approvers": [],
             "audit_id": f"audit_{int(time.time() * 1000)}",
             "timestamp": datetime.now().isoformat(),
         }
@@ -132,8 +128,6 @@ class PolicyEngine:
                     matched_rule = rule
                     result["allowed"] = rule.get("effect", "DENY") == "ALLOW"
                     result["reason"] = rule.get("description", policy.description)
-                    if rule.get("human_review_required") or object.requires_human_approval():
-                        self._mark_for_review(result, subject, object, scenario, action)
                     constraints = rule.get("constraints", {})
                     if constraints:
                         self._apply_constraints(result, constraints, subject, object, scenario, action)
@@ -141,8 +135,6 @@ class PolicyEngine:
                     return result
 
         result.update(self._check_default_rules(subject, object, scenario, action))
-        if result.get("human_review_required"):
-            self._mark_for_review(result, subject, object, scenario, action)
         self._log_audit(subject, object, scenario, action, result, matched_policy, matched_rule)
         return result
 
@@ -179,6 +171,10 @@ class PolicyEngine:
         for key, expected in cond.items():
             if key.startswith("subject.attributes."):
                 value = self._nested(subject.attributes, key.replace("subject.attributes.", "").split("."))
+            elif key == "subject.subject_type":
+                value = subject.subject_type
+            elif key == "subject.id":
+                value = subject.id
             elif key.startswith("object.attributes."):
                 value = self._nested(object.attributes, key.replace("object.attributes.", "").split("."))
             elif key == "object.id":
@@ -191,6 +187,8 @@ class PolicyEngine:
                 value = scenario.get_risk_profile()
             elif key == "action.verb":
                 value = action.verb
+            elif key.startswith("action.attributes."):
+                value = action.attributes.get(key.replace("action.attributes.", ""))
             else:
                 return False
             if not self._compare(value, expected):
@@ -257,10 +255,6 @@ class PolicyEngine:
         result = {
             "allowed": False,
             "reason": "Default rule denied",
-            "human_review_required": False,
-            "approval_level": "NONE",
-            "approval_reason": "",
-            "required_approvers": [],
         }
 
         allowed_roles = object.get_allowed_roles()
@@ -272,73 +266,11 @@ class PolicyEngine:
         sensitivity = object.get_sensitivity()
         if subject.get_clearance_level() < SENSITIVITY_LEVELS.get(sensitivity, 1):
             result["reason"] = f"Subject clearance insufficient for sensitivity {sensitivity}"
-            result["human_review_required"] = True
             return result
 
         result["allowed"] = True
         result["reason"] = "Default rule allowed"
-        if object.requires_human_approval() or action.is_irreversible() or scenario.get_risk_profile() == "HIGH":
-            result["human_review_required"] = True
         return result
-
-    def _mark_for_review(
-        self,
-        result: Dict[str, Any],
-        subject: Subject,
-        object: Object,
-        scenario: Scenario,
-        action: Action,
-    ) -> None:
-        result["allowed"] = False
-        result["human_review_required"] = True
-        result["reason"] = "Human review required"
-        result["approval_level"] = self._determine_approval_level(object, scenario, action)
-        result["approval_reason"] = self._approval_reason(object, scenario, action)
-        result["required_approvers"] = self._required_approvers(result["approval_level"])
-
-    def _determine_approval_level(self, object: Object, scenario: Scenario, action: Action) -> str:
-        amount = action.get_amount()
-        if amount > 1000000:
-            return "HIGH"
-        if amount > 500000:
-            return "MEDIUM"
-        if amount > 100000:
-            return "LOW"
-
-        levels = {
-            "LOW": 0,
-            "MEDIUM": 1,
-            "HIGH": 2,
-            "CRITICAL": 3,
-        }
-        approval_levels = ["NONE", "LOW", "MEDIUM", "HIGH"]
-        index = levels.get(object.get_sensitivity(), 0)
-        if scenario.get_risk_profile() == "HIGH":
-            index = max(index, 3)
-        if action.is_irreversible():
-            index = min(index + 1, 3)
-        return approval_levels[index]
-
-    @staticmethod
-    def _approval_reason(object: Object, scenario: Scenario, action: Action) -> str:
-        reasons = []
-        if object.get_sensitivity() in {"HIGH", "CRITICAL"}:
-            reasons.append(f"resource sensitivity is {object.get_sensitivity()}")
-        if action.get_amount() > 0:
-            reasons.append(f"amount={action.get_amount()}")
-        if action.is_irreversible():
-            reasons.append("operation is irreversible")
-        if scenario.get_risk_profile() == "HIGH":
-            reasons.append("scenario risk is HIGH")
-        return "; ".join(reasons) or "policy requires review"
-
-    @staticmethod
-    def _required_approvers(level: str) -> List[str]:
-        return {
-            "LOW": ["team_lead"],
-            "MEDIUM": ["team_lead", "department_head"],
-            "HIGH": ["team_lead", "department_head", "cfo"],
-        }.get(level, [])
 
     def _log_audit(
         self,

@@ -124,9 +124,9 @@ class LocalExecutor(AgentExecutor):
             )
 
         except Exception as e:
-            from src.security.enforcement import ApprovalRequiredError, PermissionDeniedError
+            from src.security.enforcement import PermissionDeniedError
 
-            if isinstance(e, (ApprovalRequiredError, PermissionDeniedError)):
+            if isinstance(e, PermissionDeniedError):
                 raise
             duration = time.time() - start_time
             logger.error("Error executing local agent %s: %s", getattr(agent, "agent_name", "unknown"), e)
@@ -190,9 +190,9 @@ class LocalExecutor(AgentExecutor):
             )
 
         except Exception as e:
-            from src.security.enforcement import ApprovalRequiredError, PermissionDeniedError
+            from src.security.enforcement import PermissionDeniedError
 
-            if isinstance(e, (ApprovalRequiredError, PermissionDeniedError)):
+            if isinstance(e, PermissionDeniedError):
                 raise
             duration = time.time() - start_time
             return ExecuteResult(

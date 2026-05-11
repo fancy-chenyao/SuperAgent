@@ -22,7 +22,14 @@ from src.utils.path_utils import get_project_root
 from src.workflow.cache import workflow_cache
 from src.robust.checkpoint import CheckpointManager
 from src.robust.task_logger import TaskLogger
-from src.security.approval import get_approval_store
+from config.s_abac_demo_users import get_demo_user, list_demo_users, get_user_available_agents
+from config.s_abac_config import (
+    AGENT_SECURITY_ATTRIBUTES,
+    RESOURCE_SECURITY_ATTRIBUTES,
+    S_ABAC_POLICIES,
+    SENSITIVITY_LEVELS,
+)
+from src.service.env import S_ABAC_ENABLED
 
 
 def _sse_format(event: str, data: dict[str, Any]) -> str:
@@ -717,68 +724,250 @@ def create_app() -> FastAPI:
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Failed to delete task: {str(e)}")
 
-    # ---- S-ABAC approval API ----
+    # ---- S-ABAC Security & Demo API ----
 
-    @app.get("/api/approvals")
-    async def list_approvals(
-        status: Optional[str] = None,
-        workflow_id: Optional[str] = None,
-        task_id: Optional[str] = None,
-        user_id: Optional[str] = None,
+    @app.get("/api/security/status")
+    async def get_security_status():
+        """Get the current S-ABAC status."""
+        return {
+            "s_abac_enabled": S_ABAC_ENABLED,
+            "policies_count": len(S_ABAC_POLICIES),
+            "agent_attributes_count": len(AGENT_SECURITY_ATTRIBUTES),
+            "resource_attributes_count": len(RESOURCE_SECURITY_ATTRIBUTES),
+        }
+
+    @app.get("/api/security/users")
+    async def list_security_users():
+        """List all demo users for S-ABAC simulation."""
+        return list_demo_users()
+
+    @app.get("/api/security/users/{user_id}")
+    async def get_security_user(user_id: str):
+        """Get demo user security profile including available agents."""
+        profile = get_demo_user(user_id)
+        if not profile:
+            raise HTTPException(status_code=404, detail=f"Demo user not found: {user_id}")
+
+        # Build available agents with security context
+        available = get_user_available_agents(user_id)
+        agents_info = []
+        if available == ["*"]:
+            # Admin can access all agents
+            agents_info = [
+                {
+                    "agent_name": name,
+                    "role": attrs.get("role", ""),
+                    "department": attrs.get("department", ""),
+                    "clearance_level": attrs.get("clearance_level", 0),
+                    "trust_level": attrs.get("trust_level", ""),
+                }
+                for name, attrs in AGENT_SECURITY_ATTRIBUTES.items()
+            ]
+        else:
+            agents_info = [
+                {
+                    "agent_name": name,
+                    "role": AGENT_SECURITY_ATTRIBUTES.get(name, {}).get("role", ""),
+                    "department": AGENT_SECURITY_ATTRIBUTES.get(name, {}).get("department", ""),
+                    "clearance_level": AGENT_SECURITY_ATTRIBUTES.get(name, {}).get("clearance_level", 0),
+                    "trust_level": AGENT_SECURITY_ATTRIBUTES.get(name, {}).get("trust_level", ""),
+                }
+                for name in available
+            ]
+
+        # Build tool access predictions based on user's role/clearance
+        tool_access = {}
+        user_role = profile.get("role", "")
+        user_clearance = profile.get("clearance_level", 0)
+        for tool_name, attrs in RESOURCE_SECURITY_ATTRIBUTES.items():
+            allowed_roles = attrs.get("allowed_roles", [])
+            sensitivity = attrs.get("sensitivity", "LOW")
+            can_access = (
+                (not allowed_roles or user_role in allowed_roles)
+                and user_clearance >= SENSITIVITY_LEVELS.get(sensitivity, 1)
+            )
+            tool_access[tool_name] = {
+                "can_access": can_access,
+                "sensitivity": sensitivity,
+                "allowed_roles": allowed_roles,
+            }
+
+        return {
+            "user_id": user_id,
+            "profile": profile,
+            "available_agents": agents_info,
+            "tool_access": tool_access,
+        }
+
+    @app.get("/api/security/policies")
+    async def list_security_policies():
+        """List all S-ABAC policies."""
+        return [
+            {
+                "policy_id": p.get("policy_id", ""),
+                "description": p.get("description", ""),
+                "rules": [
+                    {
+                        "condition": r.get("condition", {}),
+                        "effect": r.get("effect", "DENY"),
+                        "constraints": r.get("constraints", {}),
+                    }
+                    for r in p.get("rules", [])
+                ],
+            }
+            for p in S_ABAC_POLICIES
+        ]
+
+    @app.get("/api/security/agents-attributes")
+    async def list_agent_security_attributes():
+        """List all agent security attributes."""
+        return AGENT_SECURITY_ATTRIBUTES
+
+    @app.get("/api/security/resources-attributes")
+    async def list_resource_security_attributes():
+        """List all resource security attributes."""
+        return RESOURCE_SECURITY_ATTRIBUTES
+
+    @app.get("/api/security/check")
+    async def check_permission(
+        user_id: str,
+        agent_name: str = "",
+        tool_name: str = "",
+        action: str = "execute",
     ):
-        return get_approval_store().list(
-            status=status,
-            workflow_id=workflow_id,
-            task_id=task_id,
-            user_id=user_id,
-        )
+        """Pre-check whether a user/agent can access a tool or dispatch an agent."""
+        if not S_ABAC_ENABLED:
+            return {"allowed": True, "reason": "S-ABAC is disabled"}
 
-    @app.get("/api/approvals/{approval_id}")
-    async def get_approval(approval_id: str):
-        approval = get_approval_store().get(approval_id)
-        if approval is None:
-            raise HTTPException(status_code=404, detail="approval not found")
-        return approval.__dict__
+        profile = get_demo_user(user_id)
+        if not profile:
+            raise HTTPException(status_code=404, detail=f"User not found: {user_id}")
 
-    @app.post("/api/approvals/{approval_id}/approve")
-    async def approve_approval(approval_id: str, body: "ApprovalDecisionRequest"):
-        try:
-            approval = get_approval_store().approve(
-                approval_id,
-                approver=body.approver,
-                comment=body.comment,
-            )
-            return {
-                "result": "success",
-                "approval": approval.__dict__,
-                "task_id": approval.task_id,
-                "workflow_id": approval.workflow_id,
-                "resume_step": approval.resume_step,
+        user_role = profile.get("role", "")
+        user_clearance = profile.get("clearance_level", 0)
+
+        result = {"allowed": False, "reason": "", "details": {}}
+
+        if tool_name:
+            attrs = RESOURCE_SECURITY_ATTRIBUTES.get(tool_name, {})
+            allowed_roles = attrs.get("allowed_roles", [])
+            sensitivity = attrs.get("sensitivity", "LOW")
+
+            role_match = (not allowed_roles or user_role in allowed_roles)
+            clearance_match = user_clearance >= SENSITIVITY_LEVELS.get(sensitivity, 1)
+
+            result["allowed"] = role_match and clearance_match
+            result["details"] = {
+                "tool_name": tool_name,
+                "sensitivity": sensitivity,
+                "allowed_roles": allowed_roles,
+                "user_role": user_role,
+                "user_clearance": user_clearance,
+                "role_match": role_match,
+                "clearance_match": clearance_match,
             }
-        except FileNotFoundError:
-            raise HTTPException(status_code=404, detail="approval not found")
-        except ValueError as exc:
-            raise HTTPException(status_code=409, detail=str(exc))
+            if not role_match:
+                result["reason"] = f"Role {user_role} not in allowed roles {allowed_roles}"
+            elif not clearance_match:
+                result["reason"] = f"Clearance level {user_clearance} insufficient for {sensitivity}"
 
-    @app.post("/api/approvals/{approval_id}/reject")
-    async def reject_approval(approval_id: str, body: "ApprovalDecisionRequest"):
-        try:
-            approval = get_approval_store().reject(
-                approval_id,
-                approver=body.approver,
-                comment=body.comment,
-            )
-            return {
-                "result": "success",
-                "approval": approval.__dict__,
-                "task_id": approval.task_id,
-                "workflow_id": approval.workflow_id,
-                "resume_step": approval.resume_step,
+        if agent_name:
+            attrs = AGENT_SECURITY_ATTRIBUTES.get(agent_name, {})
+            agent_role = attrs.get("role", "")
+            agent_dept = attrs.get("department", "")
+            result["details"].update({
+                "agent_name": agent_name,
+                "agent_role": agent_role,
+                "agent_department": agent_dept,
+            })
+
+        return result
+
+    @app.get("/api/security/users/{user_id}/precheck")
+    async def precheck_user_permissions(user_id: str):
+        profile = get_demo_user(user_id)
+        if not profile:
+            raise HTTPException(status_code=404, detail=f"Demo user not found: {user_id}")
+
+        user_role = profile.get("role", "")
+        user_clearance = profile.get("clearance_level", 0)
+        available_agents = get_user_available_agents(user_id)
+
+        tool_access = {}
+        for tool_name, attrs in RESOURCE_SECURITY_ATTRIBUTES.items():
+            allowed_roles = attrs.get("allowed_roles", [])
+            sensitivity = attrs.get("sensitivity", "LOW")
+            role_match = (not allowed_roles or user_role in allowed_roles)
+            clearance_match = user_clearance >= SENSITIVITY_LEVELS.get(sensitivity, 1)
+            can_access = role_match and clearance_match
+            tool_access[tool_name] = {
+                "can_access": can_access,
+                "sensitivity": sensitivity,
+                "allowed_roles": allowed_roles,
+                "role_match": role_match,
+                "clearance_match": clearance_match,
+                "blocked_reason": (
+                    "" if can_access else
+                    f"Role mismatch: {user_role} not in {allowed_roles}" if not role_match else
+                    f"Clearance too low: L{user_clearance} < {sensitivity} (needs L{SENSITIVITY_LEVELS.get(sensitivity, 1)})"
+                ),
             }
-        except FileNotFoundError:
-            raise HTTPException(status_code=404, detail="approval not found")
-        except ValueError as exc:
-            raise HTTPException(status_code=409, detail=str(exc))
+
+        agent_access = {}
+        for agent_name, attrs in AGENT_SECURITY_ATTRIBUTES.items():
+            agent_role = attrs.get("role", "")
+            agent_clearance = attrs.get("clearance_level", 0)
+            is_available = available_agents == ["*"] or agent_name in available_agents
+            agent_access[agent_name] = {
+                "agent_name": agent_name,
+                "agent_role": agent_role,
+                "agent_clearance": agent_clearance,
+                "available_to_user": is_available,
+            }
+
+        return {
+            "user_id": user_id,
+            "profile": profile,
+            "tool_access": tool_access,
+            "agent_access": agent_access,
+        }
+
+    @app.get("/api/security/tool-check")
+    async def check_tool_permission(
+        user_id: str,
+        tool_name: str,
+    ):
+        if not S_ABAC_ENABLED:
+            return {"allowed": True, "reason": "S-ABAC is disabled", "user_id": user_id, "tool_name": tool_name}
+
+        profile = get_demo_user(user_id)
+        if not profile:
+            raise HTTPException(status_code=404, detail=f"Demo user not found: {user_id}")
+
+        from src.security.policy import PolicyEngine
+        from config.s_abac_demo_users import DEMO_USERS
+
+        user_role = profile.get("role", "")
+        user_clearance = profile.get("clearance_level", 0)
+
+        attrs = RESOURCE_SECURITY_ATTRIBUTES.get(tool_name, DEFAULT_OBJECT_ATTRIBUTES)
+        allowed_roles = attrs.get("allowed_roles", [])
+        sensitivity = attrs.get("sensitivity", "LOW")
+
+        role_match = not allowed_roles or user_role in allowed_roles
+        clearance_match = user_clearance >= SENSITIVITY_LEVELS.get(sensitivity, 1)
+
+        return {
+            "allowed": role_match and clearance_match,
+            "tool_name": tool_name,
+            "user_id": user_id,
+            "user_role": user_role,
+            "user_clearance": user_clearance,
+            "sensitivity": sensitivity,
+            "allowed_roles": allowed_roles,
+            "role_match": role_match,
+            "clearance_match": clearance_match,
+        }
 
     return app
 
@@ -793,11 +982,5 @@ class ResumeRequest(BaseModel):
     user_id: str = "test"
     lang: str = "en"
     workmode: str = "launch"
-
-
-class ApprovalDecisionRequest(BaseModel):
-    approver: str = "user"
-    comment: str = ""
-
 
 app = create_app()

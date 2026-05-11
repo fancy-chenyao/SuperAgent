@@ -10,6 +10,7 @@ from config.s_abac_config import (
     RESOURCE_SECURITY_ATTRIBUTES,
     SYSTEM_SUBJECT_ATTRIBUTES,
 )
+from config.s_abac_demo_users import get_demo_user
 from src.security.policy import Action, Object, Scenario, Subject
 
 
@@ -153,6 +154,24 @@ class SecurityContextBuilder:
                 "amount": _extract_amount(arguments),
                 "irreversible": irreversible,
             },
+        )
+
+    @staticmethod
+    def subject_for_user(user_id: str) -> Subject:
+        profile = get_demo_user(user_id)
+        if profile:
+            attrs = {
+                "role": profile.get("role", DEFAULT_SUBJECT_ATTRIBUTES.get("role", "UniversalAssistant")),
+                "department": profile.get("department", DEFAULT_SUBJECT_ATTRIBUTES.get("department", "General")),
+                "clearance_level": profile.get("clearance_level", DEFAULT_SUBJECT_ATTRIBUTES.get("clearance_level", 2)),
+                "trust_level": profile.get("trust_level", DEFAULT_SUBJECT_ATTRIBUTES.get("trust_level", "MEDIUM")),
+                "display_name": profile.get("display_name", user_id),
+            }
+            return Subject(subject_type="user", id=user_id, attributes=attrs)
+        return Subject(
+            subject_type="user",
+            id=user_id,
+            attributes=dict(DEFAULT_SUBJECT_ATTRIBUTES),
         )
 
     @staticmethod

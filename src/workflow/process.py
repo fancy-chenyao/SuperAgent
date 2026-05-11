@@ -16,6 +16,7 @@ from src.interface.agent import WorkMode
 from src.manager.registry import ToolRegistry
 from src.robust.checkpoint import CheckpointManager
 from src.robust.task_logger import TaskLogger
+from config.s_abac_demo_users import get_user_available_agents
 from src.llm.llm import get_llm_by_type
 from src.manager.resource import get_resource_registry
 
@@ -26,8 +27,7 @@ from src.robust.hooks import (
     HookPoint,
     initialize_hook_system,
 )
-from src.security.approval import get_approval_store
-from src.security.enforcement import ApprovalRequiredError, PermissionDeniedError
+from src.security.enforcement import PermissionDeniedError
 
 logging.basicConfig(
     level=logging.WARNING,
@@ -295,6 +295,9 @@ async def _build_team_members(
     member_desc = DEFAULT_TEAM_MEMBERS_DESCRIPTION
     members = []
 
+    available = get_user_available_agents(user_id)
+    has_user_profile = bool(available)
+
     agents = await agent_manager.agent_registry.list()
     for agent in agents:
         should_include = (
@@ -302,11 +305,14 @@ async def _build_team_members(
             or agent.user_id == user_id
             or agent.agent_name in coor_agents
         )
+        if has_user_profile and available != ["*"]:
+            if agent.agent_name not in available and agent.agent_name not in coor_agents:
+                should_include = False
+
         if should_include and agent.agent_name not in members:
             members.append(agent.agent_name)
 
         if agent.user_id != "share" or getattr(agent, "source", None) == "remote":
-            # Get requires and produces, format as comma-separated strings
             requires = getattr(agent, "requires", [])
             produces = getattr(agent, "produces", [])
             requires_str = ", ".join(requires) if requires else "None"
@@ -318,6 +324,13 @@ async def _build_team_members(
                 requires=requires_str,
                 produces=produces_str,
             )
+
+    if not members and has_user_profile:
+        logger.warning(
+            "S-ABAC: No agents available for user '%s' (available=%s, DISABLE_DEFAULT_AGENTS=%s). "
+            "Planner will have an empty team.",
+            user_id, available, DISABLE_DEFAULT_AGENTS,
+        )
 
     return members, member_desc
 
@@ -791,57 +804,6 @@ async def _process_workflow(
         }
 
         cache.dump(workflow_id, initial_state["workflow_mode"])
-
-    except ApprovalRequiredError as e:
-        logger.warning("S-ABAC approval required: %s", str(e))
-        state_payload = dict(state) if 'state' in dir() else dict(initial_state)
-        resume_step = max(step_count, 1)
-        if step_count == 0:
-            try:
-                checkpoint_manager.save_checkpoint(
-                    workflow_id=workflow_id,
-                    task_id=task_id,
-                    step=0,
-                    node_name=current_node or "security",
-                    next_node=current_node,
-                    state=state_payload,
-                    metadata={"security_event": "approval_required"},
-                )
-                resume_step = 1
-            except Exception as checkpoint_error:
-                logger.error("Failed to save approval checkpoint: %s", checkpoint_error)
-
-        payload = dict(e.payload)
-        approval = get_approval_store().create(
-            user_id=initial_state.get("user_id", ""),
-            workflow_id=workflow_id,
-            task_id=task_id,
-            resume_step=resume_step,
-            node_name=current_node or "security",
-            subject=payload.get("subject", {}),
-            object=payload.get("object", {}),
-            scenario=payload.get("scenario", {}),
-            action=payload.get("action", {}),
-            policy_result=payload.get("policy_result", {}),
-        )
-        task_logger.log_error(
-            error=f"S-ABAC approval required: {approval.approval_id}",
-            node_name=current_node or "security",
-            step=step_count,
-        )
-        yield {
-            "event": "approval_required",
-            "data": {
-                "workflow_id": workflow_id,
-                "task_id": task_id,
-                "resume_step": approval.resume_step,
-                "approval_id": approval.approval_id,
-                "policy_result": approval.policy_result,
-                "subject": approval.subject,
-                "object": approval.object,
-                "action": approval.action,
-            },
-        }
 
     except PermissionDeniedError as e:
         logger.warning("S-ABAC permission denied: %s", str(e))

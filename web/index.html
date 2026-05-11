@@ -1,4 +1,4 @@
-﻿<!doctype html>
+<!doctype html>
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
@@ -36,6 +36,7 @@
           <button class="tab" data-tab="tools">Tools</button>
           <button class="tab" data-tab="workflows">Workflows</button>
           <button class="tab" data-tab="tasks">Task History</button>
+          <button class="tab" data-tab="security">🛡️ Security</button>
         </aside>
 
         <section class="content">
@@ -52,6 +53,19 @@
                 <div class="form-row">
                   <label for="userId">User ID</label>
                   <input id="userId" type="text" value="test" />
+                </div>
+                <div class="form-row">
+                  <label for="demoUserRole">模拟用户角色 (S-ABAC Demo)</label>
+                  <select id="demoUserRole">
+                    <option value="admin">👑 Admin (System Admin)</option>
+                    <option value="hr_manager">👔 HR Manager (Zhang Wei)</option>
+                    <option value="engineer">💻 Engineer (Li Ming)</option>
+                    <option value="researcher_user">🔍 Researcher (Wang Fang)</option>
+                    <option value="communication_officer">📧 Comm Officer (Zhao Min)</option>
+                    <option value="guest">👤 Guest (Limited Access)</option>
+                  </select>
+                </div>
+                <div class="form-row inline">
                 </div>
                 <div class="form-row inline">
                   <div class="checkbox">
@@ -79,6 +93,13 @@
                   <button id="runBtn" class="primary">Run</button>
                   <button id="stopBtn" class="ghost" disabled>Stop</button>
                 </div>
+              </div>
+
+              <div class="summary-card" id="permissionSummaryCard" style="display:none">
+                <div class="summary-header">
+                  <h3>🔐 权限摘要</h3>
+                </div>
+                <div id="permissionSummary" class="security-perm-summary"></div>
               </div>
 
               <div class="summary-card plan-editor-card">
@@ -363,6 +384,45 @@
                     <div id="resumeOutput" class="output-body"></div>
                   </div>
                 </div>
+            </div>
+          </section>
+
+          <section class="panel" id="panel-security">
+            <div class="panel-header">
+              <h2>S-ABAC Security Dashboard</h2>
+              <p>权限策略演示、安全事件日志。</p>
+            </div>
+            <div class="panel-body security-body">
+              <div class="security-layout">
+                <div class="security-left">
+                  <div class="detail-card">
+                    <h3>安全状态</h3>
+                    <div id="securityStatus" class="security-status">Loading...</div>
+                  </div>
+                  <div class="detail-card">
+                    <h3>当前用户权限</h3>
+                    <div id="userProfileCard" class="security-profile">
+                      <select id="securityUserSelect" style="width:100%;margin-bottom:8px">
+                        <option value="">-- 选择模拟用户 --</option>
+                      </select>
+                      <div id="userProfileDetail"></div>
+                    </div>
+                  </div>
+                  <div class="detail-card">
+                    <h3>可用 Agent</h3>
+                    <div id="userAgentsList" class="security-agents"></div>
+                  </div>
+                </div>
+                <div class="security-right">
+                  <div class="detail-card">
+                    <h3>工具权限矩阵</h3>
+                    <div id="toolAccessGrid" class="sec-tool-grid"></div>
+                  </div>
+                  <div class="detail-card">
+                    <h3>安全策略</h3>
+                    <div id="policyList" class="sec-policies"></div>
+                  </div>
+                </div>
               </div>
             </div>
           </section>
@@ -371,5 +431,6 @@
     </div>
 
     <script src="/static/app.js"></script>
+    <script src="/static/security.js"></script>
   </body>
 </html>

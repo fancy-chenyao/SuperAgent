@@ -4,18 +4,12 @@ from dataclasses import asdict
 from typing import Any, Dict, Optional
 
 from src.service.env import S_ABAC_ENABLED
-from src.security.approval import get_approval_store
 from src.security.context import SecurityContextBuilder
 from src.security.policy import Action, Object, PolicyEngine, Scenario, Subject
+from config.s_abac_demo_users import get_user_available_agents
 
 
 class PermissionDeniedError(Exception):
-    def __init__(self, message: str, payload: Dict[str, Any]):
-        super().__init__(message)
-        self.payload = payload
-
-
-class ApprovalRequiredError(Exception):
     def __init__(self, message: str, payload: Dict[str, Any]):
         super().__init__(message)
         self.payload = payload
@@ -41,43 +35,6 @@ def _serialize(subject: Subject, object: Object, scenario: Scenario, action: Act
     }
 
 
-def _metadata(context: Any = None) -> Dict[str, Any]:
-    return dict(getattr(context, "metadata", {}) or {})
-
-
-def _approval_signature(payload: Dict[str, Any]) -> str:
-    return get_approval_store().signature(
-        payload["subject"],
-        payload["object"],
-        payload["action"],
-    )
-
-
-def _approval_task_id(context: Any = None) -> Optional[str]:
-    metadata = _metadata(context)
-    return metadata.get("task_id")
-
-
-def _check_rejected(payload: Dict[str, Any], context: Any = None) -> bool:
-    task_id = _approval_task_id(context)
-    if not task_id:
-        return False
-    signature = _approval_signature(payload)
-    return get_approval_store().find_latest(
-        task_id=task_id,
-        signature=signature,
-        statuses=["rejected"],
-    ) is not None
-
-
-def _check_grant(payload: Dict[str, Any], context: Any = None) -> bool:
-    task_id = _approval_task_id(context)
-    if not task_id:
-        return False
-    signature = _approval_signature(payload)
-    return get_approval_store().consume_if_approved(task_id=task_id, signature=signature) is not None
-
-
 def _enforce(
     subject: Subject,
     object: Object,
@@ -87,30 +44,41 @@ def _enforce(
     context: Any = None,
 ) -> Dict[str, Any]:
     if not S_ABAC_ENABLED:
-        return {"allowed": True, "reason": "S-ABAC disabled", "human_review_required": False}
+        return {"allowed": True, "reason": "S-ABAC disabled"}
 
     result = get_policy_engine().evaluate(subject, object, scenario, action)
-    payload = _serialize(subject, object, scenario, action, result)
     if result.get("allowed"):
         return result
 
-    if result.get("human_review_required"):
-        if _check_rejected(payload, context=context):
-            raise PermissionDeniedError("S-ABAC approval was rejected", payload)
-        if _check_grant(payload, context=context):
-            result = dict(result)
-            result.update({"allowed": True, "human_review_required": False, "reason": "Approved one-time grant consumed"})
-            return result
-        raise ApprovalRequiredError("S-ABAC approval required", payload)
-
+    payload = _serialize(subject, object, scenario, action, result)
     raise PermissionDeniedError(result.get("reason", "S-ABAC permission denied"), payload)
 
 
 async def enforce_agent_dispatch(agent: Any, context: Any) -> Dict[str, Any]:
-    subject = SecurityContextBuilder.system_subject()
+    agent_name = getattr(agent, "agent_name", "unknown")
+    user_id = getattr(context, "user_id", None)
+    if user_id:
+        subject = SecurityContextBuilder.subject_for_user(user_id)
+        available = get_user_available_agents(user_id)
+        if available and available != ["*"] and agent_name not in available:
+            payload = {
+                "subject": asdict(subject),
+                "object": asdict(SecurityContextBuilder.object_for_agent(agent)),
+                "action": asdict(SecurityContextBuilder.action_for_agent_dispatch(agent_name)),
+                "policy_result": {
+                    "allowed": False,
+                    "reason": f"Agent '{agent_name}' is not in user '{user_id}' available agents: {available}",
+                },
+            }
+            raise PermissionDeniedError(
+                f"User '{user_id}' is not authorized to dispatch agent '{agent_name}'",
+                payload,
+            )
+    else:
+        subject = SecurityContextBuilder.system_subject()
     object = SecurityContextBuilder.object_for_agent(agent)
     scenario = SecurityContextBuilder.scenario_from_context(context)
-    action = SecurityContextBuilder.action_for_agent_dispatch(getattr(agent, "agent_name", "unknown"))
+    action = SecurityContextBuilder.action_for_agent_dispatch(agent_name)
     return _enforce(subject, object, scenario, action, context=context)
 
 
@@ -124,7 +92,11 @@ async def enforce_tool_call(
     metadata: Optional[Dict[str, Any]] = None,
     resource_spec: Any = None,
 ) -> Dict[str, Any]:
-    subject = SecurityContextBuilder.subject_for_agent(agent)
+    user_id = getattr(context, "user_id", None)
+    if user_id:
+        subject = SecurityContextBuilder.subject_for_user(user_id)
+    else:
+        subject = SecurityContextBuilder.subject_for_agent(agent)
     if resource_spec is not None:
         object = SecurityContextBuilder.object_for_resource_spec(resource_spec)
     else:

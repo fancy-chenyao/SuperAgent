@@ -1,4 +1,4 @@
-﻿import logging
+import logging
 import json
 import time
 from copy import deepcopy
@@ -709,6 +709,14 @@ async def planner_node(state: State) -> Command[Literal["publisher", "__end__"]]
                         logger.warning(f"[PERF] Plan fix exception: {exc}")
 
         if steps is not None:
+            team_members = state.get("TEAM_MEMBERS") or state.get("team_members") or []
+            if team_members:
+                filtered_steps = [s for s in steps if isinstance(s, dict) and s.get("agent_name") in team_members]
+                removed = len(steps) - len(filtered_steps)
+                if removed > 0:
+                    removed_names = [s.get("agent_name", "?") for s in steps if isinstance(s, dict) and s.get("agent_name") not in team_members]
+                    logger.warning("S-ABAC: Filtered %d step(s) with unauthorized agents %s from planner output", removed, removed_names)
+                    steps = filtered_steps
             cache.restore_planning_steps(state["workflow_id"], steps, state["user_id"])
             message_content = json.dumps({"steps": steps}, indent=2, ensure_ascii=False)
             if state.get("stop_after_planner") and state["workflow_mode"] == "launch":
