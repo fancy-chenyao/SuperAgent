@@ -28,6 +28,7 @@ from src.robust.hooks import (
     initialize_hook_system,
 )
 from src.security.enforcement import PermissionDeniedError
+from src.security.scenario_analyzer import analyze_task_context
 
 logging.basicConfig(
     level=logging.WARNING,
@@ -575,6 +576,28 @@ async def _process_workflow(
         current_node = workflow.start_node
         state = State(**initial_state)
 
+        if not state.get("task_profile"):
+            task_profile = await analyze_task_context(
+                state.get("USER_QUERY", ""),
+                {
+                    "workflow_mode": state.get("workflow_mode"),
+                    "risk_profile": state.get("risk_profile", "LOW"),
+                },
+            )
+            state["task_profile"] = task_profile
+            state["task_profile_reason"] = task_profile.get("reason", "")
+            state["scenario_tags"] = task_profile.get("scenario_tags", [])
+            state["expected_capabilities"] = task_profile.get("expected_capabilities", [])
+            state["task_type"] = task_profile.get("task_type", "GENERAL")
+            state["business_goal"] = task_profile.get("business_goal", state.get("USER_QUERY", ""))
+            state["data_scope"] = task_profile.get("data_scope", "targeted")
+            state["operation_mode"] = task_profile.get("operation_mode", "read")
+            state["risk_profile"] = task_profile.get("risk_profile", "LOW")
+            state["scenario_fit_cache"] = {}
+            state["TASK_PROFILE_TEXT"] = json.dumps(task_profile, ensure_ascii=False, indent=2)
+            state["SCENARIO_TAGS_TEXT"] = ", ".join(task_profile.get("scenario_tags", []))
+            state["EXPECTED_CAPABILITIES_TEXT"] = ", ".join(task_profile.get("expected_capabilities", []))
+
         if should_resume:
             try:
                 # Load checkpoint from (resume_step - 1)
@@ -823,6 +846,12 @@ async def _process_workflow(
                 "subject": payload.get("subject", {}),
                 "object": payload.get("object", {}),
                 "action": payload.get("action", {}),
+                "scenario": payload.get("scenario", {}),
+                "scenario_fit_result": (
+                    payload.get("scenario", {})
+                    .get("task_scenario", {})
+                    .get("scenario_fit_result", {})
+                ),
             },
         }
 

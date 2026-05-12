@@ -165,6 +165,19 @@ class State(MessagesState):
     stop_after_planner: bool
     instruction_history: list[str]
     planning_steps: list[dict]
+    task_profile: dict
+    task_profile_reason: str
+    task_type: str
+    business_goal: str
+    data_scope: str
+    operation_mode: str
+    scenario_tags: list[str]
+    expected_capabilities: list[str]
+    risk_profile: str
+    scenario_fit_cache: dict
+    TASK_PROFILE_TEXT: str
+    SCENARIO_TAGS_TEXT: str
+    EXPECTED_CAPABILITIES_TEXT: str
     runtime_event_handler: Optional[Callable[[dict[str, Any]], Awaitable[None]]]
 
 

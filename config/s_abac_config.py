@@ -1,20 +1,16 @@
-"""SuperAgent 的 S-ABAC 权限策略与属性配置。
+"""SuperAgent S-ABAC configuration.
 
-S-ABAC 在这里表示 Scenario-aware Attribute-Based Access Control，即“场景感知的
-属性访问控制”。权限判断不只看角色，还会同时看四类信息：
+This module defines the default security attributes used by the policy engine.
+The model follows the design in S-ABAC设计.md:
 
-- Subject：谁在发起操作，例如某个 Agent 或系统编排器。
-- Object：被访问的对象，例如工具、远程工具、被调度的 Agent。
-- Scenario：当前任务场景，例如 workflow 阶段、风险等级、网络环境、时间。
-- Action：要执行的动作，例如调度 Agent、调用工具、发送邮件。
-
-第一版先把策略写在 Python 配置中，避免额外引入配置解析器。运行时资源 metadata
-仍然可以补充或覆盖这里的 Object 属性。
+- Subject is governed by department + job_role + grants
+- Agent represents a responsibility domain
+- Tool inherits the baseline policy of its owner agent
+- Scenario fit is evaluated alongside hard ABAC constraints
 """
 
-# 资源敏感度到数值等级的映射。
-# PolicyEngine 会用它和 Subject 的 clearance_level 做比较：
-# clearance_level >= sensitivity level 时，默认兜底规则才可能放行。
+from __future__ import annotations
+
 SENSITIVITY_LEVELS = {
     "LOW": 1,
     "MEDIUM": 2,
@@ -22,275 +18,498 @@ SENSITIVITY_LEVELS = {
     "CRITICAL": 4,
 }
 
-# 默认主体属性。
-# 当某个 Agent 没有出现在 AGENT_SECURITY_ATTRIBUTES 中时，会使用这组属性。
-# 这让未配置 Agent 仍然能参与权限判断，但权限等级保持相对保守。
+
 DEFAULT_SUBJECT_ATTRIBUTES = {
     "role": "UniversalAssistant",
     "department": "General",
+    "job_role": "general_staff",
     "clearance_level": 2,
     "trust_level": "MEDIUM",
+    "grants": [],
 }
 
-# 系统编排器的主体属性。
-# agent_proxy_node 在调度目标 Agent 前，会以这个 Subject 身份检查
-# “SuperAgent 是否允许调度某个 Agent”。
+
 SYSTEM_SUBJECT_ATTRIBUTES = {
     "role": "UniversalAssistant",
     "department": "System",
+    "job_role": "system_orchestrator",
     "clearance_level": 5,
     "trust_level": "HIGH",
+    "grants": ["all"],
 }
 
-# Agent 名称到安全主体属性的映射。
-# SecurityContextBuilder 会根据 agent.agent_name 查这里，把业务 Agent 转换成
-# S-ABAC 的 Subject。常用字段含义：
-# - role：权限角色，用于匹配 allowed_roles 和显式策略。
-# - department：所属业务域，便于后续扩展部门/组织边界策略。
-# - clearance_level：权限等级，用于和资源敏感度比较。
-# - trust_level：信任等级，当前主要作为审计和扩展字段保留。
+
 AGENT_SECURITY_ATTRIBUTES = {
     "researcher": {
         "role": "ResearchAgent",
         "department": "Research",
+        "job_role": "research_analyst",
         "clearance_level": 2,
         "trust_level": "MEDIUM",
+        "grants": ["research_read"],
     },
     "coder": {
         "role": "CodeAgent",
         "department": "Engineering",
+        "job_role": "engineer",
         "clearance_level": 3,
         "trust_level": "HIGH",
+        "grants": ["code_execute", "file_write"],
     },
     "browser": {
         "role": "BrowserAgent",
         "department": "Research",
+        "job_role": "research_assistant",
         "clearance_level": 2,
         "trust_level": "MEDIUM",
+        "grants": ["web_access"],
     },
     "reporter": {
         "role": "ReportAgent",
         "department": "General",
+        "job_role": "report_specialist",
         "clearance_level": 2,
         "trust_level": "MEDIUM",
+        "grants": ["report_generate"],
     },
     "RemoteHRAssistantAgent": {
         "role": "HRAgent",
         "department": "HR",
+        "job_role": "hr_service_agent",
         "clearance_level": 3,
         "trust_level": "HIGH",
+        "grants": ["employee_profile_read"],
     },
     "RemoteOfficeAssistantAgent": {
         "role": "OperationAgent",
         "department": "Office",
+        "job_role": "office_operations_agent",
         "clearance_level": 3,
         "trust_level": "HIGH",
+        "grants": ["leave_write", "travel_write"],
     },
     "RemoteDocumentGeneratorAgent": {
         "role": "DocumentAgent",
         "department": "Office",
+        "job_role": "document_specialist_agent",
         "clearance_level": 3,
         "trust_level": "HIGH",
+        "grants": ["document_generate"],
     },
     "RemoteEmailDispatchAgent": {
         "role": "CommunicationAgent",
         "department": "Office",
+        "job_role": "communication_dispatch_agent",
         "clearance_level": 3,
         "trust_level": "HIGH",
+        "grants": ["external_send"],
     },
     "RemoteCommunicationAgent": {
         "role": "CommunicationAgent",
         "department": "Office",
+        "job_role": "communication_agent",
         "clearance_level": 3,
         "trust_level": "HIGH",
+        "grants": ["message_send", "notification_send"],
     },
     "RemoteKnowledgeAgent": {
         "role": "KnowledgeAgent",
         "department": "HR",
+        "job_role": "knowledge_agent",
         "clearance_level": 2,
         "trust_level": "HIGH",
+        "grants": ["knowledge_read"],
     },
     "RemoteBusinessRiskAgent": {
         "role": "RiskAgent",
         "department": "Risk",
+        "job_role": "risk_analysis_agent",
         "clearance_level": 4,
         "trust_level": "HIGH",
+        "grants": ["risk_analysis", "risk_export"],
     },
     "RemoteUnicornSelectorAgent": {
         "role": "ResearchAgent",
         "department": "Business",
+        "job_role": "business_research_agent",
         "clearance_level": 2,
         "trust_level": "MEDIUM",
+        "grants": ["research_read"],
     },
     "RemoteReportAgent": {
         "role": "ReportAgent",
         "department": "Business",
+        "job_role": "report_specialist_agent",
         "clearance_level": 2,
         "trust_level": "MEDIUM",
+        "grants": ["report_generate"],
     },
     "RemoteMeetingManagerAgent": {
         "role": "OperationAgent",
         "department": "Office",
+        "job_role": "meeting_operations_agent",
         "clearance_level": 3,
         "trust_level": "HIGH",
+        "grants": ["meeting_write"],
     },
 }
 
-# 默认客体属性。
-# 当某个工具、远程资源或目标 Agent 没有出现在 RESOURCE_SECURITY_ATTRIBUTES 中时，
-# 会使用这组默认属性。
+
 DEFAULT_OBJECT_ATTRIBUTES = {
+    "type": "tool",
+    "protocol": "local",
     "sensitivity": "LOW",
     "allowed_roles": [],
-    "protocol": "local",
+    "allowed_job_roles": [],
+    "allowed_operation_modes": [],
+    "scenario_tags": [],
+    "expected_capabilities": [],
+    "department_domain": "General",
+    "capability_domain": "General",
+    "owner_agent": "",
+    "requires_approval": False,
+    "grants_required": [],
 }
 
-# 资源、工具、目标 Agent 到安全客体属性的映射。
-# SecurityContextBuilder 会根据工具名、ResourceSpec.name 或目标 Agent 名称查这里，
-# 把被访问对象转换成 S-ABAC 的 Object。
-#
-# 常用字段含义：
-# - sensitivity：资源敏感度，取 LOW/MEDIUM/HIGH/CRITICAL。
-# - allowed_roles：允许访问该资源的角色列表；为空表示不限制角色。
-# - protocol/server_id/category 等字段可由运行时 metadata 补充，用于扩展策略。
+
 RESOURCE_SECURITY_ATTRIBUTES = {
-    # 低敏研究类工具：普通搜索/爬虫，ResearchAgent 和系统助手可直接使用。
-    "tavily_search_results_json": {
-        "sensitivity": "LOW",
-        "allowed_roles": ["ResearchAgent", "UniversalAssistant"],
-    },
-    "crawl_tool": {
-        "sensitivity": "LOW",
-        "allowed_roles": ["ResearchAgent", "UniversalAssistant"],
-    },
-    # 本地代码执行类工具：比搜索更敏感，因此提升到 MEDIUM 或 HIGH。
-    "python_repl": {
-        "sensitivity": "MEDIUM",
-        "allowed_roles": ["CodeAgent", "UniversalAssistant"],
-    },
-    "bash": {
-        "sensitivity": "HIGH",
-        "allowed_roles": ["CodeAgent", "UniversalAssistant"],
-    },
-    # 浏览器/文件写入类工具：可能访问外部页面或修改本地文件，设置为中敏。
-    "browser": {
-        "sensitivity": "MEDIUM",
-        "allowed_roles": ["BrowserAgent", "ResearchAgent", "UniversalAssistant"],
-    },
-    "write_file": {
-        "sensitivity": "MEDIUM",
-        "allowed_roles": ["CodeAgent", "DocumentAgent", "UniversalAssistant"],
-    },
-    # HR 数据工具：人员、薪资信息是高敏资源，只允许 HRAgent。
-    # 薪资信息额外要求人工审批。
-    "remote_person_info_tool": {
-        "sensitivity": "HIGH",
-        "allowed_roles": ["HRAgent", "UniversalAssistant"],
-    },
-    "remote_salary_info_tool": {
-        "sensitivity": "HIGH",
-        "allowed_roles": ["HRAgent", "UniversalAssistant"],
-    },
-    # 文档生成工具：允许文档 Agent 或 HR Agent 使用。
-    "remote_docx_generator_tool": {
-        "sensitivity": "MEDIUM",
-        "allowed_roles": ["DocumentAgent", "HRAgent", "UniversalAssistant"],
-    },
-    # 邮件发送工具：外发动作不可逆，因此高敏并要求人工审批。
-    "remote_email_tool": {
-        "sensitivity": "HIGH",
-        "allowed_roles": ["CommunicationAgent", "UniversalAssistant"],
-    },
-    # 知识检索工具：通常读内部知识库，按中敏处理。
-    "knowledge_search_tool": {
-        "sensitivity": "MEDIUM",
-        "allowed_roles": ["KnowledgeAgent", "HRAgent", "UniversalAssistant"],
-    },
-    # 业务写入类工具：请假、差旅等会写业务记录，因此高敏并进入审批。
-    "save_leave_record": {
-        "sensitivity": "HIGH",
-        "allowed_roles": ["OperationAgent", "HRAgent", "UniversalAssistant"],
-    },
-    "save_travel_record": {
-        "sensitivity": "HIGH",
-        "allowed_roles": ["OperationAgent", "HRAgent", "UniversalAssistant"],
-    },
-    # 目标 Agent 本身也可以作为 Object。
-    # agent_proxy_node 调度这些 Agent 前，会检查调度权限。
-    # allowed_roles 已扩展为包含对应的业务角色，使各用户能调度对应 Agent。
-    "RemoteHRAssistantAgent": {
-        "sensitivity": "HIGH",
-        "allowed_roles": ["UniversalAssistant", "HRAgent"],
-    },
-    "RemoteDocumentGeneratorAgent": {
-        "sensitivity": "MEDIUM",
-        "allowed_roles": ["UniversalAssistant", "HRAgent", "DocumentAgent", "CommunicationAgent"],
-    },
-    "RemoteEmailDispatchAgent": {
-        "sensitivity": "HIGH",
-        "allowed_roles": ["UniversalAssistant", "CommunicationAgent"],
-    },
-    "RemoteCommunicationAgent": {
-        "sensitivity": "MEDIUM",
-        "allowed_roles": ["UniversalAssistant", "CommunicationAgent"],
-    },
-    "RemoteKnowledgeAgent": {
-        "sensitivity": "LOW",
-        "allowed_roles": ["UniversalAssistant", "KnowledgeAgent", "HRAgent", "ResearchAgent"],
-    },
-    "RemoteBusinessRiskAgent": {
-        "sensitivity": "HIGH",
-        "allowed_roles": ["UniversalAssistant", "RiskAgent"],
-    },
-    "RemoteUnicornSelectorAgent": {
-        "sensitivity": "LOW",
-        "allowed_roles": ["UniversalAssistant", "ResearchAgent"],
-    },
-    "RemoteReportAgent": {
-        "sensitivity": "LOW",
-        "allowed_roles": ["UniversalAssistant", "ReportAgent"],
-    },
-    "RemoteMeetingManagerAgent": {
-        "sensitivity": "MEDIUM",
-        "allowed_roles": ["UniversalAssistant", "OperationAgent"],
-    },
-    "RemoteOfficeAssistantAgent": {
-        "sensitivity": "MEDIUM",
-        "allowed_roles": ["UniversalAssistant", "OperationAgent", "CommunicationAgent"],
-    },
     "researcher": {
+        "type": "agent",
+        "department_domain": "Research",
+        "capability_domain": "Research",
         "sensitivity": "LOW",
         "allowed_roles": ["UniversalAssistant", "ResearchAgent", "HRAgent", "CodeAgent", "CommunicationAgent"],
+        "allowed_job_roles": [
+            "research_analyst",
+            "research_assistant",
+            "engineer",
+            "hr_manager",
+            "communication_officer",
+            "system_orchestrator",
+        ],
+        "allowed_operation_modes": ["delegate", "read", "query"],
+        "scenario_tags": ["research", "market_research", "knowledge_lookup"],
+        "expected_capabilities": ["Research"],
     },
     "coder": {
+        "type": "agent",
+        "department_domain": "Engineering",
+        "capability_domain": "Engineering",
         "sensitivity": "MEDIUM",
         "allowed_roles": ["UniversalAssistant", "CodeAgent"],
+        "allowed_job_roles": ["engineer", "senior_engineer", "system_orchestrator"],
+        "allowed_operation_modes": ["delegate", "execute", "write"],
+        "scenario_tags": ["coding", "automation", "debug"],
+        "expected_capabilities": ["Engineering"],
     },
     "browser": {
+        "type": "agent",
+        "department_domain": "Research",
+        "capability_domain": "Research",
         "sensitivity": "LOW",
         "allowed_roles": ["UniversalAssistant", "BrowserAgent", "ResearchAgent", "CodeAgent"],
+        "allowed_job_roles": ["research_analyst", "research_assistant", "engineer", "system_orchestrator"],
+        "allowed_operation_modes": ["delegate", "query"],
+        "scenario_tags": ["research", "web_lookup", "knowledge_lookup"],
+        "expected_capabilities": ["Research"],
     },
     "reporter": {
+        "type": "agent",
+        "department_domain": "General",
+        "capability_domain": "Document",
         "sensitivity": "LOW",
         "allowed_roles": ["UniversalAssistant", "ReportAgent", "ResearchAgent", "HRAgent", "CodeAgent", "CommunicationAgent"],
+        "allowed_job_roles": [
+            "report_specialist",
+            "research_analyst",
+            "hr_manager",
+            "engineer",
+            "communication_officer",
+            "system_orchestrator",
+        ],
+        "allowed_operation_modes": ["delegate", "generate"],
+        "scenario_tags": ["reporting", "analysis_summary", "document_generation"],
+        "expected_capabilities": ["Document"],
+    },
+    "RemoteHRAssistantAgent": {
+        "type": "agent",
+        "department_domain": "HR",
+        "capability_domain": "HR",
+        "sensitivity": "HIGH",
+        "allowed_roles": ["UniversalAssistant", "HRAgent"],
+        "allowed_job_roles": ["hr_specialist", "hr_manager", "hr_bp", "system_orchestrator"],
+        "allowed_operation_modes": ["delegate", "read", "query"],
+        "scenario_tags": ["hr_service", "employee_info", "salary_query", "employee_proof"],
+        "expected_capabilities": ["HR"],
+    },
+    "RemoteDocumentGeneratorAgent": {
+        "type": "agent",
+        "department_domain": "Office",
+        "capability_domain": "Document",
+        "sensitivity": "MEDIUM",
+        "allowed_roles": ["UniversalAssistant", "HRAgent", "DocumentAgent", "CommunicationAgent"],
+        "allowed_job_roles": [
+            "hr_specialist",
+            "hr_manager",
+            "communication_officer",
+            "document_specialist",
+            "system_orchestrator",
+        ],
+        "allowed_operation_modes": ["delegate", "generate"],
+        "scenario_tags": ["document_generation", "employee_proof", "notification_document"],
+        "expected_capabilities": ["Document"],
+    },
+    "RemoteEmailDispatchAgent": {
+        "type": "agent",
+        "department_domain": "Office",
+        "capability_domain": "Communication",
+        "sensitivity": "HIGH",
+        "allowed_roles": ["UniversalAssistant", "CommunicationAgent"],
+        "allowed_job_roles": ["communication_officer", "communication_manager", "system_orchestrator"],
+        "allowed_operation_modes": ["delegate", "send"],
+        "scenario_tags": ["notification_send", "mass_notification", "external_send"],
+        "expected_capabilities": ["Communication"],
+        "require_working_hours": True,
+        "require_internal_network": True,
+    },
+    "RemoteCommunicationAgent": {
+        "type": "agent",
+        "department_domain": "Office",
+        "capability_domain": "Communication",
+        "sensitivity": "MEDIUM",
+        "allowed_roles": ["UniversalAssistant", "CommunicationAgent"],
+        "allowed_job_roles": ["communication_officer", "communication_manager", "system_orchestrator"],
+        "allowed_operation_modes": ["delegate", "send", "generate"],
+        "scenario_tags": ["notification_send", "communication", "contact_lookup"],
+        "expected_capabilities": ["Communication"],
+    },
+    "RemoteKnowledgeAgent": {
+        "type": "agent",
+        "department_domain": "HR",
+        "capability_domain": "Knowledge",
+        "sensitivity": "LOW",
+        "allowed_roles": ["UniversalAssistant", "KnowledgeAgent", "HRAgent", "ResearchAgent"],
+        "allowed_job_roles": ["hr_specialist", "hr_manager", "research_analyst", "system_orchestrator"],
+        "allowed_operation_modes": ["delegate", "query"],
+        "scenario_tags": ["knowledge_lookup", "policy_lookup", "hr_service"],
+        "expected_capabilities": ["Knowledge", "Research"],
+    },
+    "RemoteBusinessRiskAgent": {
+        "type": "agent",
+        "department_domain": "Risk",
+        "capability_domain": "Risk",
+        "sensitivity": "HIGH",
+        "allowed_roles": ["UniversalAssistant", "RiskAgent"],
+        "allowed_job_roles": ["risk_analyst", "risk_manager", "system_orchestrator"],
+        "allowed_operation_modes": ["delegate", "read", "query", "export"],
+        "scenario_tags": ["risk_analysis", "compliance_review", "credit_risk"],
+        "expected_capabilities": ["Risk"],
+    },
+    "RemoteUnicornSelectorAgent": {
+        "type": "agent",
+        "department_domain": "Business",
+        "capability_domain": "Research",
+        "sensitivity": "LOW",
+        "allowed_roles": ["UniversalAssistant", "ResearchAgent"],
+        "allowed_job_roles": ["research_analyst", "business_analyst", "system_orchestrator"],
+        "allowed_operation_modes": ["delegate", "query"],
+        "scenario_tags": ["market_research", "target_selection"],
+        "expected_capabilities": ["Research"],
+    },
+    "RemoteReportAgent": {
+        "type": "agent",
+        "department_domain": "Business",
+        "capability_domain": "Document",
+        "sensitivity": "LOW",
+        "allowed_roles": ["UniversalAssistant", "ReportAgent"],
+        "allowed_job_roles": ["report_specialist", "business_analyst", "system_orchestrator"],
+        "allowed_operation_modes": ["delegate", "generate"],
+        "scenario_tags": ["reporting", "analysis_summary"],
+        "expected_capabilities": ["Document"],
+    },
+    "RemoteMeetingManagerAgent": {
+        "type": "agent",
+        "department_domain": "Office",
+        "capability_domain": "Operations",
+        "sensitivity": "MEDIUM",
+        "allowed_roles": ["UniversalAssistant", "OperationAgent"],
+        "allowed_job_roles": ["office_operator", "office_manager", "system_orchestrator"],
+        "allowed_operation_modes": ["delegate", "write"],
+        "scenario_tags": ["meeting_management", "office_operation"],
+        "expected_capabilities": ["Operations"],
+    },
+    "RemoteOfficeAssistantAgent": {
+        "type": "agent",
+        "department_domain": "Office",
+        "capability_domain": "Operations",
+        "sensitivity": "MEDIUM",
+        "allowed_roles": ["UniversalAssistant", "OperationAgent", "CommunicationAgent"],
+        "allowed_job_roles": ["office_operator", "office_manager", "communication_officer", "hr_manager", "system_orchestrator"],
+        "allowed_operation_modes": ["delegate", "write", "query"],
+        "scenario_tags": ["leave_request", "travel_request", "office_operation"],
+        "expected_capabilities": ["Operations"],
+    },
+    "tavily_search_results_json": {
+        "owner_agent": "researcher",
+        "capability_domain": "Research",
+        "department_domain": "Research",
+        "sensitivity": "LOW",
+        "allowed_roles": ["ResearchAgent", "UniversalAssistant"],
+        "allowed_job_roles": ["research_analyst", "research_assistant", "engineer", "system_orchestrator"],
+        "allowed_operation_modes": ["query", "read"],
+        "scenario_tags": ["research", "knowledge_lookup", "market_research"],
+        "expected_capabilities": ["Research"],
+    },
+    "crawl_tool": {
+        "owner_agent": "researcher",
+        "capability_domain": "Research",
+        "department_domain": "Research",
+        "sensitivity": "LOW",
+        "allowed_roles": ["ResearchAgent", "UniversalAssistant"],
+        "allowed_job_roles": ["research_analyst", "research_assistant", "engineer", "system_orchestrator"],
+        "allowed_operation_modes": ["query", "read"],
+        "scenario_tags": ["research", "web_lookup", "market_research"],
+        "expected_capabilities": ["Research"],
+    },
+    "python_repl": {
+        "owner_agent": "coder",
+        "capability_domain": "Engineering",
+        "department_domain": "Engineering",
+        "sensitivity": "MEDIUM",
+        "allowed_roles": ["CodeAgent", "UniversalAssistant"],
+        "allowed_job_roles": ["engineer", "senior_engineer", "system_orchestrator"],
+        "allowed_operation_modes": ["execute", "write"],
+        "scenario_tags": ["coding", "automation", "debug"],
+        "expected_capabilities": ["Engineering"],
+    },
+    "bash": {
+        "owner_agent": "coder",
+        "capability_domain": "Engineering",
+        "department_domain": "Engineering",
+        "sensitivity": "HIGH",
+        "allowed_roles": ["CodeAgent", "UniversalAssistant"],
+        "allowed_job_roles": ["engineer", "senior_engineer", "system_orchestrator"],
+        "allowed_operation_modes": ["execute", "write"],
+        "scenario_tags": ["coding", "automation", "debug"],
+        "expected_capabilities": ["Engineering"],
+        "requires_approval": True,
+    },
+    "browser": {
+        "owner_agent": "browser",
+        "capability_domain": "Research",
+        "department_domain": "Research",
+        "sensitivity": "MEDIUM",
+        "allowed_roles": ["BrowserAgent", "ResearchAgent", "UniversalAssistant"],
+        "allowed_job_roles": ["research_analyst", "research_assistant", "engineer", "system_orchestrator"],
+        "allowed_operation_modes": ["query", "read"],
+        "scenario_tags": ["web_lookup", "research", "knowledge_lookup"],
+        "expected_capabilities": ["Research"],
+    },
+    "write_file": {
+        "owner_agent": "coder",
+        "capability_domain": "Document",
+        "department_domain": "Engineering",
+        "sensitivity": "MEDIUM",
+        "allowed_roles": ["CodeAgent", "DocumentAgent", "UniversalAssistant"],
+        "allowed_job_roles": ["engineer", "document_specialist", "system_orchestrator"],
+        "allowed_operation_modes": ["write", "generate"],
+        "scenario_tags": ["coding", "document_generation"],
+        "expected_capabilities": ["Engineering", "Document"],
+    },
+    "remote_person_info_tool": {
+        "owner_agent": "RemoteHRAssistantAgent",
+        "capability_domain": "HR",
+        "department_domain": "HR",
+        "sensitivity": "HIGH",
+        "allowed_roles": ["HRAgent", "UniversalAssistant"],
+        "allowed_job_roles": ["hr_specialist", "hr_manager", "hr_bp", "system_orchestrator"],
+        "allowed_operation_modes": ["query", "read"],
+        "scenario_tags": ["hr_service", "employee_info"],
+        "expected_capabilities": ["HR"],
+        "grants_required": ["employee_profile_read"],
+    },
+    "remote_salary_info_tool": {
+        "owner_agent": "RemoteHRAssistantAgent",
+        "capability_domain": "HR",
+        "department_domain": "HR",
+        "sensitivity": "HIGH",
+        "allowed_roles": ["HRAgent", "UniversalAssistant"],
+        "allowed_job_roles": ["hr_manager", "hr_bp", "system_orchestrator"],
+        "allowed_operation_modes": ["query", "read"],
+        "scenario_tags": ["hr_service", "salary_query", "employee_proof"],
+        "expected_capabilities": ["HR"],
+        "grants_required": ["salary_read"],
+        "requires_approval": True,
+    },
+    "remote_docx_generator_tool": {
+        "owner_agent": "RemoteDocumentGeneratorAgent",
+        "capability_domain": "Document",
+        "department_domain": "Office",
+        "sensitivity": "MEDIUM",
+        "allowed_roles": ["DocumentAgent", "HRAgent", "UniversalAssistant"],
+        "allowed_job_roles": ["hr_specialist", "hr_manager", "document_specialist", "communication_officer", "system_orchestrator"],
+        "allowed_operation_modes": ["generate"],
+        "scenario_tags": ["document_generation", "employee_proof", "notification_document"],
+        "expected_capabilities": ["Document"],
+    },
+    "remote_email_tool": {
+        "owner_agent": "RemoteEmailDispatchAgent",
+        "capability_domain": "Communication",
+        "department_domain": "Office",
+        "sensitivity": "HIGH",
+        "allowed_roles": ["CommunicationAgent", "UniversalAssistant"],
+        "allowed_job_roles": ["communication_officer", "communication_manager", "system_orchestrator"],
+        "allowed_operation_modes": ["send"],
+        "scenario_tags": ["notification_send", "mass_notification", "external_send"],
+        "expected_capabilities": ["Communication"],
+        "grants_required": ["external_send"],
+        "require_working_hours": True,
+        "require_internal_network": True,
+        "requires_approval": True,
+        "irreversible": True,
+    },
+    "knowledge_search_tool": {
+        "owner_agent": "RemoteKnowledgeAgent",
+        "capability_domain": "Knowledge",
+        "department_domain": "HR",
+        "sensitivity": "MEDIUM",
+        "allowed_roles": ["KnowledgeAgent", "HRAgent", "UniversalAssistant"],
+        "allowed_job_roles": ["hr_specialist", "hr_manager", "research_analyst", "system_orchestrator"],
+        "allowed_operation_modes": ["query", "read"],
+        "scenario_tags": ["knowledge_lookup", "policy_lookup", "hr_service"],
+        "expected_capabilities": ["Knowledge", "Research"],
+    },
+    "save_leave_record": {
+        "owner_agent": "RemoteOfficeAssistantAgent",
+        "capability_domain": "Operations",
+        "department_domain": "Office",
+        "sensitivity": "HIGH",
+        "allowed_roles": ["OperationAgent", "HRAgent", "UniversalAssistant"],
+        "allowed_job_roles": ["office_operator", "office_manager", "hr_manager", "system_orchestrator"],
+        "allowed_operation_modes": ["write", "update"],
+        "scenario_tags": ["leave_request"],
+        "expected_capabilities": ["Operations"],
+        "requires_approval": True,
+    },
+    "save_travel_record": {
+        "owner_agent": "RemoteOfficeAssistantAgent",
+        "capability_domain": "Operations",
+        "department_domain": "Office",
+        "sensitivity": "HIGH",
+        "allowed_roles": ["OperationAgent", "HRAgent", "UniversalAssistant"],
+        "allowed_job_roles": ["office_operator", "office_manager", "hr_manager", "system_orchestrator"],
+        "allowed_operation_modes": ["write", "update"],
+        "scenario_tags": ["travel_request"],
+        "expected_capabilities": ["Operations"],
+        "requires_approval": True,
     },
 }
 
-# 显式 S-ABAC 策略列表。
-# PolicyEngine 会先按顺序匹配这里的策略；如果没有命中，才进入默认兜底规则。
-#
-# 策略结构说明：
-# - policy_id：策略唯一标识，便于审计和排查。
-# - description：策略说明。
-# - rules：该策略下的规则列表。
-# - condition.all：所有条件都满足才命中。
-# - condition.any：任意条件满足即可命中，目前此文件暂未使用。
-# - effect：ALLOW 表示满足条件后允许进入约束检查；未允许则默认拒绝。
-# - constraints：额外约束，例如 allowed_actions、金额阈值、工作时间要求等。
+
 S_ABAC_POLICIES = [
     {
         "policy_id": "P-SYSTEM-ORCHESTRATE-AGENTS",
-        "description": "The SuperAgent system orchestrator (no user context) can delegate to registered agents. User-based dispatch falls through to default clearance/role rules.",
+        "description": "The system orchestrator can delegate to registered agents.",
         "rules": [
             {
                 "condition": {
@@ -308,40 +527,41 @@ S_ABAC_POLICIES = [
         ],
     },
     {
-        "policy_id": "P-HR-SENSITIVE-TOOLS",
-        "description": "HR agents can use HR sensitive tools.",
+        "policy_id": "P-HR-MANAGER-SALARY",
+        "description": "Only HR manager level roles can access salary-sensitive tools in matching HR scenarios.",
         "rules": [
             {
                 "condition": {
                     "all": [
-                        {"subject.attributes.role": "HRAgent"},
-                        {"action.verb": "execute"},
-                        {"object.attributes.category": "HR"},
+                        {"object.id": "remote_salary_info_tool"},
+                        {"subject.attributes.job_role": ["hr_manager", "hr_bp", "system_orchestrator"]},
+                        {"scenario.task_scenario.task_type": "HR"},
                     ]
                 },
                 "effect": "ALLOW",
                 "constraints": {
-                    "allowed_actions": ["call", "query", "execute"],
-                    "require_working_hours": False,
+                    "allowed_actions": ["call", "query", "read", "execute"],
                 },
             }
         ],
     },
     {
-        "policy_id": "P-COMMUNICATION-SEND",
-        "description": "Communication agents can send messages and emails.",
+        "policy_id": "P-COMMUNICATION-EXTERNAL-SEND",
+        "description": "Communication officers can send external emails only in matching communication scenarios.",
         "rules": [
             {
                 "condition": {
                     "all": [
-                        {"subject.attributes.role": "CommunicationAgent"},
-                        {"action.verb": "execute"},
-                        {"object.attributes.category": "Communication"},
+                        {"object.id": "remote_email_tool"},
+                        {"subject.attributes.job_role": ["communication_officer", "communication_manager", "system_orchestrator"]},
+                        {"scenario.task_scenario.task_type": "COMMUNICATION"},
                     ]
                 },
                 "effect": "ALLOW",
                 "constraints": {
-                    "allowed_actions": ["call", "execute"],
+                    "allowed_actions": ["send", "call", "execute"],
+                    "require_working_hours": True,
+                    "require_internal_network": True,
                 },
             }
         ],

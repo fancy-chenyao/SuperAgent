@@ -10,6 +10,24 @@ let secPolicies = [];
 let secSystemStatus = null;
 let secToolAccess = {};
 let secAgentAttributes = {};
+let secLastDeniedEvents = [];
+const SEC_MAX_DENIED_HISTORY = 5;
+
+function formatScenarioFitSummary(fitResult) {
+    if (!fitResult || typeof fitResult !== "object") return "";
+    const fit = fitResult.fit || "uncertain";
+    const confidence = typeof fitResult.confidence === "number"
+        ? `（置信度 ${Math.round(fitResult.confidence * 100)}%）`
+        : "";
+    const reason = fitResult.reason ? escapeHtml(fitResult.reason) : "未提供场景适配说明";
+    const labelMap = {
+        match: "场景匹配",
+        mismatch: "场景不匹配",
+        uncertain: "场景待确认",
+    };
+    const label = labelMap[fit] || "场景待确认";
+    return `<div style="margin-top:8px"><strong>${label}</strong>${confidence}<br><span style="color:var(--muted)">${reason}</span></div>`;
+}
 
 // ─── Security API Helpers ──────────────────────────────────────────
 
@@ -194,6 +212,45 @@ function renderPolicies() {
     `).join('');
 }
 
+function renderLastDeniedEvent() {
+    const el = document.getElementById("securityLastDenied");
+    if (!el) return;
+    if (!secLastDeniedEvents.length) {
+        el.innerHTML = '<div class="sec-empty">暂无权限拒绝事件</div>';
+        return;
+    }
+
+    el.innerHTML = secLastDeniedEvents.map((d, idx) => {
+        const policy = d.policy_result || {};
+        const subject = d.subject || {};
+        const object = d.object || {};
+        const action = d.action || {};
+        const scenarioFit = d.scenario_fit_result || {};
+
+        const subjectName = subject.subject_name || subject.attributes?.display_name || subject.id || "未知用户";
+        const subjectRole = subject.attributes?.job_role || subject.attributes?.role || "未知岗位";
+        const objectName = object.object_name || object.id || "未知对象";
+        const objectSensitivity = object.attributes?.sensitivity || "UNKNOWN";
+        const actionVerb = action.attributes?.action_type || action.verb || "unknown";
+        const deniedReason = policy.reason || d.error || "权限不足";
+
+        return `
+            <div class="sec-policy-card" style="border-left:3px solid var(--danger); margin-bottom:${idx === secLastDeniedEvents.length - 1 ? '0' : '10px'}">
+                <div class="sec-policy-header">
+                    <strong>${idx === 0 ? '最近拒绝事件' : `历史拒绝事件 #${idx + 1}`}</strong>
+                    <span class="tag warn">${escapeHtml(objectSensitivity)}</span>
+                </div>
+                <div class="sec-policy-desc">
+                    <div><strong>主体:</strong> ${escapeHtml(subjectName)} <span class="tag accent">${escapeHtml(subjectRole)}</span></div>
+                    <div style="margin-top:6px"><strong>目标:</strong> ${escapeHtml(actionVerb)} → ${escapeHtml(objectName)}</div>
+                    <div style="margin-top:6px;color:var(--danger)"><strong>拒绝原因:</strong> ${escapeHtml(deniedReason)}</div>
+                    ${formatScenarioFitSummary(scenarioFit)}
+                </div>
+            </div>
+        `;
+    }).join('');
+}
+
 function renderRuleCondition(cond) {
     if (!cond || !cond.all) return '';
     return cond.all.map(c => {
@@ -242,6 +299,8 @@ function displaySecurityEvent(eventName, data) {
 
     let html = '';
     if (eventName === "permission_denied") {
+        secLastDeniedEvents = [data, ...secLastDeniedEvents].slice(0, SEC_MAX_DENIED_HISTORY);
+        renderLastDeniedEvent();
         const policy = data.policy_result || {};
         html = `
             <div class="step-card error" style="margin-top:8px">
@@ -278,6 +337,7 @@ function initSecurityModule() {
     loadSecurityStatus();
     loadSecurityUsers();
     loadSecurityPolicies();
+    renderLastDeniedEvent();
     const demoRole = document.getElementById("demoUserRole");
     if (demoRole && demoRole.value) {
         if (typeof loadPermissionSummary === "function") {
@@ -300,4 +360,5 @@ window.SecurityModule = {
     loadUserSecurityProfile,
     displaySecurityEvent,
     loadSecurityStatus,
+    formatScenarioFitSummary,
 };

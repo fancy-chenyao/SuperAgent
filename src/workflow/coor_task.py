@@ -99,6 +99,39 @@ def _sanitize_messages(messages):
         sanitized.append(msg)
     return sanitized
 
+
+def _ensure_scenario_prompt_defaults(prompt_state: dict) -> dict:
+    """Populate scenario-related prompt fields so template rendering is resilient."""
+    task_profile = prompt_state.get("task_profile")
+    if not isinstance(task_profile, dict):
+        task_profile = {}
+        prompt_state["task_profile"] = task_profile
+
+    if not prompt_state.get("TASK_PROFILE_TEXT"):
+        prompt_state["TASK_PROFILE_TEXT"] = json.dumps(
+            task_profile, ensure_ascii=False, indent=2
+        )
+
+    scenario_tags = prompt_state.get("scenario_tags")
+    if not isinstance(scenario_tags, list):
+        scenario_tags = []
+        prompt_state["scenario_tags"] = scenario_tags
+    if not prompt_state.get("SCENARIO_TAGS_TEXT"):
+        prompt_state["SCENARIO_TAGS_TEXT"] = (
+            ", ".join(str(tag) for tag in scenario_tags) or "general"
+        )
+
+    expected_capabilities = prompt_state.get("expected_capabilities")
+    if not isinstance(expected_capabilities, list):
+        expected_capabilities = []
+        prompt_state["expected_capabilities"] = expected_capabilities
+    if not prompt_state.get("EXPECTED_CAPABILITIES_TEXT"):
+        prompt_state["EXPECTED_CAPABILITIES_TEXT"] = (
+            ", ".join(str(item) for item in expected_capabilities) or "General"
+        )
+
+    return prompt_state
+
 def _extract_plan_steps(content: str) -> list | None:
     if not content:
         return None
@@ -334,6 +367,15 @@ async def agent_proxy_node(state: State) -> Command[Literal["publisher", "__end_
             "workflow_id": state.get("workflow_id"),
             "workflow_mode": state.get("workflow_mode"),
             "USER_QUERY": state.get("USER_QUERY"),
+            "task_profile": state.get("task_profile", {}),
+            "task_type": state.get("task_type"),
+            "business_goal": state.get("business_goal"),
+            "data_scope": state.get("data_scope"),
+            "operation_mode": state.get("operation_mode"),
+            "scenario_tags": state.get("scenario_tags", []),
+            "expected_capabilities": state.get("expected_capabilities", []),
+            "risk_profile": state.get("risk_profile", "LOW"),
+            "scenario_fit_cache": state.get("scenario_fit_cache", {}),
         },
     )
     await enforce_agent_dispatch(_agent, context)
@@ -413,6 +455,7 @@ async def planner_node(state: State) -> Command[Literal["publisher", "__end__"]]
 
     if state["workflow_mode"] == "launch":
         prompt_state = dict(state)
+        prompt_state = _ensure_scenario_prompt_defaults(prompt_state)
         history = prompt_state.get("instruction_history") or []
         if not isinstance(history, list):
             history = [str(history)]

@@ -4,8 +4,9 @@ from dataclasses import asdict
 from typing import Any, Dict, Optional
 
 from src.service.env import S_ABAC_ENABLED
-from src.security.context import SecurityContextBuilder
+from src.security.context import SecurityContextBuilder, UnknownSecurityUserError
 from src.security.policy import Action, Object, PolicyEngine, Scenario, Subject
+from src.security.scenario_analyzer import analyze_object_fit
 from config.s_abac_demo_users import get_user_available_agents
 
 
@@ -35,6 +36,35 @@ def _serialize(subject: Subject, object: Object, scenario: Scenario, action: Act
     }
 
 
+async def _enrich_context_with_scenario_fit(
+    *,
+    context: Any,
+    object: Object,
+) -> None:
+    metadata = getattr(context, "metadata", None)
+    if not isinstance(metadata, dict):
+        return
+
+    task_profile = metadata.get("task_profile", {})
+    user_query = metadata.get("USER_QUERY", metadata.get("user_query", ""))
+    cache = metadata.setdefault("scenario_fit_cache", {})
+    cache_key = f"{object.object_type}:{object.id}"
+
+    if cache_key in cache:
+        metadata["scenario_fit_result"] = cache[cache_key]
+        return
+
+    fit_result = await analyze_object_fit(
+        user_query,
+        object_id=object.id,
+        object_type=object.object_type,
+        object_attrs=object.attributes,
+        task_profile=task_profile,
+    )
+    cache[cache_key] = fit_result
+    metadata["scenario_fit_result"] = fit_result
+
+
 def _enforce(
     subject: Subject,
     object: Object,
@@ -58,7 +88,23 @@ async def enforce_agent_dispatch(agent: Any, context: Any) -> Dict[str, Any]:
     agent_name = getattr(agent, "agent_name", "unknown")
     user_id = getattr(context, "user_id", None)
     if user_id:
-        subject = SecurityContextBuilder.subject_for_user(user_id)
+        try:
+            subject = SecurityContextBuilder.subject_for_user(user_id)
+        except UnknownSecurityUserError as exc:
+            payload = {
+                "subject": {
+                    "subject_type": "user",
+                    "id": user_id,
+                    "attributes": {},
+                },
+                "object": asdict(SecurityContextBuilder.object_for_agent(agent)),
+                "action": asdict(SecurityContextBuilder.action_for_agent_dispatch(agent_name)),
+                "policy_result": {
+                    "allowed": False,
+                    "reason": str(exc),
+                },
+            }
+            raise PermissionDeniedError(str(exc), payload) from exc
         available = get_user_available_agents(user_id)
         if available and available != ["*"] and agent_name not in available:
             payload = {
@@ -77,6 +123,7 @@ async def enforce_agent_dispatch(agent: Any, context: Any) -> Dict[str, Any]:
     else:
         subject = SecurityContextBuilder.system_subject()
     object = SecurityContextBuilder.object_for_agent(agent)
+    await _enrich_context_with_scenario_fit(context=context, object=object)
     scenario = SecurityContextBuilder.scenario_from_context(context)
     action = SecurityContextBuilder.action_for_agent_dispatch(agent_name)
     return _enforce(subject, object, scenario, action, context=context)
@@ -94,13 +141,34 @@ async def enforce_tool_call(
 ) -> Dict[str, Any]:
     user_id = getattr(context, "user_id", None)
     if user_id:
-        subject = SecurityContextBuilder.subject_for_user(user_id)
+        try:
+            subject = SecurityContextBuilder.subject_for_user(user_id)
+        except UnknownSecurityUserError as exc:
+            if resource_spec is not None:
+                object = SecurityContextBuilder.object_for_resource_spec(resource_spec)
+            else:
+                object = SecurityContextBuilder.object_for_tool(tool_name, tool=tool, metadata=metadata)
+            payload = {
+                "subject": {
+                    "subject_type": "user",
+                    "id": user_id,
+                    "attributes": {},
+                },
+                "object": asdict(object),
+                "action": asdict(SecurityContextBuilder.action_for_tool_call(tool_name, arguments)),
+                "policy_result": {
+                    "allowed": False,
+                    "reason": str(exc),
+                },
+            }
+            raise PermissionDeniedError(str(exc), payload) from exc
     else:
         subject = SecurityContextBuilder.subject_for_agent(agent)
     if resource_spec is not None:
         object = SecurityContextBuilder.object_for_resource_spec(resource_spec)
     else:
         object = SecurityContextBuilder.object_for_tool(tool_name, tool=tool, metadata=metadata)
+    await _enrich_context_with_scenario_fit(context=context, object=object)
     scenario = SecurityContextBuilder.scenario_from_context(context)
     action = SecurityContextBuilder.action_for_tool_call(tool_name, arguments)
     return _enforce(subject, object, scenario, action, context=context)

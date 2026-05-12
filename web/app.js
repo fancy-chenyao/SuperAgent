@@ -1302,6 +1302,7 @@ const handleEvent = (eventName, payload) => {
   if (eventName === "permission_denied") {
     const d = payload.data || {};
     const policyResult = d.policy_result || {};
+    const scenarioFit = d.scenario_fit_result || {};
     const subject = d.subject || {};
     const object = d.object || {};
     const action = d.action || {};
@@ -1311,6 +1312,13 @@ const handleEvent = (eventName, payload) => {
     const objectSensitivity = object.attributes?.sensitivity || "?";
     const actionVerb = action.verb || "?";
     const deniedReason = policyResult.reason || d.error || "权限不足";
+    const scenarioFitLabelMap = {
+      match: "场景匹配",
+      mismatch: "场景不匹配",
+      uncertain: "场景待确认",
+    };
+    const scenarioFitLabel = scenarioFitLabelMap[scenarioFit.fit] || "场景待确认";
+    const scenarioFitReason = scenarioFit.reason || "";
 
     if (window.SecurityModule && window.SecurityModule.displaySecurityEvent) {
       window.SecurityModule.displaySecurityEvent("permission_denied", d);
@@ -1323,11 +1331,14 @@ const handleEvent = (eventName, payload) => {
         `<div>👤 <strong>用户:</strong> ${escapeHtml(subjectName)} <span class="tag accent">${escapeHtml(subjectRole)}</span></div>` +
         `<div style="margin-top:4px"> <strong>操作:</strong> ${escapeHtml(actionVerb)} → ${escapeHtml(objectName)} <span class="tag">${escapeHtml(objectSensitivity)}</span></div>` +
         `<div style="margin-top:4px;color:var(--danger)">🚫 <strong>拒绝原因:</strong> ${escapeHtml(deniedReason)}</div>` +
+        (scenarioFitReason
+          ? `<div style="margin-top:4px;color:var(--warning)">🧭 <strong>${escapeHtml(scenarioFitLabel)}:</strong> ${escapeHtml(scenarioFitReason)}</div>`
+          : ``) +
         `</div>`
       );
     }
 
-    appendOutput("system", `\n[security] S-ABAC 权限拒绝: ${subjectName}(${subjectRole}) 尝试 ${actionVerb} ${objectName}(${objectSensitivity}) — ${deniedReason}\n`);
+    appendOutput("system", `\n[security] S-ABAC 权限拒绝: ${subjectName}(${subjectRole}) 尝试 ${actionVerb} ${objectName}(${objectSensitivity}) — ${deniedReason}${scenarioFitReason ? ` | ${scenarioFitLabel}: ${scenarioFitReason}` : ""}\n`);
     showSummaryHint(`S-ABAC: ${deniedReason}`, true);
     setStatus("Permission Denied", false);
     return;
@@ -3361,9 +3372,12 @@ clearResumeOutputBtn.addEventListener("click", () => {
 // ─── S-ABAC Demo: User role selector sync ──────────────────────
 (function() {
   const demoRole = document.getElementById("demoUserRole");
+  const userIdInput = document.getElementById("userId");
+  if (demoRole && userIdInput && demoRole.value && (!userIdInput.value || userIdInput.value === "test")) {
+    userIdInput.value = demoRole.value;
+  }
   if (demoRole) {
     demoRole.addEventListener("change", function() {
-      const userIdInput = document.getElementById("userId");
       if (userIdInput && demoRole.value) {
         userIdInput.value = demoRole.value;
       }
@@ -3372,6 +3386,9 @@ clearResumeOutputBtn.addEventListener("click", () => {
       }
       loadPermissionSummary(demoRole.value);
     });
+  }
+  if (demoRole && demoRole.value) {
+    loadPermissionSummary(demoRole.value);
   }
 })();
 
