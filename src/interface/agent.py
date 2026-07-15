@@ -129,6 +129,7 @@ class AgentRequest(BaseModel):
     stop_after_planner: bool = False
     instruction: Optional[str] = None
     instruction_history: Optional[list[str]] = None
+    original_user_query: Optional[str] = None
 
 
 class listAgentRequest(BaseModel):

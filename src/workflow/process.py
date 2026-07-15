@@ -38,6 +38,9 @@ logging.basicConfig(
 console = Console()
 
 
+DEFAULT_PLANNER_AGENTS = ["researcher", "coder", "reporter", "browser"]
+
+
 def enable_debug_logging():
     """Enable debug level logging for more detailed execution information."""
     logging.getLogger("src").setLevel(logging.DEBUG)
@@ -52,8 +55,11 @@ def _normalize_planning_steps(raw: Any) -> list:
     if isinstance(raw, list):
         return raw
     if isinstance(raw, dict):
-        steps = raw.get("steps") or raw.get("planning_steps")
-        return steps if isinstance(steps, list) else []
+        if "steps" in raw and isinstance(raw.get("steps"), list):
+            return raw.get("steps")
+        if "planning_steps" in raw and isinstance(raw.get("planning_steps"), list):
+            return raw.get("planning_steps")
+        return []
     if isinstance(raw, str):
         text = raw.strip()
         if not text:
@@ -119,7 +125,7 @@ async def _prepare_execution_graph(workflow_id: str, user_id: str, resume_step: 
 
     steps = _normalize_planning_steps(cache.get_planning_steps(workflow_id))
     if not steps:
-        raise ValueError("no planning steps found for execution")
+        raise RuntimeError("no planning steps found for execution")
 
     await agent_manager.ensure_initialized()
     nodes = workflow.get("nodes") if isinstance(workflow.get("nodes"), dict) else {}
@@ -188,7 +194,7 @@ async def _prepare_execution_graph(workflow_id: str, user_id: str, resume_step: 
         )
 
     if missing:
-        raise ValueError(f"missing agents for execution: {', '.join(missing)}")
+        raise RuntimeError(f"missing agents for execution: {', '.join(missing)}")
 
     for i, node in enumerate(exec_graph):
         if i + 1 < len(exec_graph):
@@ -326,6 +332,11 @@ async def _build_team_members(
                 produces=produces_str,
             )
 
+    if has_user_profile and available != ["*"]:
+        for agent_name in available:
+            if agent_name in DEFAULT_PLANNER_AGENTS and agent_name not in members:
+                members.append(agent_name)
+
     if not members and has_user_profile:
         logger.warning(
             "S-ABAC: No agents available for user '%s' (available=%s, DISABLE_DEFAULT_AGENTS=%s). "
@@ -403,6 +414,7 @@ async def run_agent_workflow(
     stop_after_planner: bool = False,
     instruction: str | None = None,
     instruction_history: list[str] | None = None,
+    original_user_query: str | None = None,
 ):
     """Run the agent workflow with the given user input.
 
@@ -447,7 +459,20 @@ async def run_agent_workflow(
         cache.append_instruction(workflow_id, instruction, user_id=user_id)
 
     if workmode == "production":
-        await _prepare_execution_graph(workflow_id, user_id, resume_step=resume_step)
+        try:
+            await _prepare_execution_graph(workflow_id, user_id, resume_step=resume_step)
+        except RuntimeError as exc:
+            logger.warning("S-ABAC workflow preparation blocked execution: %s", exc)
+            yield {
+                "event": "workflow_error",
+                "data": {
+                    "workflow_id": workflow_id,
+                    "task_id": task_id or CheckpointManager.generate_task_id(workflow_id),
+                    "error": str(exc),
+                    "reason": "No executable planning steps after permission filtering",
+                },
+            }
+            return
 
     # Generate a unique task_id for this execution instance if not provided
     if not task_id:
@@ -487,7 +512,9 @@ async def run_agent_workflow(
             "TEAM_MEMBERS_DESCRIPTION": team_members_description,
             "TOOLS": tools_description,
             "RESOURCE_CATALOG": resource_catalog,
-            "USER_QUERY": user_input_messages[-1]["content"],
+            "USER_QUERY": original_user_query or user_input_messages[-1]["content"],
+            "execution_user_query": user_input_messages[-1]["content"],
+            "original_user_query": original_user_query or user_input_messages[-1]["content"],
             "messages": user_input_messages,
             "deep_thinking_mode": deep_thinking_mode,
             "search_before_planning": search_before_planning,
@@ -526,8 +553,31 @@ async def _process_workflow(
     checkpoint_manager = CheckpointManager()
     step_count = 0
 
+    def _restore_scenario_state_from_source(target_state: dict[str, Any], source_state: dict[str, Any] | None) -> None:
+        if not isinstance(source_state, dict):
+            return
+        for key in (
+            "original_user_query",
+            "execution_user_query",
+            "task_profile",
+            "task_profile_reason",
+            "scenario_tags",
+            "expected_capabilities",
+            "task_type",
+            "business_goal",
+            "data_scope",
+            "operation_mode",
+            "risk_profile",
+            "scenario_fit_cache",
+            "TASK_PROFILE_TEXT",
+            "SCENARIO_TAGS_TEXT",
+            "EXPECTED_CAPABILITIES_TEXT",
+        ):
+            if not target_state.get(key) and source_state.get(key) is not None:
+                target_state[key] = source_state.get(key)
+
     # Initialize TaskLogger for this execution
-    user_query = initial_state.get("USER_QUERY", "")
+    user_query = initial_state.get("original_user_query") or initial_state.get("USER_QUERY", "")
     if not task_id:
         task_id = CheckpointManager.generate_task_id(workflow_id)
     
@@ -576,9 +626,28 @@ async def _process_workflow(
         current_node = workflow.start_node
         state = State(**initial_state)
 
+        if state.get("workflow_mode") == "production" and workflow_id in cache.cache:
+            workflow_snapshot = cache.cache.get(workflow_id) or {}
+            _restore_scenario_state_from_source(state, workflow_snapshot)
+
+        if state.get("workflow_mode") == "production" and task_id:
+            try:
+                checkpoint_zero = checkpoint_manager.load_checkpoint(
+                    workflow_id=workflow_id,
+                    task_id=task_id,
+                    step=0,
+                )
+                if checkpoint_zero and isinstance(checkpoint_zero.state, dict):
+                    _restore_scenario_state_from_source(state, checkpoint_zero.state)
+            except Exception:
+                pass
+
         if not state.get("task_profile"):
+            original_user_query = state.get("original_user_query") or state.get("USER_QUERY", "")
+            if original_user_query:
+                state["USER_QUERY"] = original_user_query
             task_profile = await analyze_task_context(
-                state.get("USER_QUERY", ""),
+                original_user_query,
                 {
                     "workflow_mode": state.get("workflow_mode"),
                     "risk_profile": state.get("risk_profile", "LOW"),
@@ -589,7 +658,7 @@ async def _process_workflow(
             state["scenario_tags"] = task_profile.get("scenario_tags", [])
             state["expected_capabilities"] = task_profile.get("expected_capabilities", [])
             state["task_type"] = task_profile.get("task_type", "GENERAL")
-            state["business_goal"] = task_profile.get("business_goal", state.get("USER_QUERY", ""))
+            state["business_goal"] = task_profile.get("business_goal", original_user_query)
             state["data_scope"] = task_profile.get("data_scope", "targeted")
             state["operation_mode"] = task_profile.get("operation_mode", "read")
             state["risk_profile"] = task_profile.get("risk_profile", "LOW")
@@ -817,6 +886,8 @@ async def _process_workflow(
                     yield event_data
                 return
 
+        cache.dump(workflow_id, initial_state["workflow_mode"])
+
         yield {
             "event": "end_of_workflow",
             "data": {
@@ -825,8 +896,6 @@ async def _process_workflow(
                 "messages": [{"role": "user", "content": "workflow completed"}],
             },
         }
-
-        cache.dump(workflow_id, initial_state["workflow_mode"])
 
     except PermissionDeniedError as e:
         logger.warning("S-ABAC permission denied: %s", str(e))

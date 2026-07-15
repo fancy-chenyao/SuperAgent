@@ -98,6 +98,11 @@ class WorkflowCache:
                         workflow["deep_thinking_mode"] = deep_thinking_mode
                         workflow["search_before_planning"] = search_before_planning
                         workflow["coor_agents"] = coor_agents
+                        workflow["planning_steps"] = []
+                        workflow["graph"] = []
+                        workflow["nodes"] = {}
+                        if workflow_id in self.queue:
+                            self.queue[workflow_id] = deque()
                         if "instruction_history" not in workflow:
                             workflow["instruction_history"] = []
                         self.cache[workflow_id] = workflow

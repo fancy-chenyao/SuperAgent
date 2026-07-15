@@ -1,4 +1,4 @@
-const statusIndicator = document.getElementById("statusIndicator");
+﻿const statusIndicator = document.getElementById("statusIndicator");
 const tabs = document.querySelectorAll(".tab");
 const panels = document.querySelectorAll(".panel");
 
@@ -101,6 +101,7 @@ let plannerOnlyController = null;
 let plannerOnlyTimeoutId = null;
 let plannerOnlyStepsUpdated = false;
 let instructionHistory = [];
+let originalUserQuery = "";
 let currentRunContext = null;
 let executionInProgress = false;
 let workflowsPage = 1;
@@ -117,7 +118,7 @@ const updateWorkflowsPagination = () => {
   const hasPages = workflowsTotalPages > 0;
   const currentPage = hasPages ? Math.min(workflowsPage, workflowsTotalPages) : 0;
   workflowsPageInfo.textContent = workflowsTotal
-    ? `Page ${currentPage} / ${workflowsTotalPages} · Total ${workflowsTotal}`
+    ? `Page ${currentPage} / ${workflowsTotalPages} | Total ${workflowsTotal}`
     : "";
 
   workflowsPrevPageBtn.disabled = !hasPages || workflowsPage <= 1;
@@ -199,7 +200,7 @@ const updateConfirmExecuteState = () => {
     const hasPlan = planSteps.length > 0;
     const hasWorkflowId = workflowIdInput && workflowIdInput.value.trim();
     confirmExecuteBtn.disabled = executionInProgress || !(hasPlan && hasWorkflowId);
-    confirmExecuteBtn.textContent = executionInProgress ? "执行中..." : "确认执行";
+    confirmExecuteBtn.textContent = executionInProgress ? "Executing..." : "Confirm execution";
   }
   if (nlPlanEditBtn) {
     nlPlanEditBtn.disabled = executionInProgress;
@@ -231,7 +232,7 @@ const openPlanModal = () => {
   if (!planModal) return;
   planModal.classList.remove("hidden");
   if (planNlInput) planNlInput.value = "";
-  showPlanNlHint("请输入修改指令。");
+  showPlanNlHint("Please enter an instruction for updating the plan.");
 };
 
 const closePlanModal = () => {
@@ -271,7 +272,7 @@ const renderFlowSteps = () => {
     if (idx > 0) {
       const arrow = document.createElement("span");
       arrow.className = "flow-arrow";
-      arrow.textContent = "→";
+      arrow.textContent = "->";
       frag.appendChild(arrow);
     }
     const node = document.createElement("span");
@@ -413,7 +414,7 @@ const renderPlanEditor = (errorsByIndex = {}) => {
   planEditorList.innerHTML = "";
 
   if (!planSteps.length) {
-    showPlanValidationHint("暂无计划步骤。", true);
+    showPlanValidationHint("No plan steps yet.", true);
     return;
   }
 
@@ -433,14 +434,14 @@ const renderPlanEditor = (errorsByIndex = {}) => {
     const content = document.createElement("div");
     content.className = "plan-editor-content";
     const titleLine = document.createElement("div");
-    titleLine.textContent = step.title || "未命名步骤";
+    titleLine.textContent = step.title || "Untitled step";
     const descLine = document.createElement("div");
-    descLine.textContent = step.description || "无描述";
+    descLine.textContent = step.description || "No description";
     const metaLine = document.createElement("div");
     metaLine.className = "meta";
-    const roleText = step.agent_name ? `角色: ${step.agent_name}` : "角色: 自动";
-    const noteText = step.note ? `备注: ${step.note}` : "备注: 无";
-    metaLine.textContent = `${roleText} · ${noteText}`;
+    const roleText = step.agent_name ? `Agent: ${step.agent_name}` : "Agent: auto";
+    const noteText = step.note ? `Note: ${step.note}` : "Note: none";
+    metaLine.textContent = `${roleText} | ${noteText}`;
 
     content.appendChild(titleLine);
     content.appendChild(descLine);
@@ -482,27 +483,27 @@ const validatePlanSteps = () => {
   const errors = [];
   const errorsByIndex = {};
   if (!planSteps.length) {
-    errors.push("计划为空，请先新增步骤。");
+    errors.push("Plan is empty. Please add at least one step.");
   }
 
   const agentNames = new Set(
     Array.isArray(latestAgents) ? latestAgents.map((agent) => agent.agent_name).filter(Boolean) : []
   );
   if (!agentNames.size) {
-    errors.push("Agent 列表未加载，无法校验执行角色。");
+    errors.push("Agent list is not loaded, so execution roles cannot be validated.");
   }
 
   planSteps.forEach((step, idx) => {
     const stepErrors = [];
     if (!step.title || !step.title.trim()) {
-      stepErrors.push("缺少标题");
+      stepErrors.push("Missing title");
     }
     if (step.agent_name && agentNames.size && !agentNames.has(step.agent_name)) {
-      stepErrors.push(`执行角色不存在：${step.agent_name}`);
+      stepErrors.push(`Unknown execution agent: ${step.agent_name}`);
     }
     if (stepErrors.length) {
       errorsByIndex[idx] = stepErrors;
-      errors.push(`第 ${idx + 1} 步：${stepErrors.join("，")}`);
+      errors.push(`Step ${idx + 1}: ${stepErrors.join("; ")}`);
     }
   });
 
@@ -518,7 +519,7 @@ const runPlannerUpdate = async (instruction, appendHistory = true) => {
     return;
   }
   if (!instruction) {
-    showPlanNlHint("请输入修改指令。", true);
+    showPlanNlHint("Please enter an instruction for updating the plan.", true);
     return;
   }
 
@@ -530,7 +531,7 @@ const runPlannerUpdate = async (instruction, appendHistory = true) => {
   plannerBuffer = "";
   plannerCollecting = false;
   plannerOnlyStepsUpdated = false;
-  showPlanNlHint("正在生成新的计划...");
+  showPlanNlHint("Generating an updated plan...");
 
   const payload = {
     user_id: userId,
@@ -543,7 +544,7 @@ const runPlannerUpdate = async (instruction, appendHistory = true) => {
       {
         role: "user",
         content:
-          "请基于全部指令历史重新规划，输出JSON格式的steps。要求仅输出JSON，不要解释。\\n\\n最新补充：" +
+          "Please regenerate the plan from the full instruction history and return JSON steps only. Do not include extra explanation.\n\nLatest update: " +
           instruction,
       },
     ],
@@ -562,7 +563,7 @@ const runPlannerUpdate = async (instruction, appendHistory = true) => {
       if (plannerOnlyController) {
         plannerOnlyController.abort();
       }
-      showPlanNlHint("生成超时，请调整指令后重试。", true);
+      showPlanNlHint("Planner request timed out. Please refine the instruction and try again.", true);
       plannerOnlyMode = false;
       plannerOnlyController = null;
     }, PLANNER_ONLY_TIMEOUT_MS);
@@ -594,7 +595,7 @@ const runPlannerUpdate = async (instruction, appendHistory = true) => {
     }
   } catch (err) {
     if (err?.name !== "AbortError") {
-      showPlanNlHint(`生成失败: ${err.message || err}`, true);
+      showPlanNlHint(`Planner request failed: ${err.message || err}`, true);
     }
   } finally {
     plannerOnlyMode = false;
@@ -615,7 +616,7 @@ tabs.forEach((tab) => {
   tab.addEventListener("click", () => switchTab(tab.dataset.tab));
 });
 
-// ─── Step Card Functions (Execution Log) ───────────────────────────────
+// Step Card Functions (Execution Log)
 
 const clearStepCards = () => {
   executionStepCards = [];
@@ -673,7 +674,7 @@ const errorStepCard = (errMsg) => {
     currentStepCard.status = "error";
     currentStepCard.endTime = Date.now();
     const plainText = errMsg.replace(/<[^>]*>/g, "").trim();
-    currentStepCard.summary = plainText.substring(0, 80) || "执行出错";
+    currentStepCard.summary = plainText.substring(0, 80) || "Execution error";
     currentStepCard.content = errMsg;
     currentStepCard._isHtml = true;
     currentStepCard = null;
@@ -700,39 +701,39 @@ const generateStepSummary = (card) => {
     if (first.adtEmpeNm || first.name) {
       const name = first.adtEmpeNm || first.name;
       const email = first.internalMaiBox || "";
-      return `${name}${email ? " (" + email + ")" : ""} 等${parsed.length}条 · ${duration}`;
+      return `${name}${email ? " (" + email + ")" : ""} | ${parsed.length} record(s) | ${duration}`;
     }
-    return `返回 ${parsed.length} 条记录 · ${duration}`;
+    return `Returned ${parsed.length} record(s) | ${duration}`;
   }
 
   // Object result
   if (parsed && typeof parsed === "object") {
-    if (parsed.status === "error") return `错误: ${parsed.message || ""} · ${duration}`;
+    if (parsed.status === "error") return `Error: ${parsed.message || ""} | ${duration}`;
 
     // EmailDispatch: {status, sent: {id, to, subject}}
     if (parsed.sent && typeof parsed.sent === "object") {
       const s = parsed.sent;
-      return `已发送 → ${s.to || "?"} · ${s.id || ""} · ${duration}`;
+      return `Sent to ${s.to || "?"} | ${s.id || ""} | ${duration}`;
     }
 
     // ReportAgent: {status, markdown: "..."}
     if (parsed.markdown) {
       const firstLine = (parsed.markdown || "").split("\n")[0].replace(/^#+\s*/, "");
-      return `已生成: ${firstLine.substring(0, 40)} · ${duration}`;
+      return `Generated ${firstLine.substring(0, 40)} | ${duration}`;
     }
 
     // Records with matched_count
     if (parsed.matched_count) {
-      return `已匹配 ${parsed.matched_count} 条 · ${duration}`;
+      return `Matched ${parsed.matched_count} record(s) | ${duration}`;
     }
 
-    if (parsed.status === "success") return `执行成功 · ${duration}`;
-    return `返回数据 · ${duration}`;
+    if (parsed.status === "success") return `Execution succeeded | ${duration}`;
+    return `Returned data | ${duration}`;
   }
 
   // Fallback: first 80 chars
   const preview = raw.replace(/\s+/g, " ").substring(0, 80);
-  return `${preview}${raw.length > 80 ? "…" : ""} · ${duration}`;
+  return `${preview}${raw.length > 80 ? "..." : ""} | ${duration}`;
 };
 
 const renderAllStepCards = () => {
@@ -749,10 +750,10 @@ const renderStepCardInto = (card, parent) => {
   const total = planSteps.length > 0 ? planSteps.length : executionStepCards.length;
   const duration = card.endTime
     ? `${Math.round((card.endTime - card.startTime) / 1000)}s`
-    : (card.status === "running" ? "…" : "");
+    : (card.status === "running" ? "..." : "");
 
-  const iconMap = { running: "🔄", done: "✅", error: "❌", pending: "⏳" };
-  const icon = iconMap[card.status] || "⏳";
+  const iconMap = { running: "[...]", done: "[ok]", error: "[x]", pending: "[ ]" };
+  const icon = iconMap[card.status] || "[ ]";
 
   const cardEl = document.createElement("div");
   cardEl.className = `step-card ${card.status}`;
@@ -765,16 +766,16 @@ const renderStepCardInto = (card, parent) => {
     const body = cardEl.querySelector(".step-card-body");
     const toggle = cardEl.querySelector(".step-toggle");
     if (body) body.classList.toggle("hidden");
-    if (toggle) toggle.textContent = body?.classList.contains("hidden") ? "▶" : "▼";
+    if (toggle) toggle.textContent = body?.classList.contains("hidden") ? ">" : "v";
   });
 
   header.innerHTML =
     `<span class="step-status-icon">${icon}</span>` +
     `<span class="step-index">${card.id}/${total}</span>` +
     `<span class="step-agent-name">${escapeHtml(card.agentName)}</span>` +
-    `<span class="step-summary-text">${escapeHtml(card.summary || (card.status === "running" ? "正在执行…" : ""))}</span>` +
+    `<span class="step-summary-text">${escapeHtml(card.summary || (card.status === "running" ? "Running..." : ""))}</span>` +
     `<span class="step-duration">${duration}</span>` +
-    `<span class="step-toggle">▶</span>`;
+    `<span class="step-toggle">></span>`;
 
   // Body (collapsed by default, but expanded for error cards)
   const isError = card.status === "error";
@@ -798,11 +799,11 @@ const renderStepCardInto = (card, parent) => {
   // Fix toggle icon for error cards (since header was rendered with innerHTML before body existed)
   if (isError) {
     const toggle = cardEl.querySelector(".step-toggle");
-    if (toggle) toggle.textContent = "▼";
+    if (toggle) toggle.textContent = "v";
   }
 };
 
-// ─── Result Formatting ─────────────────────────────────────────────────
+// Result Formatting
 
 const formatResult = (rawContent) => {
   const wrap = document.createElement("div");
@@ -868,7 +869,7 @@ const buildResultTable = (records) => {
   if (hasMore) {
     const hint = document.createElement("div");
     hint.className = "step-result-hint";
-    hint.textContent = `共 ${records.length} 条记录，显示前 ${MAX_ROWS} 条`;
+    hint.textContent = `Total ${records.length} record(s), showing first ${MAX_ROWS}.`;
     wrapper.appendChild(hint);
   }
   return wrapper;
@@ -927,7 +928,7 @@ const buildKeyValueList = (obj, depth) => {
 };
 
 const maskSensitiveIfNeeded = (fieldName, value) => {
-  const sensitivePattern = /身份证|id_card|idcard|ssn|密码|password|secret|token|phone|电话|手机|mobile|^a\d{5,}$|officePhone|internalMaiBox|idvId/i;
+  const sensitivePattern = /identity|id_card|idcard|ssn|password|secret|token|phone|mobile|^a\d{5,}$|officePhone|internalMaiBox|idvId/i;
   if (sensitivePattern.test(fieldName) && value.length > 4) {
     return value.substring(0, 2) + "****" + value.substring(value.length - 2);
   }
@@ -940,7 +941,7 @@ const escapeHtml = (str) => {
   return div.innerHTML;
 };
 
-// ─── Lightweight Markdown → HTML ──────────────────────────────────────
+// Lightweight Markdown -> HTML
 
 const renderMarkdown = (md) => {
   if (!md) return "";
@@ -1002,7 +1003,7 @@ const renderMarkdown = (md) => {
       continue;
     }
 
-    // Empty line — close lists / tables
+    // Empty line - close lists / tables
     if (line.trim() === "") {
       flushList();
       flushTable();
@@ -1081,7 +1082,7 @@ const inlineMarkdown = (text) => {
   return t;
 };
 
-// ─── Original Output Block (planning log) ──────────────────────────────
+// Original Output Block (planning log)
 
 const ensureOutputBlock = (agentName, phase = "planning") => {
   const outputContainer = getOutputContainer(phase);
@@ -1123,7 +1124,7 @@ const refreshPlannerTimeout = () => {
     if (plannerOnlyController) {
       plannerOnlyController.abort();
     }
-    showPlanNlHint("生成超时，请调整指令后重试。", true);
+    showPlanNlHint("Planner request timed out. Please refine the instruction and try again.", true);
     plannerOnlyMode = false;
     plannerOnlyController = null;
   }, PLANNER_ONLY_TIMEOUT_MS);
@@ -1135,9 +1136,16 @@ const applyPlannerStepsFromBuffer = (buffer, options = {}) => {
   const steps = normalizePlanSteps(parsed);
   if (!steps.length) {
     if (finalize) {
-      showPlanHint("Planner output is not valid JSON steps.", true);
+      const emptyStepsMessage = "Planner returned valid JSON, but no executable steps were generated.";
+      const invalidJsonMessage = "Planner output is not valid JSON steps.";
+      showPlanHint(parsed ? emptyStepsMessage : invalidJsonMessage, true);
       if (plannerOnlyMode) {
-        showPlanNlHint("未能解析规划结果，请调整指令再试。", true);
+        showPlanNlHint(
+          parsed
+            ? "Planner completed, but the steps list is empty. Please refine the instruction and try again."
+            : "Unable to parse planner output. Please refine the instruction and try again.",
+          true
+        );
       }
     }
     return false;
@@ -1147,11 +1155,11 @@ const applyPlannerStepsFromBuffer = (buffer, options = {}) => {
   plannerOnlyStepsUpdated = true;
   renderPlanSummary(planSteps);
   renderPlanEditor();
-  showPlanValidationHint("计划已更新，可继续用自然语言补充。");
+  showPlanValidationHint("Plan updated. You can continue refining it with natural language.");
 
   if (finalize && plannerOnlyMode && plannerOnlyController) {
     plannerOnlyController.abort();
-    showPlanNlHint("已根据指令生成新计划。");
+    showPlanNlHint("A new plan has been generated from your instruction.");
     closePlanModal();
   }
   return true;
@@ -1311,13 +1319,13 @@ const handleEvent = (eventName, payload) => {
     const objectName = object.object_name || "?";
     const objectSensitivity = object.attributes?.sensitivity || "?";
     const actionVerb = action.verb || "?";
-    const deniedReason = policyResult.reason || d.error || "权限不足";
+    const deniedReason = policyResult.reason || d.error || "Insufficient permission";
     const scenarioFitLabelMap = {
-      match: "场景匹配",
-      mismatch: "场景不匹配",
-      uncertain: "场景待确认",
+      match: "Scenario matched",
+      mismatch: "Scenario mismatch",
+      uncertain: "Scenario needs review",
     };
-    const scenarioFitLabel = scenarioFitLabelMap[scenarioFit.fit] || "场景待确认";
+    const scenarioFitLabel = scenarioFitLabelMap[scenarioFit.fit] || "Scenario needs review";
     const scenarioFitReason = scenarioFit.reason || "";
 
     if (window.SecurityModule && window.SecurityModule.displaySecurityEvent) {
@@ -1326,21 +1334,51 @@ const handleEvent = (eventName, payload) => {
 
     if (currentRunContext === "executing") {
       errorStepCard(
-        `<strong>S-ABAC 权限拒绝</strong><br>` +
+        `<strong>S-ABAC Permission Denied</strong><br>` +
         `<div style="margin-top:8px;font-size:13px;color:var(--muted)">` +
-        `<div>👤 <strong>用户:</strong> ${escapeHtml(subjectName)} <span class="tag accent">${escapeHtml(subjectRole)}</span></div>` +
-        `<div style="margin-top:4px"> <strong>操作:</strong> ${escapeHtml(actionVerb)} → ${escapeHtml(objectName)} <span class="tag">${escapeHtml(objectSensitivity)}</span></div>` +
-        `<div style="margin-top:4px;color:var(--danger)">🚫 <strong>拒绝原因:</strong> ${escapeHtml(deniedReason)}</div>` +
+        `<div><strong>User:</strong> ${escapeHtml(subjectName)} <span class="tag accent">${escapeHtml(subjectRole)}</span></div>` +
+        `<div style="margin-top:4px"><strong>Action:</strong> ${escapeHtml(actionVerb)} -> ${escapeHtml(objectName)} <span class="tag">${escapeHtml(objectSensitivity)}</span></div>` +
+        `<div style="margin-top:4px;color:var(--danger)"><strong>Reason:</strong> ${escapeHtml(deniedReason)}</div>` +
         (scenarioFitReason
-          ? `<div style="margin-top:4px;color:var(--warning)">🧭 <strong>${escapeHtml(scenarioFitLabel)}:</strong> ${escapeHtml(scenarioFitReason)}</div>`
+          ? `<div style="margin-top:4px;color:var(--warning)"><strong>${escapeHtml(scenarioFitLabel)}:</strong> ${escapeHtml(scenarioFitReason)}</div>`
           : ``) +
         `</div>`
       );
     }
 
-    appendOutput("system", `\n[security] S-ABAC 权限拒绝: ${subjectName}(${subjectRole}) 尝试 ${actionVerb} ${objectName}(${objectSensitivity}) — ${deniedReason}${scenarioFitReason ? ` | ${scenarioFitLabel}: ${scenarioFitReason}` : ""}\n`);
+    appendOutput("system", `\n[security] S-ABAC permission denied: ${subjectName}(${subjectRole}) tried ${actionVerb} ${objectName}(${objectSensitivity}) - ${deniedReason}${scenarioFitReason ? ` | ${scenarioFitLabel}: ${scenarioFitReason}` : ""}\n`);
     showSummaryHint(`S-ABAC: ${deniedReason}`, true);
     setStatus("Permission Denied", false);
+    return;
+  }
+  if (eventName === "workflow_error") {
+    const d = payload.data || {};
+    const friendlyReason = d.reason || d.error || "Workflow could not continue.";
+    const detail = d.error || friendlyReason;
+
+    if (currentRunContext === "executing") {
+      errorStepCard(
+        `<strong>Workflow paused</strong><br>` +
+        `<div style="margin-top:8px;font-size:13px;color:var(--muted)">` +
+        `<div style="color:var(--warning)"><strong>Hint:</strong> The current plan left no executable steps. This can happen after permission checks or agent filtering.</div>` +
+        `<div style="margin-top:6px;color:var(--danger)"><strong>Reason:</strong> ${escapeHtml(detail)}</div>` +
+        `<div style="margin-top:6px">Try switching the user role, adjusting available agents, or regenerating the plan.</div>` +
+        `</div>`
+      );
+    } else {
+      appendOutput(
+        "system",
+        `\n[workflow_error] ${friendlyReason} | No executable steps remain. Check the plan and permission filtering.\n`
+      );
+    }
+
+    showSummaryHint("Workflow paused: no executable steps.", true);
+    setStatus("Workflow Blocked", false);
+    if (currentRunContext === "executing") {
+      showPlanValidationHint("The current plan has no executable steps, so the workflow is paused.", true);
+    } else {
+      showPlanNlHint("The current plan has no executable steps, so the workflow is paused.", true);
+    }
     return;
   }
   if (eventName === "end_of_workflow") {
@@ -1348,13 +1386,13 @@ const handleEvent = (eventName, payload) => {
       showSummaryHint("Workflow completed.");
       if (currentRunContext === "executing") {
         finalizeStepCard();
-        showPlanValidationHint("执行完成，可查看执行日志。");
-        showPlanHint("计划执行完成。");
+        showPlanValidationHint("Execution completed. You can review the execution log.");
+        showPlanHint("Plan execution completed.");
       } else {
         appendOutput("system", "\n[workflow] completed\n");
       }
     } else if (!plannerOnlyStepsUpdated) {
-      showPlanNlHint("规划完成，但未生成可用步骤。请调整指令后重试。", true);
+      showPlanNlHint("Planner completed, but no executable steps were generated. Please refine the instruction and try again.", true);
     }
     return;
   }
@@ -1372,7 +1410,7 @@ const handleEvent = (eventName, payload) => {
       } else {
         appendOutput("system", `\n[error] ${payload.data?.error || payload.raw || "unknown error"}\n`);
       }
-      showPlanValidationHint("执行失败，可在 Task History 中恢复。", true);
+      showPlanValidationHint("Execution failed. You can recover from Task History.", true);
     } else {
       showPlanNlHint(payload.data?.error || payload.raw || "unknown error", true);
     }
@@ -1401,6 +1439,7 @@ const runWorkflow = async () => {
   resetSummary();
   resetPlan();
   instructionHistory = [message];
+  originalUserQuery = message;
   currentRunContext = "planning";
   if (workflowIdInput) {
     workflowIdInput.value = "";
@@ -1416,6 +1455,7 @@ const runWorkflow = async () => {
     stop_after_planner: true,
     instruction: message,
     instruction_history: instructionHistory,
+    original_user_query: originalUserQuery,
     messages: [{ role: "user", content: message }],
     debug: debugInput.checked,
     deep_thinking_mode: deepThinkingInput.checked,
@@ -1468,11 +1508,11 @@ const runExecution = async () => {
   }
   const workflowId = workflowIdInput.value.trim();
   if (!workflowId) {
-    showPlanValidationHint("缺少 Workflow ID，无法执行。", true);
+    showPlanValidationHint("Workflow ID is required before execution.", true);
     return;
   }
   if (!planSteps.length) {
-    showPlanValidationHint("计划为空，无法执行。", true);
+    showPlanValidationHint("Plan is empty, so execution cannot start.", true);
     return;
   }
 
@@ -1481,8 +1521,8 @@ const runExecution = async () => {
   resetSummary();
   currentRunContext = "executing";
   executionInProgress = true;
-  showPlanValidationHint("执行中，请勿重复点击。");
-  showPlanHint("计划执行中，请查看执行日志。");
+  showPlanValidationHint("Execution is in progress. Please do not click repeatedly.");
+  showPlanHint("Plan execution is in progress. Check the execution log for updates.");
   updateConfirmExecuteState();
   runBtn.disabled = true;
   stopBtn.disabled = false;
@@ -1494,7 +1534,8 @@ const runExecution = async () => {
     stop_after_planner: false,
     instruction: null,
     instruction_history: instructionHistory,
-    messages: [{ role: "user", content: "确认执行，按当前计划执行。" }],
+    original_user_query: originalUserQuery || instructionHistory[0] || "",
+    messages: [{ role: "user", content: "Confirm execution and proceed with the current plan." }],
     debug: debugInput.checked,
     deep_thinking_mode: deepThinkingInput.checked,
     search_before_planning: searchBeforeInput.checked,
@@ -1529,7 +1570,7 @@ const runExecution = async () => {
     appendOutput("system", `\n[error] ${err.message || err}\n`);
     setStatus("Error", false);
     showSummaryHint("Workflow error.", true);
-    showPlanValidationHint("执行失败，请检查执行日志后重试。", true);
+    showPlanValidationHint("Execution failed. Check the execution log and try again.", true);
   } finally {
     currentRunContext = null;
     executionInProgress = false;
@@ -1558,7 +1599,7 @@ if (confirmExecuteBtn) {
 if (retryPlanBtn) {
   retryPlanBtn.addEventListener("click", () => {
     if (!instructionHistory.length) {
-      showPlanValidationHint("没有可重试的指令。", true);
+      showPlanValidationHint("There is no instruction available to retry.", true);
       return;
     }
     const lastInstruction = instructionHistory[instructionHistory.length - 1];
@@ -1598,7 +1639,7 @@ const stopWorkflow = () => {
     executionInProgress = false;
     setStatus("Stopped", false);
     showSummaryHint("Workflow stopped.");
-    showPlanValidationHint("执行已停止，可重新执行。", true);
+    showPlanValidationHint("Execution stopped. You can run it again.", true);
     updateConfirmExecuteState();
   }
 };
@@ -1610,7 +1651,7 @@ const createStateCard = (text, variant = "info") => {
   if (variant === "empty") {
     const icon = document.createElement("div");
     icon.className = "empty-state-icon";
-    icon.textContent = "📦";
+    icon.textContent = "[list]";
     card.appendChild(icon);
 
     const textEl = document.createElement("div");
@@ -1650,7 +1691,7 @@ const setListState = (container, text, variant) => {
 
 const updateCoorCount = () => {
   if (!coorCount) return;
-  coorCount.textContent = `已选: ${selectedCoorAgents.size}`;
+  coorCount.textContent = `Selected ${selectedCoorAgents.size}`;
   if (clearCoorBtn) {
     clearCoorBtn.disabled = selectedCoorAgents.size === 0;
   }
@@ -1736,7 +1777,7 @@ const setAgentDetailEmpty = (text) => {
 const renderAgentDetail = (agent) => {
   if (!agentDetail) return;
   if (!agent) {
-    setAgentDetailEmpty("选择一个 Agent 查看详情");
+    setAgentDetailEmpty("Select an agent to view details.");
     return;
   }
 
@@ -1747,8 +1788,8 @@ const renderAgentDetail = (agent) => {
   const sub = document.createElement("div");
   sub.className = "agent-sub";
   const userLabel = agent.user_id === "share" ? "default" : "user";
-  const sourceLabel = agent.source ? ` · ${agent.source}` : "";
-  const nick = agent.nick_name ? `${agent.nick_name} · ` : "";
+  const sourceLabel = agent.source ? ` | ${agent.source}` : "";
+  const nick = agent.nick_name ? `${agent.nick_name} | ` : "";
   sub.textContent = `${nick}${userLabel}${sourceLabel}`;
 
   const tagRow = document.createElement("div");
@@ -1761,9 +1802,9 @@ const renderAgentDetail = (agent) => {
   }
 
   const descTitle = document.createElement("h4");
-  descTitle.textContent = "描述";
+  descTitle.textContent = "Description";
   const desc = document.createElement("p");
-  desc.textContent = agent.description || "暂无描述";
+  desc.textContent = agent.description || "No description";
 
   const toolsTitle = document.createElement("h4");
   toolsTitle.textContent = "Tools";
@@ -1777,7 +1818,7 @@ const renderAgentDetail = (agent) => {
     });
   } else {
     const emptyTools = document.createElement("p");
-    emptyTools.textContent = "无";
+    emptyTools.textContent = "None";
     toolsRow.appendChild(emptyTools);
   }
 
@@ -1791,7 +1832,7 @@ const renderAgentDetail = (agent) => {
     healthParts.push(`latency: ${health.latency_ms}ms`);
   }
   if (health.error) healthParts.push(`error: ${health.error}`);
-  healthRow.textContent = healthParts.length ? healthParts.join(" · ") : "n/a";
+  healthRow.textContent = healthParts.length ? healthParts.join(" | ") : "n/a";
 
   const statsTitle = document.createElement("h4");
   statsTitle.textContent = "Usage";
@@ -1800,7 +1841,7 @@ const renderAgentDetail = (agent) => {
   const statsParts = [];
   if (stats.runs !== undefined) statsParts.push(`runs: ${stats.runs}`);
   if (stats.last_used) statsParts.push(`last: ${stats.last_used}`);
-  statsRow.textContent = statsParts.length ? statsParts.join(" · ") : "n/a";
+  statsRow.textContent = statsParts.length ? statsParts.join(" | ") : "n/a";
 
   const endpointTitle = document.createElement("h4");
   endpointTitle.textContent = "Endpoint";
@@ -1870,7 +1911,7 @@ const renderSchemaTable = (schema) => {
 
   const thead = document.createElement("thead");
   const headRow = document.createElement("tr");
-  ["字段", "类型", "必填", "描述"].forEach((label) => {
+  ["Field", "Type", "Required", "Description"].forEach((label) => {
     const th = document.createElement("th");
     th.textContent = label;
     headRow.appendChild(th);
@@ -1889,14 +1930,14 @@ const renderSchemaTable = (schema) => {
     }
 
     const nameCell = document.createElement("td");
-    const indent = level > 0 ? `${"  ".repeat(level)}↳ ` : "";
+    const indent = level > 0 ? `${"  ".repeat(level)}->` : "";
 
     // Check if this is a nested object
     const isObject = value?.type === "object" && value?.properties;
     if (isObject) {
       const expandBtn = document.createElement("span");
       expandBtn.className = "expand-btn";
-      expandBtn.textContent = "▶ ";
+      expandBtn.textContent = ">";
       expandBtn.style.cursor = "pointer";
       expandBtn.style.userSelect = "none";
 
@@ -1908,7 +1949,7 @@ const renderSchemaTable = (schema) => {
       expandBtn.addEventListener("click", (e) => {
         e.stopPropagation();
         isExpanded = !isExpanded;
-        expandBtn.textContent = isExpanded ? "▼ " : "▶ ";
+        expandBtn.textContent = isExpanded ? "v" : ">";
 
         // Toggle nested rows
         const nestedRows = tbody.querySelectorAll(`[data-parent="${parentPath}${key}"]`);
@@ -1970,7 +2011,7 @@ const renderSchemaTable = (schema) => {
 const renderToolDetail = (tool) => {
   if (!toolDetail) return;
   if (!tool) {
-    setToolDetailEmpty("选择一个 Tool 查看详情");
+    setToolDetailEmpty("Select a tool to view details.");
     return;
   }
 
@@ -1981,7 +2022,7 @@ const renderToolDetail = (tool) => {
 
   const icon = document.createElement("span");
   icon.className = "tool-detail-icon";
-  icon.textContent = tool.is_mcp ? "🔌" : "🔧";
+  icon.textContent = tool.is_mcp ? "[mcp]" : "[tool]";
 
   const title = document.createElement("h3");
   title.textContent = tool.name || "tool";
@@ -1993,7 +2034,7 @@ const renderToolDetail = (tool) => {
   sub.className = "agent-sub";
   const scope = tool.scope || tool.identifier?.scope || "n/a";
   const server = tool.server || tool.identifier?.server || "n/a";
-  sub.textContent = `scope: ${scope} · server: ${server}`;
+  sub.textContent = `scope: ${scope} | server: ${server}`;
 
   const tagRow = document.createElement("div");
   tagRow.className = "tag-row";
@@ -2012,9 +2053,9 @@ const renderToolDetail = (tool) => {
   }
 
   const descTitle = document.createElement("h4");
-  descTitle.textContent = "描述";
+  descTitle.textContent = "Description";
   const desc = document.createElement("p");
-  desc.textContent = tool.description || "暂无描述";
+  desc.textContent = tool.description || "No description";
 
   const usageTitle = document.createElement("h4");
   usageTitle.textContent = "Usage";
@@ -2023,7 +2064,7 @@ const renderToolDetail = (tool) => {
   const parts = [];
   if (stats.workflows !== undefined) parts.push(`workflows: ${stats.workflows}`);
   if (stats.last_used) parts.push(`last: ${stats.last_used}`);
-  usageRow.textContent = parts.length ? parts.join(" · ") : "n/a";
+  usageRow.textContent = parts.length ? parts.join(" | ") : "n/a";
 
   const schemaTitle = document.createElement("h4");
   schemaTitle.textContent = "Args Schema";
@@ -2096,7 +2137,7 @@ const renderMcpConfig = () => {
     if (server.transport) parts.push(`transport: ${server.transport}`);
     if (server.url) parts.push(`url: ${server.url}`);
     if (server.command) parts.push(`command: ${server.command}`);
-    meta.textContent = parts.join(" · ");
+    meta.textContent = parts.join(" | ");
     item.appendChild(title);
     item.appendChild(meta);
     mcpList.appendChild(item);
@@ -2175,7 +2216,7 @@ const renderTools = () => {
 
     const icon = document.createElement("span");
     icon.className = "tool-icon";
-    icon.textContent = tool.is_mcp ? "🔌" : "🔧";
+    icon.textContent = tool.is_mcp ? "[mcp]" : "[tool]";
 
     const title = document.createElement("h4");
     title.textContent = tool.name;
@@ -2205,7 +2246,7 @@ const renderTools = () => {
     const metaParts = [];
     if (stats.workflows !== undefined) metaParts.push(`workflows: ${stats.workflows}`);
     if (stats.last_used) metaParts.push(`last: ${formatDate(stats.last_used)}`);
-    meta.textContent = metaParts.length ? metaParts.join(" · ") : "workflows: 0";
+    meta.textContent = metaParts.length ? metaParts.join(" | ") : "workflows: 0";
 
     card.appendChild(header);
     card.appendChild(desc);
@@ -2231,7 +2272,7 @@ const selectTool = async (tool) => {
     const detail = await res.json();
     renderToolDetail(detail);
   } catch (err) {
-    setToolDetailEmpty("加载失败");
+    setToolDetailEmpty("Failed to load tool detail.");
   }
 };
 
@@ -2306,10 +2347,10 @@ const renderAgents = (agents) => {
     const sub = document.createElement("div");
     sub.className = "agent-sub";
     const userLabel = agent.user_id === "share" ? "default" : "user";
-    const sourceLabel = agent.source ? ` · ${agent.source}` : "";
-    const nick = agent.nick_name ? `${agent.nick_name} · ` : "";
+  const sourceLabel = agent.source ? ` | ${agent.source}` : "";
+  const nick = agent.nick_name ? `${agent.nick_name} | ` : "";
     const toolCount = Array.isArray(agent.selected_tools) ? agent.selected_tools.length : 0;
-    const toolLabel = toolCount > 0 ? ` · ${toolCount} tools` : "";
+    const toolLabel = toolCount > 0 ? ` | ${toolCount} tools` : "";
     sub.textContent = `${nick}${userLabel}${sourceLabel}${toolLabel}`;
 
     titleWrap.appendChild(title);
@@ -2318,7 +2359,7 @@ const renderAgents = (agents) => {
     const selectBtn = document.createElement("button");
     selectBtn.className = "select-toggle";
     const isSelected = selectedCoorAgents.has(agent.agent_name);
-    selectBtn.textContent = isSelected ? "✓" : "+";
+    selectBtn.textContent = isSelected ? "[x]" : "+";
     if (isSelected) selectBtn.classList.add("active");
     selectBtn.addEventListener("click", (event) => {
       event.stopPropagation();
@@ -2424,20 +2465,20 @@ const fetchAgents = async () => {
     latestAgents = combined;
     if (!combined.length) {
       setListState(agentsList, "No agents found.", "empty");
-      setAgentDetailEmpty("暂无 Agent 详情");
+      setAgentDetailEmpty("No agent details available.");
       return;
     }
 
     renderAgents(combined);
   } catch (err) {
     setListState(agentsList, "Failed to load agents.", "error");
-    setAgentDetailEmpty("加载失败");
+    setAgentDetailEmpty("Failed to load agents.");
   }
 };
 
 const fetchTools = async () => {
   setListState(toolsList, "Loading...", "loading");
-  setToolDetailEmpty("选择一个 Tool 查看详情");
+  setToolDetailEmpty("Select a tool to view details.");
   try {
     const userId = userIdInput ? userIdInput.value.trim() : "";
     const statsUrl = buildToolsStatsUrl(userId);
@@ -2484,7 +2525,7 @@ const fetchTools = async () => {
 const fetchWorkflows = async () => {
   const userId = userIdInput.value.trim();
   if (!userId) {
-    setListState(workflowsList, "请先输入 user_id", "empty");
+    setListState(workflowsList, "Please enter a user_id first.", "empty");
     workflowsTotal = 0;
     workflowsTotalPages = 0;
     updateWorkflowsPagination();
@@ -2530,7 +2571,7 @@ const fetchWorkflows = async () => {
       idSpan.textContent = `ID: ${wf.workflow_id}`;
 
       const versionSpan = document.createElement("span");
-      versionSpan.textContent = `lap: ${wf.lap} · version: ${wf.version}`;
+      versionSpan.textContent = `lap: ${wf.lap} | version: ${wf.version}`;
 
       metaEl.appendChild(idSpan);
       metaEl.appendChild(versionSpan);
@@ -2563,7 +2604,7 @@ const fetchWorkflows = async () => {
 const formatWorkflowTitle = (workflow) => {
   const taskName = getWorkflowTaskName(workflow);
   const date = getWorkflowDate(workflow);
-  if (date && taskName) return `${date} · ${taskName}`;
+  if (date && taskName) return `${date} | ${taskName}`;
   if (date) return date;
   if (taskName) return taskName;
   return workflow.workflow_id || "workflow";
@@ -2624,7 +2665,7 @@ const selectWorkflow = async (workflowId) => {
     const detail = await detailRes.json();
     workflowDetail.textContent = JSON.stringify(detail, null, 2);
   } else {
-    workflowDetail.textContent = "加载失败";
+    workflowDetail.textContent = "Failed to load workflow detail.";
   }
 
   const mermaidRes = await fetch(`/api/workflows/${encodeURIComponent(workflowId)}/mermaid`);
@@ -2641,7 +2682,7 @@ const selectWorkflow = async (workflowId) => {
       mermaidContainer.textContent = "Mermaid render failed.";
     }
   } else {
-    mermaidContainer.textContent = "暂无可视化";
+    mermaidContainer.textContent = "No graph available.";
   }
 };
 
@@ -2674,8 +2715,8 @@ const exportOutputTxt = () => {
       parts.push("");
     });
   };
-  appendSection("规划日志", planningOutputBlocks);
-  appendSection("执行日志", executionOutputBlocks);
+  appendSection("Planning log", planningOutputBlocks);
+  appendSection("Execution log", executionOutputBlocks);
   const text = parts.join("\n");
   const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
   const url = URL.createObjectURL(blob);
@@ -2716,14 +2757,14 @@ const runSelectedHealthCheck = async () => {
         if (active) renderAgentDetail(active);
       }
     }
-    healthCheckSelectedBtn.textContent = "✓ Done";
+    healthCheckSelectedBtn.textContent = "[ok] Done";
     setTimeout(() => {
       healthCheckSelectedBtn.textContent = prevText;
       healthCheckSelectedBtn.disabled = false;
     }, 1500);
   } catch (err) {
     console.error("Health check failed:", err);
-    healthCheckSelectedBtn.textContent = "✗ Failed";
+    healthCheckSelectedBtn.textContent = "[x] Failed";
     setTimeout(() => {
       healthCheckSelectedBtn.textContent = prevText;
       healthCheckSelectedBtn.disabled = false;
@@ -2749,7 +2790,7 @@ if (mcpToggle && mcpContent) {
   mcpToggle.addEventListener("click", () => {
     const isCollapsed = mcpContent.classList.toggle("collapsed");
     mcpToggle.classList.toggle("collapsed", isCollapsed);
-    mcpToggle.textContent = isCollapsed ? "▶" : "▼";
+    mcpToggle.textContent = isCollapsed ? ">" : "v";
   });
 }
 
@@ -2869,7 +2910,7 @@ if (healthCheckSelectedBtn) {
 updateAutoScrollBtn();
 setStatus("Ready", true);
 updateCoorCount();
-setAgentDetailEmpty("选择一个 Agent 查看详情");
+setAgentDetailEmpty("Select an agent to view details.");
 
 // ============================================================
 // Tasks panel
@@ -2915,9 +2956,9 @@ const statusBadgeClass = (status) => {
 
 const executionPhaseLabel = (phase) => {
   const labels = {
-    'initial_planning': '初次规划',
-    're_planning': '重规划',
-    'execution': '执行'
+    'initial_planning': 'Initial planning',
+    're_planning': 'Re-planning',
+    'execution': 'Execution'
   };
   return labels[phase] || phase;
 };
@@ -2971,7 +3012,7 @@ const fetchTasks = async () => {
 
       const meta = document.createElement("div");
       meta.className = "task-item-meta";
-      meta.textContent = `${formatDateTime(task.created_at)} · ${task.step_count} steps`;
+      meta.textContent = `${formatDateTime(task.created_at)} | ${task.step_count} steps`;
 
       const wfId = document.createElement("div");
       wfId.className = "task-item-wfid";
@@ -3059,7 +3100,7 @@ const loadTaskCheckpoints = async (taskId) => {
 
       const nextEl = document.createElement("span");
       nextEl.className = "checkpoint-next";
-      nextEl.textContent = cp.next_node ? `→ ${cp.next_node}` : "";
+      nextEl.textContent = cp.next_node ? `-> ${cp.next_node}` : "";
 
       const tsEl = document.createElement("span");
       tsEl.className = "checkpoint-ts";
@@ -3077,7 +3118,7 @@ const loadTaskCheckpoints = async (taskId) => {
       // Collapse toggle
       const cpCollapseToggle = document.createElement("span");
       cpCollapseToggle.className = "cp-collapse-toggle";
-      cpCollapseToggle.innerHTML = '<span class="icon">▼</span> JSON';
+      cpCollapseToggle.innerHTML = '<span class="icon">></span> JSON';
 
       // Details panel - initially empty, will load on expand
       const detailsDiv = document.createElement("div");
@@ -3133,8 +3174,8 @@ const loadTaskLog = async (taskId) => {
 
     logMeta.innerHTML = `
       <div class="log-meta-item"><b>Task ID</b><span>${log.task_id}</span></div>
-      <div class="log-meta-item"><b>执行阶段</b><span class="phase-badge">${executionPhaseLabel(log.execution_phase)}</span></div>
-      <div class="log-meta-item"><b>任务状态</b><span class="status-badge ${statusBadgeClass(log.status)}">${log.status}</span></div>
+      <div class="log-meta-item"><b>Execution phase</b><span class="phase-badge">${executionPhaseLabel(log.execution_phase)}</span></div>
+      <div class="log-meta-item"><b>Task status</b><span class="status-badge ${statusBadgeClass(log.status)}">${log.status}</span></div>
       <div class="log-meta-item"><b>Created</b><span>${formatDateTime(log.created_at)}</span></div>
       <div class="log-meta-item"><b>Finished</b><span>${formatDateTime(log.finished_at) || "-"}</span></div>
       ${log.error ? `<div class="log-meta-item error-text"><b>Error</b><span>${log.error}</span></div>` : ""}
@@ -3153,7 +3194,7 @@ const loadTaskLog = async (taskId) => {
 
       const headerEl = document.createElement("div");
       headerEl.className = "log-entry-header";
-      // 点击整个 header 切换展开/折叠
+      // Click the full header to toggle expand/collapse
       headerEl.addEventListener("click", () => {
         entryEl.classList.toggle("expanded");
       });
@@ -3161,7 +3202,7 @@ const loadTaskLog = async (taskId) => {
       // Collapse toggle icon
       const collapseIcon = document.createElement("span");
       collapseIcon.className = "collapse-icon";
-      collapseIcon.textContent = "▼";
+      collapseIcon.textContent = ">";
 
       const stepSpan = document.createElement("span");
       stepSpan.className = "step-badge";
@@ -3169,9 +3210,9 @@ const loadTaskLog = async (taskId) => {
 
       const roleSpan = document.createElement("span");
       roleSpan.className = "log-role";
-      // Display agent_proxy with sub_agent_name as: agent_proxy【researcher】
+      // Display agent_proxy with sub_agent_name as: agent_proxy [researcher]
       if (entry.node_name === "agent_proxy" && entry.sub_agent_name) {
-        roleSpan.textContent = `${entry.node_name}【${entry.sub_agent_name}】`;
+        roleSpan.textContent = `${entry.node_name} [${entry.sub_agent_name}]`;
       } else {
         roleSpan.textContent = entry.role || entry.node_name;
       }
@@ -3197,8 +3238,8 @@ const loadTaskLog = async (taskId) => {
       entryEl.appendChild(headerEl);
       entryEl.appendChild(contentEl);
       
-      // 默认全部折叠（不添加 expanded 类）
-      // 不需要任何额外操作，CSS 默认 display:none
+      // Default to collapsed (do not add expanded class)
+      // No extra action needed because CSS defaults to display:none
       
       logHistory.appendChild(entryEl);
     });
@@ -3369,7 +3410,7 @@ clearResumeOutputBtn.addEventListener("click", () => {
   resumeOutput.textContent = "";
 });
 
-// ─── S-ABAC Demo: User role selector sync ──────────────────────
+// S-ABAC Demo: User role selector sync
 (function() {
   const demoRole = document.getElementById("demoUserRole");
   const userIdInput = document.getElementById("userId");
@@ -3392,7 +3433,7 @@ clearResumeOutputBtn.addEventListener("click", () => {
   }
 })();
 
-// ─── S-ABAC Permission Summary for Run Tab ──────────────────────
+// S-ABAC Permission Summary for Run Tab
 let currentUserPrecheck = null;
 
 async function loadPermissionSummary(userId) {
@@ -3426,7 +3467,7 @@ function renderPermissionSummary(precheck) {
 
   summary.innerHTML = `
     <div class="perm-summary-row">
-      <span class="perm-summary-icon">${profile.icon || '👤'}</span>
+      <span class="perm-summary-icon">${profile.icon || '[user]'}</span>
       <span class="perm-summary-name">${escapeHtml(profile.display_name || precheck.user_id)}</span>
       <span class="tag accent">${escapeHtml(profile.role || '?')}</span>
       <span class="tag">CL${profile.clearance_level || 0}</span>
@@ -3434,27 +3475,27 @@ function renderPermissionSummary(precheck) {
     <div class="perm-summary-stats">
       <div class="perm-stat green">
         <span class="perm-stat-num">${accessible.length}</span>
-        <span class="perm-stat-label">可直接访问</span>
+        <span class="perm-stat-label">Directly accessible</span>
       </div>
       <div class="perm-stat red">
         <span class="perm-stat-num">${blocked.length}</span>
-        <span class="perm-stat-label">无权访问</span>
+        <span class="perm-stat-label">Blocked</span>
       </div>
     </div>
     ${blocked.length > 0 ? `
     <div class="perm-blocked-list">
-      <div class="perm-blocked-title">🚫 无权访问的工具：</div>
+      <div class="perm-blocked-title">Blocked tools:</div>
       ${blocked.map(([name, info]) => `
         <div class="perm-blocked-item">
           <span class="perm-blocked-name">${escapeHtml(name)}</span>
-          <span class="perm-blocked-reason">${escapeHtml(info.blocked_reason || '权限不足')}</span>
+          <span class="perm-blocked-reason">${escapeHtml(info.blocked_reason || 'Insufficient permission')}</span>
         </div>
       `).join('')}
     </div>` : ''}
   `;
 }
 
-// ─── Update Agents Panel: filter by current user permissions ────
+// Update Agents Panel: filter by current user permissions
 const originalRenderAgents = renderAgents;
 renderAgents = function(agents) {
   if (currentUserPrecheck && currentUserPrecheck.agent_access) {
@@ -3475,11 +3516,11 @@ const _origCreateAgentCard = function(card, agent) {
   if (agent._unavailable_to_user) {
     card.style.opacity = "0.45";
     card.style.pointerEvents = "none";
-    card.title = "此 Agent 对当前用户不可用";
+    card.title = "This agent is unavailable for the current user.";
     const badge = document.createElement("span");
     badge.className = "tag warn";
     badge.style.cssText = "position:absolute;top:4px;right:4px;font-size:10px;";
-    badge.textContent = "🔒 不可用";
+    badge.textContent = "[no access]";
     card.style.position = "relative";
     card.appendChild(badge);
   }
@@ -3498,7 +3539,7 @@ const _origCreateAgentCard = function(card, agent) {
           if (access && !access.available_to_user) {
             card.style.opacity = "0.45";
             card.style.pointerEvents = "none";
-            card.title = "此 Agent 对当前用户不可用";
+            card.title = "This agent is unavailable for the current user.";
           }
         }
       });
@@ -3507,7 +3548,7 @@ const _origCreateAgentCard = function(card, agent) {
   };
 })();
 
-// ─── Update Tools Panel: show per-user access status ────────────
+// Update Tools Panel: show per-user access status
 (function() {
   const origRender = renderTools;
   renderTools = function() {
@@ -3520,13 +3561,13 @@ const _origCreateAgentCard = function(card, agent) {
         if (!info) return;
         if (!info.can_access) {
           card.style.opacity = "0.45";
-          card.title = info.blocked_reason || "权限不足";
+          card.title = info.blocked_reason || "Insufficient permission";
           let badge = card.querySelector(".tool-perm-badge");
           if (!badge) {
             badge = document.createElement("span");
             badge.className = "tag warn tool-perm-badge";
             badge.style.cssText = "position:absolute;top:4px;right:4px;font-size:10px;";
-            badge.textContent = "🚫 无权";
+            badge.textContent = "[blocked]";
             card.style.position = "relative";
             card.appendChild(badge);
           }

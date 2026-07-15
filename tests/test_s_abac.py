@@ -2,12 +2,16 @@ import shutil
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
+from collections import deque
 
+import src.security.scenario_analyzer as scenario_analyzer
 from src.security.approval import ApprovalStore
 from src.security.context import SecurityContextBuilder, UnknownSecurityUserError
 from src.security.enforcement import PermissionDeniedError, enforce_tool_call
 from src.security.policy import Action, Object, PolicyEngine, Scenario, Subject
 from src.security.scenario_analyzer import analyze_object_fit, analyze_task_context
+from src.workflow.coor_task import _extract_plan_steps, _fallback_plan_steps
+from src.workflow.cache import WorkflowCache
 
 
 def test_policy_engine_allows_low_sensitivity_by_clearance():
@@ -163,7 +167,7 @@ def test_policy_engine_irreversible_operation_requires_review():
     assert result["human_review_required"] is True
 
 
-def test_policy_engine_denies_mismatched_task_scenario():
+def test_policy_engine_denies_strong_mismatched_task_scenario():
     engine = PolicyEngine(policies=[])
     result = engine.evaluate(
         Subject(
@@ -198,7 +202,50 @@ def test_policy_engine_denies_mismatched_task_scenario():
         Action("execute", {"action_type": "call"}),
     )
     assert result["allowed"] is False
-    assert "capabilities" in result["reason"] or "tags" in result["reason"] or "Scenario" in result["reason"]
+    assert "capabilities" in result["reason"] or "object provides" in result["reason"]
+
+
+def test_policy_engine_uncertain_high_sensitivity_requires_review():
+    engine = PolicyEngine(policies=[])
+    result = engine.evaluate(
+        Subject(
+            "user",
+            "hr_manager",
+            {
+                "role": "HRAgent",
+                "job_role": "hr_manager",
+                "clearance_level": 3,
+                "grants": ["salary_read"],
+            },
+        ),
+        Object(
+            "tool",
+            "remote_salary_info_tool",
+            {
+                "sensitivity": "HIGH",
+                "allowed_job_roles": ["hr_manager"],
+                "expected_capabilities": ["HR"],
+                "scenario_tags": ["salary_query"],
+                "allowed_operation_modes": ["call", "read"],
+            },
+        ),
+        Scenario(
+            task_scenario={
+                "task_type": "HR",
+                "risk_profile": "LOW",
+                "scenario_tags": ["general"],
+                "expected_capabilities": ["General"],
+                "scenario_fit_result": {
+                    "fit": "uncertain",
+                    "reason": "Scenario evidence is weak",
+                },
+            }
+        ),
+        Action("execute", {"action_type": "call"}),
+    )
+    assert result["allowed"] is False
+    assert result["human_review_required"] is True
+    assert result["decision"] == "REVIEW_REQUIRED"
 
 
 def test_approval_store_approve_and_consume_once():
@@ -308,6 +355,29 @@ def test_scenario_analyzer_detects_object_fit_mismatch():
     assert fit["fit"] == "mismatch"
 
 
+def test_scenario_analyzer_keeps_weak_overlap_uncertain():
+    fit = __import__("asyncio").run(
+        analyze_object_fit(
+            "请确认并执行当前计划",
+            object_id="RemoteHRAssistantAgent",
+            object_type="agent",
+            object_attrs={
+                "capability_domain": "HR",
+                "department_domain": "HR",
+                "expected_capabilities": ["HR"],
+                "scenario_tags": ["employee_info", "salary_query"],
+                "sensitivity": "HIGH",
+            },
+            task_profile={
+                "task_type": "GENERAL",
+                "expected_capabilities": ["General"],
+                "scenario_tags": ["general"],
+            },
+        )
+    )
+    assert fit["fit"] in {"uncertain", "mismatch"}
+
+
 def test_scenario_from_context_prefers_task_profile_over_runtime_text():
     context = SimpleNamespace(
         workflow_mode="execution",
@@ -338,6 +408,31 @@ def test_subject_for_unknown_user_raises_explicit_error():
         assert "Unknown S-ABAC demo user" in str(exc)
     else:
         raise AssertionError("Expected UnknownSecurityUserError for unknown demo user")
+
+
+def test_production_state_should_keep_original_hr_task_profile():
+    state = {
+        "workflow_mode": "production",
+        "USER_QUERY": "确认执行，按当前计划执行。",
+        "task_profile": {
+            "task_type": "HR",
+            "business_goal": "查询员工 E001 的工资信息",
+            "data_scope": "targeted",
+            "operation_mode": "read",
+            "scenario_tags": ["salary_query", "employee_info"],
+            "expected_capabilities": ["HR"],
+            "risk_profile": "LOW",
+        },
+        "business_goal": "查询员工 E001 的工资信息",
+        "scenario_tags": ["salary_query", "employee_info"],
+        "expected_capabilities": ["HR"],
+        "operation_mode": "read",
+        "risk_profile": "LOW",
+    }
+    scenario = SecurityContextBuilder.scenario_from_context(SimpleNamespace(metadata=state, workflow_mode="production"))
+    assert scenario.task_scenario["task_type"] == "HR"
+    assert scenario.task_scenario["operation_mode"] == "read"
+    assert scenario.task_scenario["business_goal"] == "查询员工 E001 的工资信息"
 
 
 def test_enforcement_populates_scenario_fit_result_in_context():
@@ -427,3 +522,221 @@ def test_permission_payload_contains_scenario_fit_result():
         assert scenario_fit["fit"] in {"match", "uncertain"}
     else:
         raise AssertionError("Expected PermissionDeniedError")
+
+
+def test_scenario_analyzer_preserves_hr_profile_over_llm_general(monkeypatch):
+    class DummyStructured:
+        async def ainvoke(self, _messages):
+            class Result:
+                def model_dump(self):
+                    return {
+                        "task_type": "GENERAL",
+                        "business_goal": "confirm and execute plan",
+                        "data_scope": "targeted",
+                        "operation_mode": "read",
+                        "scenario_tags": ["general"],
+                        "expected_capabilities": ["General"],
+                        "risk_profile": "LOW",
+                        "reason": "llm downgrade",
+                    }
+
+            return Result()
+
+    class DummyLLM:
+        def with_structured_output(self, _model):
+            return DummyStructured()
+
+    monkeypatch.setattr(scenario_analyzer, "get_llm_by_type", lambda *_args, **_kwargs: DummyLLM())
+
+    profile = __import__("asyncio").run(analyze_task_context("查询员工 E001 的工资信息"))
+    assert profile["task_type"] == "HR"
+    assert "HR" in profile["expected_capabilities"]
+    assert "salary_query" in profile["scenario_tags"]
+
+
+def test_scenario_analyzer_preserves_match_over_llm_mismatch():
+    fallback = {
+        "fit": "match",
+        "confidence": 0.6,
+        "reason": "Capability domain matches task profile",
+    }
+    llm_result = {
+        "fit": "mismatch",
+        "confidence": 0.91,
+        "reason": "Execution-focused wording does not match HR domain",
+    }
+
+    merged = scenario_analyzer._merge_fit_result(fallback, llm_result)
+    assert merged["fit"] == "match"
+    assert "Capability domain matches" in merged["reason"]
+
+
+def test_scenario_analyzer_promotes_uncertain_positive_reason_to_match():
+    fallback = {
+        "fit": "uncertain",
+        "confidence": 0.35,
+        "reason": "heuristic fallback",
+    }
+    llm_result = {
+        "fit": "uncertain",
+        "confidence": 0.5,
+        "reason": "The task scenario aligns with the target agent's responsibility domain.",
+    }
+
+    merged = scenario_analyzer._merge_fit_result(fallback, llm_result)
+    assert merged["fit"] == "match"
+
+
+def test_enforcement_uses_business_goal_for_object_fit_query():
+    class DummyContext:
+        def __init__(self):
+            self.user_id = "hr_manager"
+            self.workflow_id = "wf-hr-1"
+            self.workflow_mode = "production"
+            self.metadata = {
+                "USER_QUERY": "确认并执行既定计划",
+                "business_goal": "查询员工 E001 的工资信息",
+                "task_profile": {
+                    "task_type": "HR",
+                    "business_goal": "查询员工 E001 的工资信息",
+                    "expected_capabilities": ["HR"],
+                    "scenario_tags": ["salary_query", "employee_info"],
+                    "operation_mode": "read",
+                    "risk_profile": "LOW",
+                },
+                "scenario_fit_cache": {},
+                "operation_mode": "read",
+                "scenario_tags": ["salary_query", "employee_info"],
+                "expected_capabilities": ["HR"],
+                "risk_profile": "LOW",
+                "network_zone": "internal",
+                "time": "working_hours",
+            }
+
+    captured = {}
+
+    async def fake_analyze_object_fit(user_query, **kwargs):
+        captured["user_query"] = user_query
+        return {
+            "fit": "match",
+            "confidence": 0.7,
+            "reason": "hr scenario match",
+        }
+
+    original = scenario_analyzer.analyze_object_fit
+    import src.security.enforcement as enforcement_module
+    original_enforcement = enforcement_module.analyze_object_fit
+    scenario_analyzer.analyze_object_fit = fake_analyze_object_fit
+    enforcement_module.analyze_object_fit = fake_analyze_object_fit
+    try:
+        context = DummyContext()
+        agent = SimpleNamespace(agent_name="RemoteHRAssistantAgent")
+        __import__("asyncio").run(
+            enforce_tool_call(
+                agent=agent,
+                tool_name="remote_salary_info_tool",
+                arguments={"employee_id": "E001"},
+                context=context,
+            )
+        )
+    finally:
+        scenario_analyzer.analyze_object_fit = original
+        enforcement_module.analyze_object_fit = original_enforcement
+
+    assert captured["user_query"] == "查询员工 E001 的工资信息"
+
+
+def test_scenario_from_context_prefers_original_user_query_for_execution():
+    context = SimpleNamespace(
+        workflow_mode="production",
+        metadata={
+            "USER_QUERY": "确认执行，按当前计划执行。",
+            "original_user_query": "查询员工 E001 的工资信息",
+            "execution_user_query": "确认执行，按当前计划执行。",
+            "task_profile": {
+                "task_type": "HR",
+                "business_goal": "查询员工 E001 的工资信息",
+                "data_scope": "targeted",
+                "operation_mode": "read",
+                "scenario_tags": ["salary_query", "employee_info"],
+                "expected_capabilities": ["HR"],
+                "risk_profile": "LOW",
+            },
+            "business_goal": "查询员工 E001 的工资信息",
+            "scenario_tags": ["salary_query", "employee_info"],
+            "expected_capabilities": ["HR"],
+            "operation_mode": "read",
+            "risk_profile": "LOW",
+        },
+    )
+    scenario = SecurityContextBuilder.scenario_from_context(context)
+    assert scenario.task_scenario["goal"] == "查询员工 E001 的工资信息"
+    assert scenario.task_scenario["business_goal"] == "查询员工 E001 的工资信息"
+    assert scenario.task_scenario["task_type"] == "HR"
+
+def test_fallback_plan_steps_generates_coder_step_for_engineering_task():
+    state = {
+        "task_type": "ENGINEERING",
+        "expected_capabilities": ["Engineering"],
+        "USER_QUERY": "写一个 Python 脚本，统计当前目录下所有 json 文件数量",
+        "TEAM_MEMBERS": ["coder", "researcher", "reporter"],
+    }
+
+    steps = _fallback_plan_steps(state)
+
+    assert steps is not None
+    assert len(steps) == 1
+    assert steps[0]["agent_name"] == "coder"
+    assert "python" in steps[0]["title"].lower() or "python" in steps[0]["description"].lower()
+
+
+def test_extract_plan_steps_accepts_empty_steps_array():
+    content = '{"new_agents_needed": [], "steps": []}'
+    steps = _extract_plan_steps(content)
+    assert steps == []
+
+
+def test_launch_init_cache_resets_old_planning_state():
+    cache_dir = Path(".pytest_tmp_workflow_cache_test")
+    if cache_dir.exists():
+        shutil.rmtree(cache_dir)
+    cache = WorkflowCache(cache_dir)
+    workflow_id = "engineer:test_reset"
+    user_id = "engineer"
+
+    cache.cache[workflow_id] = {
+        "workflow_id": workflow_id,
+        "mode": "launch",
+        "version": 1,
+        "lap": 1,
+        "user_input_messages": [{"role": "user", "content": "old"}],
+        "deep_thinking_mode": False,
+        "search_before_planning": False,
+        "coor_agents": [],
+        "planning_steps": [{"agent_name": "old_agent"}],
+        "graph": [{"name": "old_graph"}],
+        "nodes": {"old_agent": {"name": "old_agent"}},
+        "instruction_history": [],
+    }
+    cache.queue[workflow_id] = deque([{"name": "old_queue"}])
+    cache._lock_pool[user_id] = cache._lock_pool.get(user_id) or __import__("threading").Lock()
+
+    cache.init_cache(
+        user_id=user_id,
+        lap=2,
+        mode="launch",
+        workflow_id=workflow_id,
+        version=1,
+        user_input_messages=[{"role": "user", "content": "new"}],
+        deep_thinking_mode=False,
+        search_before_planning=False,
+        coor_agents=[],
+    )
+
+    workflow = cache.cache[workflow_id]
+    assert workflow["planning_steps"] == []
+    assert workflow["graph"] == []
+    assert workflow["nodes"] == {}
+    assert list(cache.queue.get(workflow_id, deque())) == []
+    if cache_dir.exists():
+        shutil.rmtree(cache_dir)
