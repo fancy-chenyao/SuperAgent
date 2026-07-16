@@ -27,6 +27,148 @@ def _normalize_list(value: Any) -> list[str]:
     return [str(value)]
 
 
+def _normalize_token(token: str) -> str:
+    return str(token or "").strip().lower()
+
+
+def _score_overlap(left: set[str], right: set[str]) -> float:
+    if not left or not right:
+        return 0.0
+    inter = left.intersection(right)
+    union = left.union(right)
+    if not union:
+        return 0.0
+    return len(inter) / len(union)
+
+
+def _coalesce_list(primary: Any, fallback: Any) -> list[str]:
+    primary_list = _normalize_list(primary)
+    return primary_list if primary_list else _normalize_list(fallback)
+
+
+def _merge_task_profile(fallback: Dict[str, Any], llm_result: Dict[str, Any]) -> Dict[str, Any]:
+    merged = fallback.copy()
+    merged.update(llm_result or {})
+
+    fallback_type = str(fallback.get("task_type") or "GENERAL").upper()
+    llm_type = str(merged.get("task_type") or fallback_type).upper()
+    fallback_caps = {item.lower() for item in _normalize_list(fallback.get("expected_capabilities"))}
+    llm_caps = {item.lower() for item in _normalize_list(merged.get("expected_capabilities"))}
+    fallback_tags = {item.lower() for item in _normalize_list(fallback.get("scenario_tags"))}
+    llm_tags = {item.lower() for item in _normalize_list(merged.get("scenario_tags"))}
+
+    # Do not allow the LLM to downgrade a strongly identified domain task
+    # back to GENERAL when the heuristic profile already found a specific domain.
+    if fallback_type != "GENERAL" and llm_type == "GENERAL":
+        merged["task_type"] = fallback_type
+        merged["expected_capabilities"] = _normalize_list(fallback.get("expected_capabilities"))
+        merged["scenario_tags"] = _normalize_list(fallback.get("scenario_tags"))
+        merged["business_goal"] = fallback.get("business_goal") or merged.get("business_goal") or ""
+        merged["operation_mode"] = fallback.get("operation_mode") or merged.get("operation_mode") or "read"
+        merged["data_scope"] = fallback.get("data_scope") or merged.get("data_scope") or "targeted"
+        merged["reason"] = "heuristic domain preserved over llm downgrade"
+        return merged
+
+    # If the LLM proposes a different domain with zero overlap, keep the heuristic
+    # domain and enrich only non-domain fields.
+    if (
+        fallback_type != "GENERAL"
+        and llm_type not in {"", fallback_type, "GENERAL"}
+        and fallback_caps
+        and llm_caps
+        and fallback_caps.isdisjoint(llm_caps)
+        and fallback_tags
+        and llm_tags
+        and fallback_tags.isdisjoint(llm_tags)
+    ):
+        merged["task_type"] = fallback_type
+        merged["expected_capabilities"] = _normalize_list(fallback.get("expected_capabilities"))
+        merged["scenario_tags"] = _normalize_list(fallback.get("scenario_tags"))
+        merged["business_goal"] = fallback.get("business_goal") or merged.get("business_goal") or ""
+        merged["reason"] = "heuristic domain preserved over conflicting llm result"
+        return merged
+
+    merged["scenario_tags"] = _coalesce_list(merged.get("scenario_tags"), fallback.get("scenario_tags"))
+    merged["expected_capabilities"] = _coalesce_list(
+        merged.get("expected_capabilities"),
+        fallback.get("expected_capabilities"),
+    )
+    merged["business_goal"] = merged.get("business_goal") or fallback.get("business_goal") or ""
+    merged["operation_mode"] = merged.get("operation_mode") or fallback.get("operation_mode") or "read"
+    merged["data_scope"] = merged.get("data_scope") or fallback.get("data_scope") or "targeted"
+    merged["risk_profile"] = str(merged.get("risk_profile") or fallback.get("risk_profile") or "LOW").upper()
+    merged["task_type"] = str(merged.get("task_type") or fallback_type).upper()
+    return merged
+
+
+def _merge_fit_result(fallback: Dict[str, Any], llm_result: Dict[str, Any]) -> Dict[str, Any]:
+    merged = fallback.copy()
+    merged.update(llm_result or {})
+
+    fallback_fit = str(fallback.get("fit") or "uncertain").lower()
+    llm_fit = str(merged.get("fit") or fallback_fit).lower()
+    fallback_reason = fallback.get("reason") or ""
+    merged_reason = str(merged.get("reason") or "")
+
+    positive_reason_tokens = (
+        "align",
+        "aligned",
+        "matches",
+        "match",
+        "correspond",
+        "corresponds",
+        "fits",
+        "fit the target",
+        "responsibility domain",
+        "domain match",
+    )
+    negative_reason_tokens = (
+        "does not align",
+        "do not align",
+        "inconsistent",
+        "mismatch",
+        "no overlap",
+        "not match",
+        "conflict",
+    )
+
+    # If the structured fit says uncertain but the natural-language reason is
+    # explicitly affirmative, prefer match unless heuristics already found a mismatch.
+    if (
+        llm_fit == "uncertain"
+        and fallback_fit != "mismatch"
+        and merged_reason
+        and any(token in merged_reason.lower() for token in positive_reason_tokens)
+        and not any(token in merged_reason.lower() for token in negative_reason_tokens)
+    ):
+        merged["fit"] = "match"
+        merged["confidence"] = max(float(merged.get("confidence", 0.5) or 0.5), 0.5)
+        return merged
+
+    # Preserve a strong heuristic mismatch/match signal over a weaker LLM override.
+    if fallback_fit in {"match", "mismatch"} and llm_fit == "uncertain":
+        merged["fit"] = fallback_fit
+        merged["reason"] = fallback_reason or merged.get("reason") or ""
+        merged["confidence"] = fallback.get("confidence", merged.get("confidence", 0.0))
+        return merged
+
+    # If heuristics already found a positive domain match, do not let the LLM
+    # flip it to mismatch based on execution-phase wording alone.
+    if fallback_fit == "match" and llm_fit == "mismatch":
+        merged["fit"] = "match"
+        merged["reason"] = fallback_reason or merged.get("reason") or ""
+        merged["confidence"] = max(float(fallback.get("confidence", 0.6) or 0.6), 0.6)
+        return merged
+
+    if fallback_fit == "mismatch" and llm_fit == "match":
+        merged["fit"] = "uncertain"
+        merged["reason"] = merged.get("reason") or fallback_reason or "Conflicting fit signals"
+        merged["confidence"] = min(float(merged.get("confidence", 0.35) or 0.35), 0.5)
+        return merged
+
+    return merged
+
+
 class TaskScenarioProfile(BaseModel):
     task_type: str = "GENERAL"
     business_goal: str = ""
@@ -140,41 +282,61 @@ def _heuristic_fit(
     object_attrs: Dict[str, Any],
 ) -> Dict[str, Any]:
     expected_capabilities = {
-        item.lower() for item in _normalize_list(task_profile.get("expected_capabilities"))
+        _normalize_token(item) for item in _normalize_list(task_profile.get("expected_capabilities"))
     }
-    scenario_tags = {item.lower() for item in _normalize_list(task_profile.get("scenario_tags"))}
+    scenario_tags = {
+        _normalize_token(item) for item in _normalize_list(task_profile.get("scenario_tags"))
+    }
     object_capabilities = {
-        item.lower() for item in _normalize_list(object_attrs.get("expected_capabilities"))
+        _normalize_token(item) for item in _normalize_list(object_attrs.get("expected_capabilities"))
     }
-    object_tags = {item.lower() for item in _normalize_list(object_attrs.get("scenario_tags"))}
+    object_tags = {
+        _normalize_token(item) for item in _normalize_list(object_attrs.get("scenario_tags"))
+    }
+    task_type = _normalize_token(task_profile.get("task_type"))
+    object_domain = _normalize_token(object_attrs.get("capability_domain"))
+    object_department = _normalize_token(object_attrs.get("department_domain"))
+    sensitivity = _normalize_token(object_attrs.get("sensitivity"))
+
+    cap_overlap = _score_overlap(expected_capabilities, object_capabilities)
+    tag_overlap = _score_overlap(scenario_tags, object_tags)
+    strong_cap_mismatch = bool(expected_capabilities and object_capabilities and cap_overlap == 0.0)
+    strong_tag_mismatch = bool(scenario_tags and object_tags and tag_overlap == 0.0)
 
     fit = "uncertain"
     reason = "Insufficient scenario information"
-    if expected_capabilities and object_capabilities:
-        if expected_capabilities.isdisjoint(object_capabilities):
-            fit = "mismatch"
-            reason = (
-                f"Task expects capabilities {sorted(expected_capabilities)}, "
-                f"but target {object_id} provides {sorted(object_capabilities)}"
-            )
-        else:
-            fit = "match"
-            reason = "Capability domain matches task profile"
 
-    if fit != "mismatch" and scenario_tags and object_tags:
-        if scenario_tags.isdisjoint(object_tags):
+    # Strong mismatch only when both structured signals disagree, or one signal
+    # disagrees and the target is high sensitivity with a clearly different domain.
+    if strong_cap_mismatch and strong_tag_mismatch:
+        fit = "mismatch"
+        reason = (
+            f"Task expects capabilities {sorted(expected_capabilities)} and tags {sorted(scenario_tags)}, "
+            f"but target {object_id} provides capabilities {sorted(object_capabilities)} and tags {sorted(object_tags)}"
+        )
+    elif strong_cap_mismatch and sensitivity in {"high", "critical"} and object_domain and task_type:
+        if object_domain != task_type and object_department != task_type:
             fit = "mismatch"
             reason = (
-                f"Task tags {sorted(scenario_tags)} do not align with target tags "
-                f"{sorted(object_tags)}"
+                f"High-sensitivity target {object_id} belongs to domain {object_domain or object_department}, "
+                f"while task type is {task_type} with capabilities {sorted(expected_capabilities)}"
             )
+    elif cap_overlap > 0.0 or tag_overlap > 0.0:
+        fit = "match"
+        if cap_overlap >= tag_overlap:
+            reason = "Capability domain matches task profile"
         else:
-            fit = "match"
             reason = "Scenario tags match target profile"
+    elif expected_capabilities or scenario_tags:
+        fit = "uncertain"
+        reason = (
+            f"Task profile does not provide strong overlap with target {object_id}; "
+            "keeping scenario decision conservative"
+        )
 
     return ScenarioFitProfile(
         fit=fit,
-        confidence=0.55 if fit == "match" else 0.85 if fit == "mismatch" else 0.25,
+        confidence=0.6 if fit == "match" else 0.8 if fit == "mismatch" else 0.35,
         reason=reason,
         suggested_agent_domains=_normalize_list(object_attrs.get("capability_domain")),
         suggested_tool_domains=_normalize_list(object_attrs.get("capability_domain")),
@@ -206,9 +368,8 @@ async def analyze_task_context(user_query: str, metadata: Optional[Dict[str, Any
         result = await structured.ainvoke(
             [SystemMessage(content=prompt), HumanMessage(content=user_msg)]
         )
-        merged = fallback.copy()
-        merged.update(result.model_dump() if hasattr(result, "model_dump") else dict(result))
-        return merged
+        raw = result.model_dump() if hasattr(result, "model_dump") else dict(result)
+        return _merge_task_profile(fallback, raw)
     except Exception:
         return fallback
 
@@ -247,8 +408,7 @@ async def analyze_object_fit(
         result = await structured.ainvoke(
             [SystemMessage(content=prompt), HumanMessage(content=user_msg)]
         )
-        merged = fallback.copy()
-        merged.update(result.model_dump() if hasattr(result, "model_dump") else dict(result))
-        return merged
+        raw = result.model_dump() if hasattr(result, "model_dump") else dict(result)
+        return _merge_fit_result(fallback, raw)
     except Exception:
         return fallback

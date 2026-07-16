@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 from dataclasses import asdict
 from typing import Any, Dict, Optional
 
@@ -46,7 +45,11 @@ async def _enrich_context_with_scenario_fit(
         return
 
     task_profile = metadata.get("task_profile", {})
-    user_query = metadata.get("USER_QUERY", metadata.get("user_query", ""))
+    user_query = (
+        task_profile.get("business_goal")
+        or metadata.get("business_goal")
+        or metadata.get("USER_QUERY", metadata.get("user_query", ""))
+    )
     cache = metadata.setdefault("scenario_fit_cache", {})
     cache_key = f"{object.object_type}:{object.id}"
 

@@ -161,7 +161,10 @@ class SecurityContextBuilder:
             task_profile = {}
 
         workflow_mode = getattr(context, "workflow_mode", None) or metadata.get("workflow_mode", "execution")
-        user_query = metadata.get("USER_QUERY", metadata.get("user_query", "workflow_execution"))
+        user_query = metadata.get(
+            "original_user_query",
+            metadata.get("USER_QUERY", metadata.get("user_query", "workflow_execution")),
+        )
         task_type = str(
             task_profile.get("task_type")
             or metadata.get("task_type")
@@ -294,6 +297,8 @@ class SecurityContextBuilder:
         if explicit:
             return str(explicit).upper()
         lowered = str(user_query).lower()
+        if any(token in lowered for token in ("python", "script", "json", "code", "program", "bash", "shell")):
+            return "ENGINEERING"
         if any(token in lowered for token in ("salary", "employee", "hr", "leave", "travel", "personnel", "income proof")):
             return "HR"
         if any(token in lowered for token in ("email", "notify", "notification", "message", "mail")):
@@ -313,6 +318,8 @@ class SecurityContextBuilder:
             return explicit
         lowered = str(user_query).lower()
         tags: list[str] = []
+        if any(token in lowered for token in ("python", "script", "json", "code", "program", "bash", "shell")):
+            tags.append("coding")
         if "salary" in lowered:
             tags.append("salary_query")
         if "employee" in lowered or "person" in lowered:
@@ -340,6 +347,7 @@ class SecurityContextBuilder:
             "RISK": ["Risk"],
             "DOCUMENT": ["Document"],
             "RESEARCH": ["Research"],
+            "ENGINEERING": ["Engineering"],
             "GENERAL": ["General"],
         }
         capabilities = mapping.get(task_type, ["General"])

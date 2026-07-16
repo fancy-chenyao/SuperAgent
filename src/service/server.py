@@ -59,6 +59,7 @@ class Server:
             stop_after_planner=getattr(request, "stop_after_planner", False),
             instruction=getattr(request, "instruction", None),
             instruction_history=getattr(request, "instruction_history", None),
+            original_user_query=getattr(request, "original_user_query", None),
         )
         async for res in response_stream:
             try:
@@ -108,6 +109,7 @@ class Server:
             stop_after_planner=getattr(request, "stop_after_planner", False),
             instruction=getattr(request, "instruction", None),
             instruction_history=getattr(request, "instruction_history", None),
+            original_user_query=getattr(request, "original_user_query", None),
         )
         async for res in response_stream:
             try:

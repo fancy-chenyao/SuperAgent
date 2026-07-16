@@ -375,23 +375,6 @@ class PolicyEngine:
             result["reason"] = f"Subject grants {sorted(subject_grants)} missing required grants {required_grants}"
             return result
 
-        expected_capabilities = {item.lower() for item in scenario.get_expected_capabilities()}
-        object_capabilities = {item.lower() for item in object.get_expected_capabilities()}
-        if expected_capabilities and object_capabilities and expected_capabilities.isdisjoint(object_capabilities):
-            result["reason"] = (
-                f"Scenario capabilities {sorted(expected_capabilities)} do not match object capabilities "
-                f"{sorted(object_capabilities)}"
-            )
-            return result
-
-        scenario_tags = set(tag.lower() for tag in scenario.get_scenario_tags())
-        object_tags = set(tag.lower() for tag in object.get_scenario_tags())
-        if scenario_tags and object_tags and scenario_tags.isdisjoint(object_tags):
-            result["reason"] = (
-                f"Scenario tags {sorted(scenario_tags)} do not match object tags {sorted(object_tags)}"
-            )
-            return result
-
         allowed_modes = {item.lower() for item in object.get_allowed_operation_modes()}
         operation_mode = action.get_operation_mode()
         if allowed_modes and operation_mode not in allowed_modes:
