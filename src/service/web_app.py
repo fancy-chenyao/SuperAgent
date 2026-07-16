@@ -418,45 +418,6 @@ def create_app() -> FastAPI:
             })
         return result
 
-    @app.get("/api/tools/{tool_name}")
-    async def get_tool_detail(tool_name: str):
-        await agent_manager.ensure_initialized()
-        registry = await ToolRegistry.get_instance()
-        tools = await registry.list_all_tools()
-        matches = []
-        for meta in tools:
-            identifier_name = meta.identifier.name
-            runtime_name = getattr(meta.tool, "name", "")
-            if identifier_name == tool_name or runtime_name == tool_name:
-                matches.append(meta)
-        if not matches:
-            raise HTTPException(status_code=404, detail="tool not found")
-
-        matches.sort(
-            key=lambda m: (
-                m.identifier.scope != "global",
-                m.identifier.server != "builtin",
-            )
-        )
-        meta = matches[0]
-        tool_obj = meta.tool
-        return {
-            "name": meta.identifier.name or getattr(tool_obj, "name", ""),
-            "description": meta.description or getattr(tool_obj, "description", ""),
-            "identifier": {
-                "scope": meta.identifier.scope,
-                "server": meta.identifier.server,
-                "name": meta.identifier.name,
-                "is_mcp": meta.identifier.is_mcp,
-            },
-            "scope": meta.identifier.scope,
-            "server": meta.identifier.server,
-            "version": meta.version,
-            "tags": meta.tags,
-            "is_mcp": meta.identifier.is_mcp,
-            "args_schema": _get_args_schema(tool_obj),
-        }
-
     @app.get("/api/tools/stats")
     async def get_tools_stats(user_id: Optional[str] = None, include_share: bool = True):
         project_root = get_project_root()
@@ -514,6 +475,45 @@ def create_app() -> FastAPI:
                 }
             )
         return {"servers": servers, "fingerprint": fingerprint}
+
+    @app.get("/api/tools/{tool_name}")
+    async def get_tool_detail(tool_name: str):
+        await agent_manager.ensure_initialized()
+        registry = await ToolRegistry.get_instance()
+        tools = await registry.list_all_tools()
+        matches = []
+        for meta in tools:
+            identifier_name = meta.identifier.name
+            runtime_name = getattr(meta.tool, "name", "")
+            if identifier_name == tool_name or runtime_name == tool_name:
+                matches.append(meta)
+        if not matches:
+            raise HTTPException(status_code=404, detail="tool not found")
+
+        matches.sort(
+            key=lambda m: (
+                m.identifier.scope != "global",
+                m.identifier.server != "builtin",
+            )
+        )
+        meta = matches[0]
+        tool_obj = meta.tool
+        return {
+            "name": meta.identifier.name or getattr(tool_obj, "name", ""),
+            "description": meta.description or getattr(tool_obj, "description", ""),
+            "identifier": {
+                "scope": meta.identifier.scope,
+                "server": meta.identifier.server,
+                "name": meta.identifier.name,
+                "is_mcp": meta.identifier.is_mcp,
+            },
+            "scope": meta.identifier.scope,
+            "server": meta.identifier.server,
+            "version": meta.version,
+            "tags": meta.tags,
+            "is_mcp": meta.identifier.is_mcp,
+            "args_schema": _get_args_schema(tool_obj),
+        }
 
     @app.get("/api/workflows")
     async def list_workflows(

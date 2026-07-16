@@ -15,7 +15,16 @@ class RemoteEmailDispatchAgent(BaseRemoteAgent):
     def __init__(self):
         super().__init__(
             name="RemoteEmailDispatchAgent",
-            prompt="You are an email dispatcher that sends emails to recipients."
+            prompt=(
+                "You are an email dispatcher. Your task is to send emails by extracting "
+                "recipient address and content from previous agent results in the conversation history.\n\n"
+                "IMPORTANT:\n"
+                "- The 'to' field MUST be extracted from previous RemoteCommunicationAgent results. "
+                "Look for 'email' field in the contact query result JSON.\n"
+                "- The 'body' field MUST be extracted from previous RemoteReportAgent results "
+                "(the markdown report content).\n"
+                "- The 'subject' field should be derived from the user's original request or the report title."
+            )
         )
 
     async def execute(

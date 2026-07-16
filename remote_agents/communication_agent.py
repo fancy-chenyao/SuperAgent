@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Communication agent for handling contact information and email sending."""
+"""Communication agent for handling contact information queries."""
 
 from typing import Any, Dict, List
 from .base_agent import BaseRemoteAgent
@@ -9,12 +9,12 @@ logger = logging.getLogger(__name__)
 
 
 class RemoteCommunicationAgent(BaseRemoteAgent):
-    """Remote communication agent for managing contacts and sending emails."""
+    """Remote communication agent for querying contact information."""
 
     def __init__(self):
         super().__init__(
             name="RemoteCommunicationAgent",
-            prompt="You are a professional communication officer. Your task is to query contact information and send emails to relevant personnel."
+            prompt="You are a professional communication officer. Your task is to query contact information for personnel."
         )
 
     async def execute(
@@ -25,7 +25,7 @@ class RemoteCommunicationAgent(BaseRemoteAgent):
         parameter_extractor: Any
     ) -> Dict[str, Any]:
         """
-        Execute the communication agent.
+        Execute the communication agent - query contact information.
 
         Args:
             tools: List of tool definitions
@@ -38,9 +38,7 @@ class RemoteCommunicationAgent(BaseRemoteAgent):
         """
         logger.info(f"Executing RemoteCommunicationAgent with {len(tools)} tools")
 
-        # 提取工具参数
         if len(tools) == 1:
-            # 单个工具，直接提取参数
             tool = tools[0]
             parameters = await parameter_extractor.extract(
                 self.name,
@@ -50,7 +48,6 @@ class RemoteCommunicationAgent(BaseRemoteAgent):
             )
             logger.info(f"Extracted parameters: {parameters}")
 
-            # 调用工具
             result = await self.call_tool(
                 tool_name=tool["name"],
                 arguments=parameters
@@ -58,11 +55,10 @@ class RemoteCommunicationAgent(BaseRemoteAgent):
 
             return {
                 "status": "success",
-                "message": "操作成功",
+                "message": "查询成功",
                 "result": result
             }
         else:
-            # 多个工具，先选择工具
             selected_tool, parameters = await parameter_extractor.select_tool_and_extract(
                 self.name,
                 self.prompt,
@@ -71,7 +67,6 @@ class RemoteCommunicationAgent(BaseRemoteAgent):
             )
             logger.info(f"Selected tool: {selected_tool['name']}, parameters: {parameters}")
 
-            # 调用工具
             result = await self.call_tool(
                 tool_name=selected_tool["name"],
                 arguments=parameters
@@ -79,6 +74,6 @@ class RemoteCommunicationAgent(BaseRemoteAgent):
 
             return {
                 "status": "success",
-                "message": "操作成功",
+                "message": "查询成功",
                 "result": result
             }

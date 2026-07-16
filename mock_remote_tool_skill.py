@@ -30,6 +30,7 @@ class SkillRequest(BaseModel):
 
 
 _SAMPLE_CACHE: Optional[Dict[str, Any]] = None
+_SAMPLE_MTIME: float = 0
 _TODO_CACHE: Optional[Dict[str, Any]] = None
 _UNICORN_CACHE: Optional[Dict[str, Any]] = None
 _RISK_CACHE: Optional[Dict[str, Any]] = None
@@ -43,6 +44,7 @@ _LEAVE_CACHE: Optional[List[Dict[str, Any]]] = None
 _TRAVEL_CACHE: Optional[List[Dict[str, Any]]] = None
 _MEETING_CACHE: Optional[List[Dict[str, Any]]] = None
 _CONTACT_CACHE: Optional[Dict[str, Any]] = None
+_CONTACT_MTIME: float = 0
 
 
 def _read_json(path: Path) -> Dict[str, Any]:
@@ -63,13 +65,16 @@ def _sample_path() -> Path:
 
 
 def _load_sample() -> Dict[str, Any]:
-    global _SAMPLE_CACHE
-    if _SAMPLE_CACHE is not None:
-        return _SAMPLE_CACHE
+    global _SAMPLE_CACHE, _SAMPLE_MTIME
     path = _sample_path()
     if not path.exists():
         raise FileNotFoundError(f"Sample data not found: {path}")
+    # Check if file has been modified since last load
+    current_mtime = path.stat().st_mtime
+    if _SAMPLE_CACHE is not None and current_mtime == _SAMPLE_MTIME:
+        return _SAMPLE_CACHE
     _SAMPLE_CACHE = _read_json(path)
+    _SAMPLE_MTIME = current_mtime
     return _SAMPLE_CACHE
 
 
@@ -325,9 +330,7 @@ def _contact_path() -> Path:
 
 
 def _load_contacts() -> Dict[str, Any]:
-    global _CONTACT_CACHE
-    if _CONTACT_CACHE is not None:
-        return _CONTACT_CACHE
+    global _CONTACT_CACHE, _CONTACT_MTIME
     path = _contact_path()
     if not path.exists():
         # Auto-create sample contact data
@@ -366,8 +369,16 @@ def _load_contacts() -> Dict[str, Any]:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(sample_data, ensure_ascii=False, indent=2), encoding="utf-8")
         _CONTACT_CACHE = sample_data
+        _CONTACT_MTIME = path.stat().st_mtime
         return _CONTACT_CACHE
+    
+    # Check if file has been modified since last load
+    current_mtime = path.stat().st_mtime
+    if _CONTACT_CACHE is not None and current_mtime == _CONTACT_MTIME:
+        return _CONTACT_CACHE
+    
     _CONTACT_CACHE = _read_json(path)
+    _CONTACT_MTIME = current_mtime
     return _CONTACT_CACHE
 
 
@@ -418,6 +429,47 @@ def _normalize_list(value: Any) -> List[str]:
     return [str(value)]
 
 
+def _matches_job_keyword(person: Dict[str, Any], keyword: str) -> bool:
+    """精确匹配职位关键词
+    
+    对于"行长"这样的职位关键词，需要精确匹配：
+    - 职位字段完全等于关键词
+    - 或者职位字段以关键词结尾（如"支行行长"、"分行行长"）
+    - 但不能匹配"行长秘书"（因为"行长"不是职位的核心部分）
+    """
+    # 获取职位相关字段
+    job_fields = [
+        str(person.get("tcoPostNm") or ""),  # 岗位名称
+        str(person.get("nwgntPstNm") or ""),  # 内外部岗位名称
+        str(person.get("postCmnt") or ""),    # 岗位说明
+        str(person.get("seqNm") or ""),       # 序列名称
+    ]
+    
+    for job_text in job_fields:
+        if not job_text:
+            continue
+        
+        # 完全匹配
+        if job_text == keyword:
+            return True
+        
+        # 以关键词结尾（如"支行行长"匹配"行长"）
+        if job_text.endswith(keyword):
+            return True
+        
+        # 关键词在职位文本中，但后面不能紧跟"秘书"、"助理"等修饰词
+        # 例如："行长秘书"不应该匹配"行长"
+        if keyword in job_text:
+            # 检查关键词后面是否有修饰词
+            idx = job_text.find(keyword)
+            after_keyword = job_text[idx + len(keyword):]
+            # 如果关键词后面是"秘书"、"助理"等，则不匹配
+            if not any(after_keyword.startswith(suffix) for suffix in ["秘书", "助理", "代表"]):
+                return True
+    
+    return False
+
+
 def _matches_condition(person: Dict[str, Any], condition: Dict[str, Any]) -> bool:
     name = str(condition.get("cndName") or condition.get("name") or "").strip()
     values = _normalize_list(condition.get("cndValList") or condition.get("values"))
@@ -426,7 +478,11 @@ def _matches_condition(person: Dict[str, Any], condition: Dict[str, Any]) -> boo
     text = _flatten_text(person)
     value_ok = True
     if values:
-        value_ok = any(v in text for v in values)
+        # 对于"关键词"条件，使用精确的职位匹配
+        if name == "关键词":
+            value_ok = any(_matches_job_keyword(person, v) for v in values)
+        else:
+            value_ok = any(v in text for v in values)
 
     range_ok = True
     if range_values:
@@ -544,10 +600,8 @@ def _filter_people(
         conditions = list(conditions)
         conditions.append({"cndName": "关键词", "cndValList": [keyword]})
 
-    if keywords:
-        conditions = list(conditions)
-        conditions.append({"cndName": "关键词", "cndValList": list(keywords)})
-
+    # keywords 使用 AND 逻辑：所有关键词都必须匹配
+    # 这与 job_keywords 的 OR 逻辑不同
     if not conditions:
         conditions = []
 
@@ -555,6 +609,12 @@ def _filter_people(
     for person in people:
         if conditions and not all(_matches_condition(person, cond) for cond in conditions):
             continue
+
+        # keywords 使用 AND 逻辑：所有关键词都必须在文本中出现
+        if keywords:
+            person_text = _flatten_text(person)
+            if not all(k in person_text for k in keywords):
+                continue
 
         if gender:
             if gender not in str(person.get("gnd") or ""):

@@ -27,6 +27,20 @@
       "department": "技术部",
       "email": "zhaoliu@example.com",
       "phone": "13600136001"
+    },
+    {
+      "name": "陈秘书",
+      "position": "行长秘书",
+      "department": "行长办公室",
+      "email": "chen_secretary@example.com",
+      "phone": "13500135001"
+    },
+    {
+      "name": "刘秘书",
+      "position": "副行长秘书",
+      "department": "副行长办公室",
+      "email": "liu_secretary@example.com",
+      "phone": "13400134001"
     }
   ]
 }

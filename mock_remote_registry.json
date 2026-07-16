@@ -1,4 +1,4 @@
-﻿{
+{
   "resources": [
     {
       "type": "agent",
@@ -246,9 +246,9 @@
       "server_id": "remote-demo",
       "health_url": "http://127.0.0.1:8010/health",
       "metadata": {
-        "description": "Remote agent to send emails with default sender. This agent autonomously extracts recipient email and message content from previous steps in the conversation.",
+        "description": "Remote agent to send emails. Extracts recipient email from previous RemoteCommunicationAgent results and email body from previous RemoteReportAgent results.",
         "llm_type": "basic",
-        "prompt": "remote email dispatch agent",
+        "prompt": "You are an email dispatcher. Your task is to send emails by extracting recipient address and content from previous agent results in the conversation history.\n\nIMPORTANT:\n- The 'to' field MUST be extracted from previous RemoteCommunicationAgent results. Look for 'email' field in the contact query result JSON.\n- The 'body' field MUST be extracted from previous RemoteReportAgent results (the markdown report content).\n- The 'subject' field should be derived from the user's original request or the report title.\n- If you cannot find an email address in previous results, report an error.",
         "selected_tools": [
           {
             "name": "remote_email_tool",
@@ -258,16 +258,15 @@
               "properties": {
                 "to": {
                   "type": "string",
-                  "description": "Recipient email address. Extract from previous agent results (e.g., person info query results)."
+                  "description": "Recipient email address. MUST extract from previous RemoteCommunicationAgent result. Look for JSON with 'email' field like: {\"email\": \"xxx@example.com\"}"
                 },
                 "subject": {
                   "type": "string",
-                  "description": "Email subject",
-                  "default": "分析报告"
+                  "description": "Email subject. Derive from user's request or report title."
                 },
                 "body": {
                   "type": "string",
-                  "description": "Email body content. Extract from previous agent results (e.g., report generation results)."
+                  "description": "Email body content. MUST extract from previous RemoteReportAgent result (the markdown report text)."
                 }
               },
               "required": ["to", "body"]
@@ -743,9 +742,9 @@
       "server_id": "remote-demo",
       "health_url": "http://127.0.0.1:8010/health",
       "metadata": {
-        "description": "Remote communication agent for managing contacts and sending emails. Can query contact information and send emails to relevant personnel.",
+        "description": "Remote communication agent for querying contact information. Can find contact details by position, department, or name.",
         "llm_type": "basic",
-        "prompt": "You are a professional communication officer. Your task is to query contact information and send emails to relevant personnel.",
+        "prompt": "You are a professional communication officer. Your task is to query contact information for personnel by position, department, or name.",
         "selected_tools": [
           {
             "name": "remote_contact_query_tool",
@@ -755,40 +754,17 @@
               "properties": {
                 "position": {
                   "type": "string",
-                  "description": "Position filter (e.g., '综合处处长')"
+                  "description": "Position filter (e.g., '行长秘书', '综合处处长')"
                 },
                 "department": {
                   "type": "string",
-                  "description": "Department filter"
+                  "description": "Department filter (e.g., '行长办公室')"
                 },
                 "name": {
                   "type": "string",
                   "description": "Name filter"
                 }
               }
-            }
-          },
-          {
-            "name": "remote_email_tool",
-            "description": "Send email with specified recipient and content",
-            "parameters": {
-              "type": "object",
-              "properties": {
-                "to": {
-                  "type": "string",
-                  "description": "Recipient email address"
-                },
-                "subject": {
-                  "type": "string",
-                  "description": "Email subject",
-                  "default": "会议通知"
-                },
-                "body": {
-                  "type": "string",
-                  "description": "Email body content"
-                }
-              },
-              "required": ["to", "body"]
             }
           }
         ]

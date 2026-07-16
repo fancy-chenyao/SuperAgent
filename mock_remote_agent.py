@@ -1,4 +1,4 @@
-﻿ #!/usr/bin/env python
+ #!/usr/bin/env python
 """Mock remote agent server for testing RemoteExecutor."""
 
 from typing import Any, Dict, List, Optional
@@ -224,6 +224,12 @@ Special Extraction Rules for {tool_name}:
   * Extract these fields from the employee record in previous messages
   * If generating income_proof, use template_name="income_proof"
   * If generating employment_certificate, use template_name="employment_certificate"
+- For email tools (remote_email_tool):
+  * The "to" field MUST be extracted from previous RemoteCommunicationAgent results
+  * Look for JSON containing "email" field like: {{"email": "xxx@example.com"}} or {{"result": {{"contacts": [{{"email": "..."}}]}}}}
+  * The "body" field MUST be extracted from previous RemoteReportAgent results (the markdown report content)
+  * The "subject" field should be derived from the user's original request or the report title
+  * If you cannot find an email address in previous results, do NOT send the email
 
 Examples:
 User: "查询二级分支行80后行长"
@@ -332,7 +338,8 @@ CRITICAL Requirements:
         formatted = []
 
         for idx, msg in enumerate(messages, 1):
-            msg_type = msg.get("type", "unknown")
+            # 同时检查 type 和 role 字段
+            msg_type = msg.get("type", "") or msg.get("role", "")
             content = msg.get("content", "")
             tool = msg.get("tool", "")
 
@@ -343,7 +350,7 @@ CRITICAL Requirements:
                 content_str = str(content)
 
             # 构建消息标签
-            if msg_type == "human" or msg_type == "user":
+            if msg_type in ["human", "user"]:
                 label = "User"
             elif tool:
                 label = f"Agent({tool})"
