@@ -1,4 +1,8 @@
 ﻿const statusIndicator = document.getElementById("statusIndicator");
+const readinessBanner = document.getElementById("readinessBanner");
+const readinessTitle = document.getElementById("readinessTitle");
+const readinessComponents = document.getElementById("readinessComponents");
+const readinessHint = document.getElementById("readinessHint");
 const tabs = document.querySelectorAll(".tab");
 const panels = document.querySelectorAll(".panel");
 
@@ -67,6 +71,11 @@ const cancelPlanNlBtn = document.getElementById("cancelPlanNl");
 const applyPlanNlBtn = document.getElementById("applyPlanNl");
 const planNlInput = document.getElementById("planNlInput");
 const planNlHint = document.getElementById("planNlHint");
+const mainAgentDecisionCard = document.getElementById("mainAgentDecisionCard");
+const routingDecisionBadge = document.getElementById("routingDecisionBadge");
+const taskProfileView = document.getElementById("taskProfileView");
+const routingCandidatesView = document.getElementById("routingCandidatesView");
+const routingExcludedView = document.getElementById("routingExcludedView");
 
 let currentAbortController = null;
 let planningOutputBlocks = new Map();
@@ -104,6 +113,7 @@ let instructionHistory = [];
 let originalUserQuery = "";
 let currentRunContext = null;
 let executionInProgress = false;
+let runtimeCanRun = false;
 let workflowsPage = 1;
 let workflowsPageSize = 5;
 let workflowsTotal = 0;
@@ -133,6 +143,67 @@ const setStatus = (text, active = true) => {
     : "0 0 12px rgba(255, 106, 106, 0.7)";
 };
 
+const readinessChip = (label, ok) =>
+  `<span class="readiness-chip${ok ? "" : " warn"}">${label}</span>`;
+
+const loadReadiness = async () => {
+  if (!readinessBanner) return;
+  runtimeCanRun = false;
+  runBtn.disabled = true;
+  readinessBanner.className = "readiness-banner loading";
+  try {
+    const response = await fetch("/api/health/ready");
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const data = await response.json();
+    const components = data.components || {};
+    const modelsReady = Boolean(components.models?.configured);
+    const agentsReady = Boolean(components.agents?.ready);
+    const searchReady = Boolean(components.search?.configured);
+    const mcpConfigured = Boolean(components.mcp?.configured);
+    runtimeCanRun = modelsReady && agentsReady;
+
+    readinessBanner.className = `readiness-banner ${data.ready ? "ready" : "degraded"}`;
+    readinessTitle.textContent = data.ready ? "核心运行环境已就绪" : "运行环境部分可用";
+    readinessComponents.innerHTML = [
+      readinessChip("页面可用", true),
+      readinessChip(modelsReady ? "模型已配置" : "模型未配置", modelsReady),
+      readinessChip(
+        agentsReady ? `Agent ${components.agents?.count || 0} 个` : "Agent 未就绪",
+        agentsReady,
+      ),
+      readinessChip(searchReady ? "规划搜索可用" : "规划搜索未配置", searchReady),
+      readinessChip(
+        mcpConfigured ? `MCP 已配置 ${components.mcp?.server_count || 0} 个` : "MCP 未配置",
+        mcpConfigured,
+      ),
+    ].join("");
+
+    if (!modelsReady) {
+      readinessHint.textContent = "缺少基础模型或推理模型配置：可以浏览页面，但暂不能运行任务。";
+    } else if (!agentsReady) {
+      readinessHint.textContent = components.agents?.error || "Agent 初始化失败，请查看服务端日志。";
+    } else if (!searchReady) {
+      readinessHint.textContent = "核心工作流可运行；未配置 Tavily，已自动关闭规划前搜索。";
+    } else {
+      readinessHint.textContent = "页面、模型和 Agent 已就绪；MCP 状态按具体服务配置独立判断。";
+    }
+
+    if (searchBeforeInput && !searchReady) {
+      searchBeforeInput.checked = false;
+      searchBeforeInput.disabled = true;
+      searchBeforeInput.title = components.search?.reason || "规划前搜索未配置";
+    }
+    runBtn.disabled = !runtimeCanRun;
+  } catch (error) {
+    runtimeCanRun = false;
+    readinessBanner.className = "readiness-banner error";
+    readinessTitle.textContent = "运行环境检查失败";
+    readinessComponents.innerHTML = readinessChip("就绪接口不可用", false);
+    readinessHint.textContent = error.message || String(error);
+    runBtn.disabled = true;
+  }
+};
+
 const resetSummary = () => {
   summaryFlow.innerHTML = "";
   summaryHint.classList.add("hidden");
@@ -144,6 +215,7 @@ const resetSummary = () => {
 };
 
 const resetPlan = () => {
+  if (mainAgentDecisionCard) mainAgentDecisionCard.style.display = "none";
   if (planSummary) planSummary.innerHTML = "";
   if (planHint) {
     planHint.classList.add("hidden");
@@ -941,6 +1013,53 @@ const escapeHtml = (str) => {
   return div.innerHTML;
 };
 
+const renderRoutingDecision = (eventData) => {
+  if (!mainAgentDecisionCard) return;
+  const profile = eventData?.task_profile || {};
+  const route = eventData?.routing_decision || {};
+  const candidates = Array.isArray(route.candidate_agents) ? route.candidate_agents : [];
+  const excluded = Array.isArray(route.excluded_agents) ? route.excluded_agents : [];
+  const decision = route.decision || "UNKNOWN";
+  mainAgentDecisionCard.style.display = "";
+  routingDecisionBadge.textContent = `${decision} · ${Math.round((route.confidence || 0) * 100)}%`;
+  routingDecisionBadge.className = `tag ${decision === "DISPATCH" ? "accent" : "warn"}`;
+
+  const profileItems = [
+    ["意图", profile.intent || "-"],
+    ["任务类型", profile.task_type || "-"],
+    ["动作", profile.action || profile.operation_mode || "-"],
+    ["风险", profile.risk_level || profile.risk_profile || "-"],
+    ["数据范围", Array.isArray(profile.data_scope) ? profile.data_scope.join(", ") : profile.data_scope || "-"],
+    ["期望能力", (profile.expected_capabilities || []).join(", ") || "-"],
+    ["缺失字段", (profile.missing_fields || []).join(", ") || "无"],
+    ["画像置信度", `${Math.round((profile.confidence || 0) * 100)}%`],
+  ];
+  taskProfileView.innerHTML = profileItems
+    .map(([label, value]) => `<div class="decision-profile-item"><small>${escapeHtml(label)}</small>${escapeHtml(String(value))}</div>`)
+    .join("");
+
+  routingCandidatesView.innerHTML = candidates.length
+    ? candidates.map((item) => `
+        <div class="decision-item">
+          <strong>${escapeHtml(item.agent_id || "-")}</strong>
+          <span class="decision-score">${Math.round((item.score || 0) * 100)}%</span>
+          <div class="decision-reason">${escapeHtml((item.reason_codes || []).join(" · "))}</div>
+        </div>`).join("")
+    : '<div class="decision-item decision-reason">没有合法候选 Agent</div>';
+
+  const visibleExcluded = excluded.slice(0, 8);
+  routingExcludedView.innerHTML = visibleExcluded.length
+    ? visibleExcluded.map((item) => `
+        <div class="decision-item">
+          <strong>${escapeHtml(item.agent_id || "-")}</strong>
+          <div class="decision-reason">${escapeHtml(item.reason_code || "")}：${escapeHtml(item.reason || "")}</div>
+        </div>`).join("")
+        + (excluded.length > visibleExcluded.length
+          ? `<div class="decision-reason">另有 ${excluded.length - visibleExcluded.length} 个排除项</div>`
+          : "")
+    : '<div class="decision-item decision-reason">没有被排除的 Agent</div>';
+};
+
 // Lightweight Markdown -> HTML
 
 const renderMarkdown = (md) => {
@@ -1261,6 +1380,10 @@ const handleEvent = (eventName, payload) => {
     updateConfirmExecuteState();
     return;
   }
+  if (eventName === "routing_decision") {
+    renderRoutingDecision(payload.data || {});
+    return;
+  }
   if (eventName === "start_of_agent") {
     const agentName = payload.data?.agent_name || payload.agent_name || "agent";
     const subAgentName = payload.data?.sub_agent_name || null;
@@ -1422,6 +1545,11 @@ const handleEvent = (eventName, payload) => {
 };
 
 const runWorkflow = async () => {
+  if (!runtimeCanRun) {
+    setStatus("Environment not ready", false);
+    readinessBanner?.scrollIntoView({ behavior: "smooth", block: "center" });
+    return;
+  }
   const userId = userIdInput.value.trim();
   if (!userId) {
     setStatus("User ID required", false);
@@ -2909,6 +3037,7 @@ if (healthCheckSelectedBtn) {
 
 updateAutoScrollBtn();
 setStatus("Ready", true);
+loadReadiness();
 updateCoorCount();
 setAgentDetailEmpty("Select an agent to view details.");
 
@@ -3580,4 +3709,3 @@ const _origCreateAgentCard = function(card, agent) {
     }
   };
 })();
-

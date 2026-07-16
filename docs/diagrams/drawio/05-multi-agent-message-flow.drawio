@@ -1,0 +1,100 @@
+<?xml version='1.0' encoding='utf-8'?>
+<mxfile host="app.diagrams.net" modified="2026-03-16T00:00:00Z" agent="Codex" version="22.1.3" type="device">
+  <diagram id="superagent-multi-agent-message-flow" name="05 多 Agent 消息传递现状">
+    <mxGraphModel dx="2400" dy="1200" grid="0" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="2400" pageHeight="1200" math="0" shadow="0">
+      <root>
+        <mxCell id="0"></mxCell>
+        <mxCell id="1" parent="0"></mxCell>
+        <mxCell id="2" value="" style="shape=cube;size=18;whiteSpace=wrap;html=1;boundedLbl=1;fillColor=#cad6e0;gradientColor=#a4b4c3;strokeColor=#425368;strokeWidth=2.0" vertex="1" parent="1">
+          <mxGeometry x="60.0" y="400.0" width="190.0" height="85.0" as="geometry"></mxGeometry>
+        </mxCell>
+        <mxCell id="3" value="用户消息" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontFamily=Microsoft YaHei;fontSize=24.0;fontColor=#111111;whiteSpace=wrap;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="65.0" y="422.1" width="180.0" height="40.8" as="geometry"></mxGeometry>
+        </mxCell>
+        <mxCell id="4" value="" style="shape=cube;size=18;whiteSpace=wrap;html=1;boundedLbl=1;fillColor=#cad6e0;gradientColor=#a4b4c3;strokeColor=#425368;strokeWidth=2.0" vertex="1" parent="1">
+          <mxGeometry x="320.0" y="400.0" width="260.0" height="85.0" as="geometry"></mxGeometry>
+        </mxCell>
+        <mxCell id="5" value="共享 State.messages" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontFamily=Microsoft YaHei;fontSize=24.0;fontColor=#111111;whiteSpace=wrap;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="325.0" y="422.1" width="250.0" height="40.8" as="geometry"></mxGeometry>
+        </mxCell>
+        <mxCell id="6" value="" style="shape=cube;size=18;whiteSpace=wrap;html=1;boundedLbl=1;fillColor=#cad6e0;gradientColor=#a4b4c3;strokeColor=#425368;strokeWidth=2.0" vertex="1" parent="1">
+          <mxGeometry x="650.0" y="400.0" width="220.0" height="85.0" as="geometry"></mxGeometry>
+        </mxCell>
+        <mxCell id="7" value="Planner 生成步骤" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontFamily=Microsoft YaHei;fontSize=24.0;fontColor=#111111;whiteSpace=wrap;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="655.0" y="422.1" width="210.0" height="40.8" as="geometry"></mxGeometry>
+        </mxCell>
+        <mxCell id="8" value="" style="shape=cube;size=18;whiteSpace=wrap;html=1;boundedLbl=1;fillColor=#cad6e0;gradientColor=#a4b4c3;strokeColor=#425368;strokeWidth=2.0" vertex="1" parent="1">
+          <mxGeometry x="940.0" y="400.0" width="210.0" height="85.0" as="geometry"></mxGeometry>
+        </mxCell>
+        <mxCell id="9" value="Publisher 选择 Agent" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontFamily=Microsoft YaHei;fontSize=24.0;fontColor=#111111;whiteSpace=wrap;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="945.0" y="422.1" width="200.0" height="40.8" as="geometry"></mxGeometry>
+        </mxCell>
+        <mxCell id="10" value="" style="shape=cube;size=18;whiteSpace=wrap;html=1;boundedLbl=1;fillColor=#cad6e0;gradientColor=#a4b4c3;strokeColor=#425368;strokeWidth=2.0" vertex="1" parent="1">
+          <mxGeometry x="1220.0" y="400.0" width="210.0" height="85.0" as="geometry"></mxGeometry>
+        </mxCell>
+        <mxCell id="11" value="AgentProxy" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontFamily=Microsoft YaHei;fontSize=24.0;fontColor=#111111;whiteSpace=wrap;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="1225.0" y="422.1" width="200.0" height="40.8" as="geometry"></mxGeometry>
+        </mxCell>
+        <mxCell id="12" value="" style="shape=cube;size=18;whiteSpace=wrap;html=1;boundedLbl=1;fillColor=#cad6e0;gradientColor=#a4b4c3;strokeColor=#425368;strokeWidth=2.0" vertex="1" parent="1">
+          <mxGeometry x="1500.0" y="400.0" width="220.0" height="85.0" as="geometry"></mxGeometry>
+        </mxCell>
+        <mxCell id="13" value="执行 Agent / Tool" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontFamily=Microsoft YaHei;fontSize=24.0;fontColor=#111111;whiteSpace=wrap;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="1505.0" y="422.1" width="210.0" height="40.8" as="geometry"></mxGeometry>
+        </mxCell>
+        <mxCell id="14" value="" style="shape=cube;size=18;whiteSpace=wrap;html=1;boundedLbl=1;fillColor=#cad6e0;gradientColor=#a4b4c3;strokeColor=#425368;strokeWidth=2.0" vertex="1" parent="1">
+          <mxGeometry x="1790.0" y="400.0" width="240.0" height="85.0" as="geometry"></mxGeometry>
+        </mxCell>
+        <mxCell id="15" value="结构化结果 JSON" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontFamily=Microsoft YaHei;fontSize=24.0;fontColor=#111111;whiteSpace=wrap;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="1795.0" y="422.1" width="230.0" height="40.8" as="geometry"></mxGeometry>
+        </mxCell>
+        <mxCell id="16" value="" style="shape=cube;size=18;whiteSpace=wrap;html=1;boundedLbl=1;fillColor=#cad6e0;gradientColor=#a4b4c3;strokeColor=#425368;strokeWidth=2.0" vertex="1" parent="1">
+          <mxGeometry x="2100.0" y="400.0" width="220.0" height="85.0" as="geometry"></mxGeometry>
+        </mxCell>
+        <mxCell id="17" value="写回 messages" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontFamily=Microsoft YaHei;fontSize=24.0;fontColor=#111111;whiteSpace=wrap;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="2105.0" y="422.1" width="210.0" height="40.8" as="geometry"></mxGeometry>
+        </mxCell>
+        <mxCell id="18" value="" style="shape=cube;size=18;whiteSpace=wrap;html=1;boundedLbl=1;fillColor=#cad6e0;gradientColor=#a4b4c3;strokeColor=#425368;strokeWidth=2.0" vertex="1" parent="1">
+          <mxGeometry x="760.0" y="760.0" width="860.0" height="100.0" as="geometry"></mxGeometry>
+        </mxCell>
+        <mxCell id="19" value="当前缺口：没有统一消息信封和工作记忆" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontFamily=Microsoft YaHei;fontSize=24.0;fontColor=#111111;whiteSpace=wrap;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="780.0" y="789.6" width="820.0" height="40.8" as="geometry"></mxGeometry>
+        </mxCell>
+        <mxCell id="20" value="字符串、临时 JSON、共享字典并存；发送方、接收方、产物引用和错误字段不统一" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontFamily=Microsoft YaHei;fontSize=17.0;fontColor=#111111;whiteSpace=wrap" vertex="1" parent="1">
+          <mxGeometry x="740.0" y="900.0" width="900.0" height="28.9" as="geometry"></mxGeometry>
+        </mxCell>
+        <mxCell id="21" style="html=1;rounded=0;strokeColor=#425368;strokeWidth=2.0;endArrow=classic;endFill=1;exitX=1;exitY=0.5;entryX=0;entryY=0.5;edgeStyle=none" edge="1" parent="1" source="2" target="4">
+          <mxGeometry relative="1" as="geometry"></mxGeometry>
+        </mxCell>
+        <mxCell id="22" style="html=1;rounded=0;strokeColor=#425368;strokeWidth=2.0;endArrow=classic;endFill=1;exitX=1;exitY=0.5;entryX=0;entryY=0.5;edgeStyle=none" edge="1" parent="1" source="4" target="6">
+          <mxGeometry relative="1" as="geometry"></mxGeometry>
+        </mxCell>
+        <mxCell id="23" style="html=1;rounded=0;strokeColor=#425368;strokeWidth=2.0;endArrow=classic;endFill=1;exitX=1;exitY=0.5;entryX=0;entryY=0.5;edgeStyle=none" edge="1" parent="1" source="6" target="8">
+          <mxGeometry relative="1" as="geometry"></mxGeometry>
+        </mxCell>
+        <mxCell id="24" style="html=1;rounded=0;strokeColor=#425368;strokeWidth=2.0;endArrow=classic;endFill=1;exitX=1;exitY=0.5;entryX=0;entryY=0.5;edgeStyle=none" edge="1" parent="1" source="8" target="10">
+          <mxGeometry relative="1" as="geometry"></mxGeometry>
+        </mxCell>
+        <mxCell id="25" style="html=1;rounded=0;strokeColor=#425368;strokeWidth=2.0;endArrow=classic;endFill=1;exitX=1;exitY=0.5;entryX=0;entryY=0.5;edgeStyle=none" edge="1" parent="1" source="10" target="12">
+          <mxGeometry relative="1" as="geometry"></mxGeometry>
+        </mxCell>
+        <mxCell id="26" style="html=1;rounded=0;strokeColor=#425368;strokeWidth=2.0;endArrow=classic;endFill=1;exitX=1;exitY=0.5;entryX=0;entryY=0.5;edgeStyle=none" edge="1" parent="1" source="12" target="14">
+          <mxGeometry relative="1" as="geometry"></mxGeometry>
+        </mxCell>
+        <mxCell id="27" style="html=1;rounded=0;strokeColor=#425368;strokeWidth=2.0;endArrow=classic;endFill=1;exitX=1;exitY=0.5;entryX=0;entryY=0.5;edgeStyle=none" edge="1" parent="1" source="14" target="16">
+          <mxGeometry relative="1" as="geometry"></mxGeometry>
+        </mxCell>
+        <mxCell id="28" style="html=1;rounded=0;strokeColor=#425368;strokeWidth=2.0;endArrow=classic;endFill=1;exitX=0.5;exitY=1;entryX=0.5;entryY=1;edgeStyle=orthogonalEdgeStyle;orthogonalLoop=1;jettySize=auto" edge="1" parent="1" source="16" target="8">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="2210.0" y="620.0"></mxPoint>
+              <mxPoint x="1045.0" y="620.0"></mxPoint>
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="29" style="html=1;rounded=0;strokeColor=#425368;strokeWidth=2.0;endArrow=classic;endFill=1;exitX=0.5;exitY=0;entryX=0.5;entryY=1;dashed=1;dashPattern=8 8;edgeStyle=orthogonalEdgeStyle;orthogonalLoop=1;jettySize=auto" edge="1" parent="1" source="18" target="4">
+          <mxGeometry relative="1" as="geometry"></mxGeometry>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

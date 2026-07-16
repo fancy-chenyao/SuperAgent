@@ -39,7 +39,7 @@ except Exception:  # pragma: no cover - optional dependency in lightweight test 
         return []
 
 try:
-    from src.tools.search import tavily_tool
+    from src.tools.search import get_search_status, is_search_available, tavily_tool
 except Exception:  # pragma: no cover - optional dependency in lightweight test env
     class _NoopTavilyTool:  # type: ignore
         def invoke(self, *args, **kwargs):
@@ -49,6 +49,12 @@ except Exception:  # pragma: no cover - optional dependency in lightweight test 
             return []
 
     tavily_tool = _NoopTavilyTool()
+
+    def is_search_available():  # type: ignore
+        return False
+
+    def get_search_status():  # type: ignore
+        return {"configured": False, "reason": "search dependencies are unavailable"}
 
 
 logger = logging.getLogger(__name__)
@@ -100,6 +106,57 @@ def _sanitize_messages(messages):
     return sanitized
 
 
+def _search_before_planning(state: State) -> list[dict]:
+    """Run optional planning search without turning an unavailable provider into a task failure."""
+    if not is_search_available():
+        status = get_search_status()
+        logger.warning("Search before planning skipped: %s", status.get("reason"))
+        return []
+
+    user_messages = [
+        str(message.get("content", ""))
+        for message in state.get("messages", [])
+        if isinstance(message, dict) and message.get("role") == "user"
+    ]
+    query = next((item for item in user_messages if item.strip()), "")
+    if not query:
+        logger.warning("Search before planning skipped: no user query was found")
+        return []
+
+    try:
+        result = tavily_tool.invoke(
+            {"query": query},
+            config={"configurable": {"user_id": state.get("user_id")}},
+        )
+    except Exception as exc:
+        logger.warning("Search before planning failed and was skipped: %s", exc)
+        return []
+
+    if not isinstance(result, list):
+        logger.warning("Search before planning returned an unexpected result type: %s", type(result).__name__)
+        return []
+    return [item for item in result if isinstance(item, dict)]
+
+
+def _append_search_context(messages, searched_content: list[dict]):
+    if not searched_content or not messages:
+        return messages
+    normalized = [
+        {
+            "title": elem.get("title", ""),
+            "content": elem.get("content", ""),
+            "url": elem.get("url", ""),
+        }
+        for elem in searched_content
+    ]
+    enriched = deepcopy(messages)
+    enriched[-1]["content"] += (
+        "\n\n# Relevant Search Results\n\n"
+        + json.dumps(normalized, ensure_ascii=False)
+    )
+    return enriched
+
+
 def _ensure_scenario_prompt_defaults(prompt_state: dict) -> dict:
     """Populate scenario-related prompt fields so template rendering is resilient."""
     task_profile = prompt_state.get("task_profile")
@@ -128,6 +185,17 @@ def _ensure_scenario_prompt_defaults(prompt_state: dict) -> dict:
     if not prompt_state.get("EXPECTED_CAPABILITIES_TEXT"):
         prompt_state["EXPECTED_CAPABILITIES_TEXT"] = (
             ", ".join(str(item) for item in expected_capabilities) or "General"
+        )
+
+    routing_decision = prompt_state.get("routing_decision")
+    if not isinstance(routing_decision, dict):
+        routing_decision = {}
+        prompt_state["routing_decision"] = routing_decision
+    if not prompt_state.get("ROUTING_DECISION_TEXT"):
+        prompt_state["ROUTING_DECISION_TEXT"] = json.dumps(
+            routing_decision,
+            ensure_ascii=False,
+            indent=2,
         )
 
     return prompt_state
@@ -363,7 +431,9 @@ async def publisher_node(
         update={
             "messages": [
                 {
-                    "content": f"Next step is delegating to: {agent}\n",
+                    # Publisher 的后续判断依赖严格的 {"next": "agent_name"} 记录。
+                    # 使用机器可读 JSON，避免模型无法识别自然语言状态而重复派发。
+                    "content": json.dumps({"next": agent}, ensure_ascii=False),
                     "tool": "publisher",
                     "role": "assistant",
                 }
@@ -459,7 +529,9 @@ async def agent_proxy_node(state: State) -> Command[Literal["publisher", "__end_
                 }
                 ,
                 {
-                    "content": structured_result,
+                    # LangChain 消息 content 只接受字符串或内容块列表，不能直接放 dict。
+                    # 序列化后仍可在 Publisher 上下文中保留完整结构化结果。
+                    "content": json.dumps(structured_result, ensure_ascii=False, default=str),
                     "tool": "agent_proxy",
                     "role": "assistant",
                 }
@@ -484,6 +556,44 @@ async def planner_node(state: State) -> Command[Literal["publisher", "__end__"]]
     retry_messages = None
     retry_llm = None
     runtime_event_handler = state.get("runtime_event_handler")
+
+    routing_decision = state.get("routing_decision") or {}
+    if state["workflow_mode"] == "launch" and routing_decision.get("decision") != "DISPATCH":
+        decision = routing_decision.get("decision", "CLARIFY")
+        reason_codes = routing_decision.get("reason_codes") or ["NO_CAPABLE_AGENT"]
+        task_profile = state.get("task_profile") or {}
+        missing_fields = task_profile.get("missing_fields") or []
+        thought = (
+            f"主Agent路由决策为 {decision}，原因：{', '.join(reason_codes)}。"
+            + (f" 需要补充字段：{', '.join(missing_fields)}。" if missing_fields else "")
+        )
+        content = json.dumps(
+            {"thought": thought, "steps": [], "new_agents_needed": []},
+            ensure_ascii=False,
+        )
+        cache.restore_planning_steps(state["workflow_id"], [], state["user_id"])
+        cache.restore_system_node(state["workflow_id"], "__end__", state["user_id"])
+        if callable(runtime_event_handler):
+            await runtime_event_handler(
+                {
+                    "event": "planner_delta",
+                    "agent_name": "planner",
+                    "data": {
+                        "delta": {"content": content},
+                        "full_content": content,
+                        "is_final": True,
+                    },
+                }
+            )
+        return Command(
+            update={
+                "messages": [{"content": content, "tool": "planner", "role": "assistant"}],
+                "agent_name": "planner",
+                "full_plan": content,
+                "planning_steps": [],
+            },
+            goto="__end__",
+        )
 
     if state["workflow_mode"] == "launch":
         prompt_state = dict(state)
@@ -524,24 +634,10 @@ async def planner_node(state: State) -> Command[Literal["publisher", "__end__"]]
 
         if state.get("search_before_planning"):
             search_start = time.time()
-            config = {"configurable": {"user_id": state.get("user_id")}}
-            searched_content = tavily_tool.invoke(
-                {
-                    "query": [
-                        "".join(message["content"])
-                        for message in state["messages"]
-                        if message["role"] == "user"
-                    ][0]
-                },
-                config=config,
-            )
+            searched_content = _search_before_planning(state)
             search_time = time.time() - search_start
             logger.info("[PERF] Web search: %.2fs", search_time)
-
-            messages = deepcopy(messages)
-            messages[-1]["content"] += (
-                f"\n\n# Relative Search Results\n\n{json.dumps([{'titile': elem['title'], 'content': elem['content']} for elem in searched_content], ensure_ascii=False)}"
-            )
+            messages = _append_search_context(messages, searched_content)
 
         cache.restore_system_node(state["workflow_id"], PLANNER, state["user_id"])
 
@@ -615,24 +711,10 @@ async def planner_node(state: State) -> Command[Literal["publisher", "__end__"]]
 
         if state.get("search_before_planning"):
             search_start = time.time()
-            config = {"configurable": {"user_id": state.get("user_id")}}
-            searched_content = tavily_tool.invoke(
-                {
-                    "query": [
-                        "".join(message["content"])
-                        for message in state["messages"]
-                        if message["role"] == "user"
-                    ][0]
-                },
-                config=config,
-            )
+            searched_content = _search_before_planning(state)
             search_time = time.time() - search_start
             logger.info("[PERF] Polish web search: %.2fs", search_time)
-
-            messages = deepcopy(messages)
-            messages[-1]["content"] += (
-                f"\n\n# Relative Search Results\n\n{json.dumps([{'titile': elem['title'], 'content': elem['content']} for elem in searched_content], ensure_ascii=False)}"
-            )
+            messages = _append_search_context(messages, searched_content)
 
         llm_start = time.time()
         model_type = "reasoning" if state.get("deep_thinking_mode") else AGENT_LLM_MAP["planner"]

@@ -1,0 +1,24 @@
+{
+  "diagram_id": "superagent-agent-tool-security-flow",
+  "diagram_name": "04 Agent 与工具权限链路",
+  "canvas": {"w": 2500, "h": 1250, "page_width": 2500, "page_height": 1250},
+  "style_tokens": {"font_title": 24, "font_title_family": "Microsoft YaHei", "font_body": 17, "font_body_family": "Microsoft YaHei", "font_caption": 15, "font_caption_family": "Microsoft YaHei", "font_formula": 20, "font_formula_family": "Arial", "stroke": 2, "stack_dx": 18, "stack_dy": -16, "arrow_width": 2, "palette": "cool_gray_blue", "default_connector_route": "straight", "centerline_tolerance": 150, "title_gap": 50, "body_gap": 55, "caption_gap": 35, "formula_gap": 35},
+  "constraints": ["dispatch and tool checks are shown as two gates", "allow path reads left to right", "deny and review branches terminate below policy"],
+  "nodes": [
+    {"id":"publisher","kind":"flat_box","lane":"main","role":"primary","x":40,"y":400,"w":190,"h":85,"title":{"text":"Publisher","anchor":"center","box_w":180}},
+    {"id":"dispatch","kind":"flat_box","lane":"main","role":"primary","x":290,"y":400,"w":240,"h":85,"title":{"text":"Agent 调度权限检查","anchor":"center","box_w":230}},
+    {"id":"agent","kind":"flat_box","lane":"main","role":"primary","x":600,"y":400,"w":220,"h":85,"title":{"text":"Local / Remote Agent","anchor":"center","box_w":210}},
+    {"id":"executor","kind":"flat_box","lane":"main","role":"primary","x":890,"y":400,"w":220,"h":85,"title":{"text":"ExecutorFactory","anchor":"center","box_w":210}},
+    {"id":"wrapper","kind":"flat_box","lane":"main","role":"primary","x":1180,"y":400,"w":230,"h":85,"title":{"text":"SecureToolWrapper","anchor":"center","box_w":220}},
+    {"id":"toolcheck","kind":"flat_box","lane":"main","role":"primary","x":1480,"y":400,"w":220,"h":85,"title":{"text":"工具调用权限检查","anchor":"center","box_w":210}},
+    {"id":"policy","kind":"flat_box","lane":"main","role":"primary","x":1770,"y":400,"w":230,"h":85,"title":{"text":"PolicyEngine.evaluate","anchor":"center","box_w":220}},
+    {"id":"execute","kind":"flat_box","lane":"main","role":"primary","x":2080,"y":400,"w":260,"h":85,"title":{"text":"执行 Tool / Remote Tool","anchor":"center","box_w":250}},
+    {"id":"deny","kind":"flat_box","lane":"auxiliary","role":"primary","x":1690,"y":730,"w":250,"h":80,"title":{"text":"DENY → 权限异常","anchor":"center","box_w":240}},
+    {"id":"review","kind":"flat_box","lane":"auxiliary","role":"primary","x":1990,"y":730,"w":310,"h":80,"title":{"text":"REVIEW REQUIRED","anchor":"center","box_w":300},"body":{"text":"当前审批存储未接入主链路","anchor":"bottom","gap":34,"box_w":330}},
+    {"id":"warning","kind":"flat_box","lane":"auxiliary","role":"primary","x":470,"y":850,"w":520,"h":90,"title":{"text":"当前缺口：S-ABAC 默认关闭，用户 ID 由请求提供","anchor":"center","box_w":500}}
+  ],
+  "connectors": [
+    {"id":"e1","kind":"connector_arrow","source":"publisher","target":"dispatch","route":"straight"},{"id":"e2","kind":"connector_arrow","source":"dispatch","target":"agent","route":"straight"},{"id":"e3","kind":"connector_arrow","source":"agent","target":"executor","route":"straight"},{"id":"e4","kind":"connector_arrow","source":"executor","target":"wrapper","route":"straight"},{"id":"e5","kind":"connector_arrow","source":"wrapper","target":"toolcheck","route":"straight"},{"id":"e6","kind":"connector_arrow","source":"toolcheck","target":"policy","route":"straight"},{"id":"e7","kind":"connector_arrow","source":"policy","target":"execute","route":"straight"},
+    {"id":"d1","kind":"connector_arrow","source":"policy","target":"deny","source_anchor":"bottom","target_anchor":"top","route":"orthogonal"},{"id":"d2","kind":"connector_arrow","source":"policy","target":"review","source_anchor":"bottom","target_anchor":"top","route":"orthogonal"},{"id":"w1","kind":"connector_arrow","source":"warning","target":"dispatch","source_anchor":"top","target_anchor":"bottom","route":"orthogonal","dashed":true}
+  ]
+}

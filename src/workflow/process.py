@@ -9,7 +9,7 @@ from src.workflow import build_graph
 from src.manager import agent_manager
 from rich.console import Console
 from src.interface.agent import State
-from src.service.env import USE_BROWSER, AUTO_RECOVERY_ENABLED, DISABLE_DEFAULT_AGENTS
+from src.service.env import USE_BROWSER, AUTO_RECOVERY_ENABLED, DISABLE_DEFAULT_AGENTS, S_ABAC_ENABLED
 from src.workflow.cache import workflow_cache as cache
 from src.workflow.graph import CompiledWorkflow
 from src.interface.agent import WorkMode
@@ -29,6 +29,7 @@ from src.robust.hooks import (
 )
 from src.security.enforcement import PermissionDeniedError
 from src.security.scenario_analyzer import analyze_task_context
+from src.orchestrator import make_routing_decision
 
 logging.basicConfig(
     level=logging.WARNING,
@@ -299,7 +300,7 @@ async def _build_team_members(
     coor_agents: list[str] | None,
 ) -> tuple[list[str], str]:
     coor_agents = coor_agents or []
-    member_desc = DEFAULT_TEAM_MEMBERS_DESCRIPTION
+    member_desc = ""
     members = []
 
     available = get_user_available_agents(user_id)
@@ -313,13 +314,17 @@ async def _build_team_members(
             or agent.agent_name in coor_agents
         )
         if has_user_profile and available != ["*"]:
-            if agent.agent_name not in available and agent.agent_name not in coor_agents:
+            if agent.agent_name not in available:
                 should_include = False
+                if agent.agent_name in coor_agents:
+                    logger.warning(
+                        "S-ABAC: ignored explicitly selected unauthorized agent '%s' for user '%s'",
+                        agent.agent_name,
+                        user_id,
+                    )
 
         if should_include and agent.agent_name not in members:
             members.append(agent.agent_name)
-
-        if agent.user_id != "share" or getattr(agent, "source", None) == "remote":
             requires = getattr(agent, "requires", [])
             produces = getattr(agent, "produces", [])
             requires_str = ", ".join(requires) if requires else "None"
@@ -491,6 +496,48 @@ async def run_agent_workflow(
         user_id=user_id,
         coor_agents=coor_agents,
     )
+    registered_agents = await agent_manager.agent_registry.list()
+    instruction_history_for_route = cache.get_instruction_history(workflow_id) or []
+    routing_query = "\n".join(
+        str(item) for item in instruction_history_for_route if str(item).strip()
+    ) or original_user_query or user_input_messages[-1]["content"]
+    task_profile_model, agent_cards, routing_decision_model = await make_routing_decision(
+        user_query=routing_query,
+        task_id=task_id,
+        workflow_id=workflow_id,
+        agents=registered_agents,
+        authorized_agent_ids=set(team_members),
+        metadata={
+            "workflow_mode": str(workmode),
+            "s_abac_enabled": S_ABAC_ENABLED,
+        },
+    )
+    routing_decision = routing_decision_model.model_dump()
+    routing_decision_for_prompt = dict(routing_decision)
+    routing_decision_for_prompt.pop("excluded_agents", None)
+    task_profile = task_profile_model.to_legacy_scenario()
+    routed_member_ids = [
+        item.agent_id for item in routing_decision_model.candidate_agents
+    ]
+    if routing_decision_model.decision == "DISPATCH":
+        team_members = routed_member_ids
+        routed_cards = {
+            card.agent_id: card for card in agent_cards if card.agent_id in set(routed_member_ids)
+        }
+        team_members_description = "\n".join(
+            (
+                f"- **`{agent_id}`**: {routed_cards[agent_id].description}\n"
+                f"  - Department: {routed_cards[agent_id].department}\n"
+                f"  - Capabilities: {', '.join(routed_cards[agent_id].capabilities)}\n"
+                f"  - Intents: {', '.join(routed_cards[agent_id].intents)}\n"
+                f"  - Actions: {', '.join(routed_cards[agent_id].supported_actions)}"
+            )
+            for agent_id in team_members
+            if agent_id in routed_cards
+        )
+    elif workmode != "production":
+        team_members = []
+        team_members_description = ""
     tools_description = await _build_tools_description()
     resource_catalog = await _build_resource_catalog()
 
@@ -524,6 +571,26 @@ async def run_agent_workflow(
             "initialized": False,
             "stop_after_planner": stop_after_planner,
             "instruction_history": cache.get_instruction_history(workflow_id),
+            "task_profile": task_profile,
+            "task_profile_reason": task_profile.get("reason", ""),
+            "scenario_tags": task_profile.get("scenario_tags", []),
+            "expected_capabilities": task_profile.get("expected_capabilities", []),
+            "task_type": task_profile.get("task_type", "GENERAL"),
+            "business_goal": task_profile.get("business_goal", routing_query),
+            "data_scope": task_profile.get("data_scope", "general"),
+            "operation_mode": task_profile.get("operation_mode", "read"),
+            "risk_profile": task_profile.get("risk_profile", "LOW"),
+            "scenario_fit_cache": {},
+            "TASK_PROFILE_TEXT": json.dumps(task_profile, ensure_ascii=False, indent=2),
+            "SCENARIO_TAGS_TEXT": ", ".join(task_profile.get("scenario_tags", [])),
+            "EXPECTED_CAPABILITIES_TEXT": ", ".join(task_profile.get("expected_capabilities", [])),
+            "routing_decision": routing_decision,
+            "ROUTING_DECISION_TEXT": json.dumps(
+                routing_decision_for_prompt,
+                ensure_ascii=False,
+                indent=2,
+            ),
+            "agent_cards": [card.model_dump() for card in agent_cards],
         },
         resume_step=resume_step,
         task_id=task_id,
@@ -572,6 +639,9 @@ async def _process_workflow(
             "TASK_PROFILE_TEXT",
             "SCENARIO_TAGS_TEXT",
             "EXPECTED_CAPABILITIES_TEXT",
+            "routing_decision",
+            "ROUTING_DECISION_TEXT",
+            "agent_cards",
         ):
             if not target_state.get(key) and source_state.get(key) is not None:
                 target_state[key] = source_state.get(key)
@@ -621,6 +691,17 @@ async def _process_workflow(
         "event": "start_of_workflow",
         "data": {"workflow_id": workflow_id, "task_id": task_id, "input": initial_state["messages"], "resume_step": resume_step},
     }
+
+    if initial_state.get("routing_decision"):
+        yield {
+            "event": "routing_decision",
+            "data": {
+                "workflow_id": workflow_id,
+                "task_id": task_id,
+                "task_profile": initial_state.get("task_profile", {}),
+                "routing_decision": initial_state.get("routing_decision", {}),
+            },
+        }
 
     try:
         current_node = workflow.start_node

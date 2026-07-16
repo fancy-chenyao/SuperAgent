@@ -223,6 +223,69 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=500, detail="index.html not found")
         return FileResponse(index_path)
 
+    @app.get("/api/health/ready")
+    async def readiness():
+        """Return secret-free readiness details without making optional services fatal."""
+        from src.llm.llm import get_llm_configuration_status
+        from src.tools.search import get_search_status
+
+        model_status = get_llm_configuration_status()
+        search_status = get_search_status()
+
+        try:
+            await asyncio.wait_for(agent_manager.ensure_initialized(), timeout=15.0)
+            agent_status = {
+                "ready": True,
+                "status": "ready",
+                "count": len(agent_manager.available_agents),
+                "error": None,
+            }
+        except asyncio.TimeoutError:
+            agent_status = {
+                "ready": False,
+                "status": "timeout",
+                "count": len(agent_manager.available_agents),
+                "error": "Agent initialization exceeded 15 seconds",
+            }
+        except Exception as exc:
+            agent_status = {
+                "ready": False,
+                "status": "error",
+                "count": len(agent_manager.available_agents),
+                "error": str(exc),
+            }
+
+        try:
+            mcp_servers = mcp_client_config() if mcp_client_config else {}
+            mcp_status = {
+                "enabled": bool(mcp_servers),
+                "configured": bool(mcp_servers),
+                "server_count": len(mcp_servers),
+                "status": "configured" if mcp_servers else "not_configured",
+            }
+        except Exception as exc:
+            mcp_status = {
+                "enabled": False,
+                "configured": False,
+                "server_count": 0,
+                "status": "error",
+                "error": str(exc),
+            }
+
+        ready = bool(model_status["configured"] and agent_status["ready"])
+        return {
+            "ready": ready,
+            "status": "ready" if ready else "degraded",
+            "checked_at": datetime.now(timezone.utc).isoformat(),
+            "components": {
+                "web": {"ready": True, "status": "ready"},
+                "models": model_status,
+                "agents": agent_status,
+                "search": search_status,
+                "mcp": mcp_status,
+            },
+        }
+
     @app.post("/api/workflows/run")
     async def run_workflow(request: Request, body: AgentRequest):
         server = Server()

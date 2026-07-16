@@ -1,0 +1,22 @@
+{
+  "diagram_id": "superagent-overall-request-flow",
+  "diagram_name": "01 总体请求链路",
+  "canvas": {"w": 2400, "h": 1100, "page_width": 2400, "page_height": 1100},
+  "style_tokens": {"font_title": 26, "font_title_family": "Microsoft YaHei", "font_body": 18, "font_body_family": "Microsoft YaHei", "font_caption": 16, "font_caption_family": "Microsoft YaHei", "font_formula": 20, "font_formula_family": "Arial", "stroke": 2, "stack_dx": 18, "stack_dy": -16, "arrow_width": 2, "palette": "cool_gray_blue", "default_connector_route": "straight", "centerline_tolerance": 150, "title_gap": 50, "body_gap": 55, "caption_gap": 35, "formula_gap": 35},
+  "constraints": ["main request path reads left to right", "service preparation branch stays secondary", "persistence is shown below execution"],
+  "nodes": [
+    {"id":"user","kind":"flat_box","lane":"main","role":"primary","x":70,"y":390,"w":190,"h":90,"title":{"text":"用户请求","anchor":"center","box_w":180}},
+    {"id":"entry","kind":"flat_box","lane":"main","role":"primary","x":340,"y":390,"w":220,"h":90,"title":{"text":"CLI / Web API","anchor":"center","box_w":210}},
+    {"id":"server","kind":"flat_box","lane":"main","role":"primary","x":650,"y":390,"w":220,"h":90,"title":{"text":"Server","anchor":"center","box_w":210},"body":{"text":"校验请求并建立 SSE 流","anchor":"bottom","gap":38,"box_w":260}},
+    {"id":"prepare","kind":"flat_box","lane":"main","role":"primary","x":960,"y":390,"w":250,"h":90,"title":{"text":"运行前准备","anchor":"center","box_w":240},"body":{"text":"Agent 初始化 / MCP 刷新 / 会话最近 3 条","anchor":"bottom","gap":38,"box_w":340}},
+    {"id":"workflow","kind":"flat_box","lane":"main","role":"primary","x":1310,"y":390,"w":260,"h":90,"title":{"text":"运行 Agent 工作流","anchor":"center","box_w":250},"body":{"text":"任务画像、权限候选、路由","anchor":"bottom","gap":38,"box_w":320}},
+    {"id":"engine","kind":"flat_box","lane":"main","role":"primary","x":1670,"y":390,"w":260,"h":90,"title":{"text":"工作流节点循环","anchor":"center","box_w":250},"body":{"text":"Coordinator → Planner → Publisher → AgentProxy","anchor":"bottom","gap":38,"box_w":390}},
+    {"id":"stream","kind":"flat_box","lane":"main","role":"primary","x":2030,"y":390,"w":250,"h":90,"title":{"text":"事件流 / 最终响应","anchor":"center","box_w":240}},
+    {"id":"session","kind":"flat_box","lane":"auxiliary","role":"primary","x":900,"y":700,"w":240,"h":75,"title":{"text":"SessionManager（内存）","anchor":"center","box_w":230}},
+    {"id":"persist","kind":"flat_box","lane":"auxiliary","role":"primary","x":1540,"y":700,"w":300,"h":75,"title":{"text":"Workflow / Log / Checkpoint JSON","anchor":"center","box_w":290}}
+  ],
+  "connectors": [
+    {"id":"e1","kind":"connector_arrow","source":"user","target":"entry","route":"straight"},{"id":"e2","kind":"connector_arrow","source":"entry","target":"server","route":"straight"},{"id":"e3","kind":"connector_arrow","source":"server","target":"prepare","route":"straight"},{"id":"e4","kind":"connector_arrow","source":"prepare","target":"workflow","route":"straight"},{"id":"e5","kind":"connector_arrow","source":"workflow","target":"engine","route":"straight"},{"id":"e6","kind":"connector_arrow","source":"engine","target":"stream","route":"straight"},
+    {"id":"e7","kind":"connector_arrow","source":"prepare","target":"session","source_anchor":"bottom","target_anchor":"top","route":"orthogonal"},{"id":"e8","kind":"connector_arrow","source":"engine","target":"persist","source_anchor":"bottom","target_anchor":"top","route":"orthogonal"}
+  ]
+}

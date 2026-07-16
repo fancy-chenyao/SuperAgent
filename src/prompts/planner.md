@@ -41,6 +41,12 @@ Your task is to analyze user requirements and organize a team of agents to compl
 
 <<EXPECTED_CAPABILITIES_TEXT>>
 
+## Main Agent Routing Decision
+
+<<ROUTING_DECISION_TEXT>>
+
+The candidate list above has already passed the main Agent's permission boundary and capability scoring. You may only select agents that appear in both the routing candidates and `TEAM_MEMBERS`. Prefer the highest-scoring candidate unless a later cross-domain step explicitly requires another listed capability.
+
 ## Instruction History (All User Inputs)
 
 <<INSTRUCTION_HISTORY_TEXT>>
