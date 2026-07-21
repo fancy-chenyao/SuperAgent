@@ -184,6 +184,9 @@ class State(MessagesState):
     TASK_PROFILE_TEXT: str
     SCENARIO_TAGS_TEXT: str
     EXPECTED_CAPABILITIES_TEXT: str
+    routing_decision: dict
+    ROUTING_DECISION_TEXT: str
+    agent_cards: list[dict]
     runtime_event_handler: Optional[Callable[[dict[str, Any]], Awaitable[None]]]
     memory_session_id: str
     memory_context: dict[str, Any]

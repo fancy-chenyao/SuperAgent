@@ -39,7 +39,7 @@ except Exception:  # pragma: no cover - optional dependency in lightweight test 
         return []
 
 try:
-    from src.tools.search import tavily_tool
+    from src.tools.search import get_search_status, is_search_available, tavily_tool
 except Exception:  # pragma: no cover - optional dependency in lightweight test env
     class _NoopTavilyTool:  # type: ignore
         def invoke(self, *args, **kwargs):
@@ -49,6 +49,12 @@ except Exception:  # pragma: no cover - optional dependency in lightweight test 
             return []
 
     tavily_tool = _NoopTavilyTool()
+
+    def is_search_available():  # type: ignore
+        return False
+
+    def get_search_status():  # type: ignore
+        return {"configured": False, "reason": "search dependencies are unavailable"}
 
 
 logger = logging.getLogger(__name__)
@@ -100,6 +106,57 @@ def _sanitize_messages(messages):
     return sanitized
 
 
+def _search_before_planning(state: State) -> list[dict]:
+    """Run optional planning search without turning an unavailable provider into a task failure."""
+    if not is_search_available():
+        status = get_search_status()
+        logger.warning("Search before planning skipped: %s", status.get("reason"))
+        return []
+
+    user_messages = [
+        str(message.get("content", ""))
+        for message in state.get("messages", [])
+        if isinstance(message, dict) and message.get("role") == "user"
+    ]
+    query = next((item for item in user_messages if item.strip()), "")
+    if not query:
+        logger.warning("Search before planning skipped: no user query was found")
+        return []
+
+    try:
+        result = tavily_tool.invoke(
+            {"query": query},
+            config={"configurable": {"user_id": state.get("user_id")}},
+        )
+    except Exception as exc:
+        logger.warning("Search before planning failed and was skipped: %s", exc)
+        return []
+
+    if not isinstance(result, list):
+        logger.warning("Search before planning returned an unexpected result type: %s", type(result).__name__)
+        return []
+    return [item for item in result if isinstance(item, dict)]
+
+
+def _append_search_context(messages, searched_content: list[dict]):
+    if not searched_content or not messages:
+        return messages
+    normalized = [
+        {
+            "title": elem.get("title", ""),
+            "content": elem.get("content", ""),
+            "url": elem.get("url", ""),
+        }
+        for elem in searched_content
+    ]
+    enriched = deepcopy(messages)
+    enriched[-1]["content"] += (
+        "\n\n# Relevant Search Results\n\n"
+        + json.dumps(normalized, ensure_ascii=False)
+    )
+    return enriched
+
+
 def _ensure_scenario_prompt_defaults(prompt_state: dict) -> dict:
     """Populate scenario-related prompt fields so template rendering is resilient."""
     task_profile = prompt_state.get("task_profile")
@@ -128,6 +185,17 @@ def _ensure_scenario_prompt_defaults(prompt_state: dict) -> dict:
     if not prompt_state.get("EXPECTED_CAPABILITIES_TEXT"):
         prompt_state["EXPECTED_CAPABILITIES_TEXT"] = (
             ", ".join(str(item) for item in expected_capabilities) or "General"
+        )
+
+    routing_decision = prompt_state.get("routing_decision")
+    if not isinstance(routing_decision, dict):
+        routing_decision = {}
+        prompt_state["routing_decision"] = routing_decision
+    if not prompt_state.get("ROUTING_DECISION_TEXT"):
+        prompt_state["ROUTING_DECISION_TEXT"] = json.dumps(
+            routing_decision,
+            ensure_ascii=False,
+            indent=2,
         )
 
     return prompt_state
@@ -198,6 +266,117 @@ def _fallback_plan_steps(state: State) -> list[dict] | None:
         ]
 
     return None
+
+
+_PROFILE_INTENT_AGENT_PREFERENCES = {
+    "employee_information_query": ("RemoteHRAssistantAgent",),
+    "salary_query": ("RemoteHRAssistantAgent",),
+    "leave_record_query": ("RemoteOfficeAssistantAgent",),
+    "document_generation": ("RemoteDocumentGeneratorAgent",),
+    "report_generation": ("RemoteReportAgent", "RemoteDocumentGeneratorAgent"),
+    "message_or_email_send": ("RemoteEmailDispatchAgent", "RemoteCommunicationAgent"),
+    "meeting_arrangement": ("RemoteMeetingManagerAgent",),
+    "schedule_management": ("RemoteScheduleAgent", "RemoteHRCalendarAgent"),
+}
+
+
+def _normalize_text(value) -> str:
+    return str(value or "").strip().lower()
+
+
+def _plan_step_text(step: dict) -> str:
+    return " ".join(
+        _normalize_text(step.get(key))
+        for key in ("agent_name", "title", "description", "note")
+    )
+
+
+def _infer_step_intents(step: dict) -> set[str]:
+    text = _plan_step_text(step)
+    agent_name = str(step.get("agent_name") or "")
+    intents: set[str] = set()
+    compatible = {
+        intent
+        for intent, agents in _PROFILE_INTENT_AGENT_PREFERENCES.items()
+        if agent_name in agents
+    }
+    # Agent 能力不等于当前步骤意图。只有步骤文本和 Agent 能力同时匹配才计入，
+    # 避免把 HR Agent 描述中的“请假记录”误当成已经执行的独立查询。
+    if "employee_information_query" in compatible and any(
+        token in text for token in ("员工", "人员", "基础信息", "个人信息", "employee")
+    ):
+        intents.add("employee_information_query")
+    if "salary_query" in compatible and any(token in text for token in ("薪资", "工资", "收入")):
+        intents.add("salary_query")
+    if "leave_record_query" in compatible and any(
+        token in text for token in ("请假记录", "休假记录", "请假申请记录", "考勤记录", "leave record")
+    ):
+        intents.add("leave_record_query")
+    if "document_generation" in compatible and any(
+        token in text for token in ("文档", "证明", "申请书", "请假书", "请假条", "docx", "word")
+    ):
+        intents.add("document_generation")
+    if "report_generation" in compatible and any(token in text for token in ("报告", "总结", "汇报")):
+        intents.add("report_generation")
+    if "message_or_email_send" in compatible and any(token in text for token in ("发送", "发给", "邮件", "通知")):
+        intents.add("message_or_email_send")
+    if "meeting_arrangement" in compatible and any(token in text for token in ("会议", "开会", "参会")):
+        intents.add("meeting_arrangement")
+    if "schedule_management" in compatible and any(token in text for token in ("日程", "待办", "提醒", "有空")):
+        intents.add("schedule_management")
+
+    # 只有该 Agent 在映射中只承担一种意图时，才允许用 Agent 身份补足无关键词标题。
+    if not intents and len(compatible) == 1:
+        intents.update(compatible)
+    return intents
+
+
+def _plan_has_intent(steps: list[dict], intent: str) -> bool:
+    return any(intent in _infer_step_intents(step) for step in steps if isinstance(step, dict))
+
+
+def _first_step_index_for_intent(steps: list[dict], intent: str) -> int:
+    for index, step in enumerate(steps):
+        if isinstance(step, dict) and intent in _infer_step_intents(step):
+            return index
+    return len(steps)
+
+
+def _validate_plan_against_task_profile(steps: list, state: State) -> list[str]:
+    """检查 Planner 是否忠实覆盖画像，不自动补写或复制任何计划步骤。"""
+    if not isinstance(steps, list):
+        return ["计划不是步骤数组"]
+    profile = state.get("task_profile") or {}
+    subtasks = profile.get("subtasks") or []
+    if not isinstance(subtasks, list) or not subtasks:
+        return []
+
+    errors: list[str] = []
+    subtask_by_id = {
+        str(item.get("id")): item
+        for item in subtasks
+        if isinstance(item, dict) and item.get("id")
+    }
+    for subtask in subtasks:
+        if not isinstance(subtask, dict):
+            continue
+        intent = str(subtask.get("intent") or "")
+        if intent and not _plan_has_intent(steps, intent):
+            expected_agents = "、".join(_PROFILE_INTENT_AGENT_PREFERENCES.get(intent, ())) or "匹配该意图的 Agent"
+            errors.append(f"缺少意图 {intent} 的独立步骤，应由 {expected_agents} 执行")
+            continue
+        current_index = _first_step_index_for_intent(steps, intent)
+        for dependency_id in subtask.get("depends_on") or []:
+            dependency = subtask_by_id.get(str(dependency_id))
+            dependency_intent = str((dependency or {}).get("intent") or "")
+            if not dependency_intent:
+                continue
+            dependency_index = _first_step_index_for_intent(steps, dependency_intent)
+            if dependency_index >= current_index:
+                errors.append(
+                    f"意图 {dependency_intent} 必须在 {intent} 之前完成，不能合并或后置"
+                )
+    return list(dict.fromkeys(errors))
 
 
 async def _validate_plan_data_flow(steps: list, user_id: str) -> tuple[bool, list[str]]:
@@ -363,7 +542,9 @@ async def publisher_node(
         update={
             "messages": [
                 {
-                    "content": f"Next step is delegating to: {agent}\n",
+                    # Publisher 的后续判断依赖严格的 {"next": "agent_name"} 记录。
+                    # 使用机器可读 JSON，避免模型无法识别自然语言状态而重复派发。
+                    "content": json.dumps({"next": agent}, ensure_ascii=False),
                     "tool": "publisher",
                     "role": "assistant",
                 }
@@ -412,11 +593,40 @@ async def agent_proxy_node(state: State) -> Command[Literal["publisher", "__end_
     )
     await enforce_agent_dispatch(_agent, context)
 
-    # Remote agents receive full message history and extract parameters themselves
-    # using their own LLM. No local parameter extraction needed.
-    messages_to_send = state["messages"]
+    # 为执行 Agent 补充明确的当前任务上下文。Production 阶段的用户消息通常只有
+    # “Confirm execution”，若不附带原问题和规划步骤，Agent 会自行猜测甚至读取旧文件。
+    current_plan = cache.get_planning_steps(state["workflow_id"]) or []
+    assigned_steps = [
+        step
+        for step in current_plan
+        if isinstance(step, dict) and step.get("agent_name") == state["next"]
+    ]
+    execution_brief = {
+        "original_user_query": state.get("original_user_query")
+        or state.get("USER_QUERY")
+        or "",
+        "assigned_agent": state["next"],
+        "assigned_steps": assigned_steps,
+        "task_profile": state.get("task_profile", {}),
+        "instruction": (
+            "Complete only the assigned steps below. Base the answer on the "
+            "original user query. Do not inspect unrelated local workflow files."
+        ),
+    }
+    messages_to_send = list(state["messages"]) + [
+        {
+            "role": "user",
+            "content": "EXECUTION_CONTEXT\n"
+            + json.dumps(execution_brief, ensure_ascii=False, default=str),
+        }
+    ]
 
     execute_result = await execute_agent(_agent, messages_to_send, context)
+    if not execute_result.is_success:
+        error_detail = execute_result.error or "Unknown executor error"
+        raise RuntimeError(
+            f"Agent '{_agent.agent_name}' execution failed: {error_detail}"
+        )
     response_content = execute_result.result if execute_result.is_success else execute_result.error
     if response_content is None:
         response_content = ""
@@ -459,7 +669,9 @@ async def agent_proxy_node(state: State) -> Command[Literal["publisher", "__end_
                 }
                 ,
                 {
-                    "content": structured_result,
+                    # LangChain 消息 content 只接受字符串或内容块列表，不能直接放 dict。
+                    # 序列化后仍可在 Publisher 上下文中保留完整结构化结果。
+                    "content": json.dumps(structured_result, ensure_ascii=False, default=str),
                     "tool": "agent_proxy",
                     "role": "assistant",
                 }
@@ -483,7 +695,46 @@ async def planner_node(state: State) -> Command[Literal["publisher", "__end__"]]
     goto = "publisher"
     retry_messages = None
     retry_llm = None
+    plan_validation_failed = False
     runtime_event_handler = state.get("runtime_event_handler")
+
+    routing_decision = state.get("routing_decision") or {}
+    if state["workflow_mode"] == "launch" and routing_decision.get("decision") != "DISPATCH":
+        decision = routing_decision.get("decision", "CLARIFY")
+        reason_codes = routing_decision.get("reason_codes") or ["NO_CAPABLE_AGENT"]
+        task_profile = state.get("task_profile") or {}
+        missing_fields = task_profile.get("missing_fields") or []
+        thought = (
+            f"主Agent路由决策为 {decision}，原因：{', '.join(reason_codes)}。"
+            + (f" 需要补充字段：{', '.join(missing_fields)}。" if missing_fields else "")
+        )
+        content = json.dumps(
+            {"thought": thought, "steps": [], "new_agents_needed": []},
+            ensure_ascii=False,
+        )
+        cache.restore_planning_steps(state["workflow_id"], [], state["user_id"])
+        cache.restore_system_node(state["workflow_id"], "__end__", state["user_id"])
+        if callable(runtime_event_handler):
+            await runtime_event_handler(
+                {
+                    "event": "planner_delta",
+                    "agent_name": "planner",
+                    "data": {
+                        "delta": {"content": content},
+                        "full_content": content,
+                        "is_final": True,
+                    },
+                }
+            )
+        return Command(
+            update={
+                "messages": [{"content": content, "tool": "planner", "role": "assistant"}],
+                "agent_name": "planner",
+                "full_plan": content,
+                "planning_steps": [],
+            },
+            goto="__end__",
+        )
 
     if state["workflow_mode"] == "launch":
         prompt_state = dict(state)
@@ -524,24 +775,10 @@ async def planner_node(state: State) -> Command[Literal["publisher", "__end__"]]
 
         if state.get("search_before_planning"):
             search_start = time.time()
-            config = {"configurable": {"user_id": state.get("user_id")}}
-            searched_content = tavily_tool.invoke(
-                {
-                    "query": [
-                        "".join(message["content"])
-                        for message in state["messages"]
-                        if message["role"] == "user"
-                    ][0]
-                },
-                config=config,
-            )
+            searched_content = _search_before_planning(state)
             search_time = time.time() - search_start
             logger.info("[PERF] Web search: %.2fs", search_time)
-
-            messages = deepcopy(messages)
-            messages[-1]["content"] += (
-                f"\n\n# Relative Search Results\n\n{json.dumps([{'titile': elem['title'], 'content': elem['content']} for elem in searched_content], ensure_ascii=False)}"
-            )
+            messages = _append_search_context(messages, searched_content)
 
         cache.restore_system_node(state["workflow_id"], PLANNER, state["user_id"])
 
@@ -615,24 +852,10 @@ async def planner_node(state: State) -> Command[Literal["publisher", "__end__"]]
 
         if state.get("search_before_planning"):
             search_start = time.time()
-            config = {"configurable": {"user_id": state.get("user_id")}}
-            searched_content = tavily_tool.invoke(
-                {
-                    "query": [
-                        "".join(message["content"])
-                        for message in state["messages"]
-                        if message["role"] == "user"
-                    ][0]
-                },
-                config=config,
-            )
+            searched_content = _search_before_planning(state)
             search_time = time.time() - search_start
             logger.info("[PERF] Polish web search: %.2fs", search_time)
-
-            messages = deepcopy(messages)
-            messages[-1]["content"] += (
-                f"\n\n# Relative Search Results\n\n{json.dumps([{'titile': elem['title'], 'content': elem['content']} for elem in searched_content], ensure_ascii=False)}"
-            )
+            messages = _append_search_context(messages, searched_content)
 
         llm_start = time.time()
         model_type = "reasoning" if state.get("deep_thinking_mode") else AGENT_LLM_MAP["planner"]
@@ -719,12 +942,16 @@ async def planner_node(state: State) -> Command[Literal["publisher", "__end__"]]
             except Exception as exc:
                 logger.warning("[PERF] Retry exception: %s", exc)
 
-        # Validate plan data flow
+        # 同时校验 Agent 数据流与 TaskProfile 意图/依赖一致性。
+        # 校验失败时要求 Planner 重新生成，绝不按数量复制画像步骤。
         if steps is not None and state["workflow_mode"] == "launch":
             validation_start = time.time()
             is_valid, validation_errors = await _validate_plan_data_flow(
                 steps, state.get("user_id", "")
             )
+            profile_errors = _validate_plan_against_task_profile(steps, state)
+            validation_errors = list(validation_errors) + profile_errors
+            is_valid = is_valid and not profile_errors
             validation_time = time.time() - validation_start
             logger.info("[PERF] Plan validation: %.2fs", validation_time)
 
@@ -741,8 +968,9 @@ async def planner_node(state: State) -> Command[Literal["publisher", "__end__"]]
 
                         error_summary = "\n".join(f"- {err}" for err in validation_errors)
                         fix_note = (
-                            f"你生成的计划存在数据流错误，请修正：\n\n{error_summary}\n\n"
+                            f"你生成的计划与任务画像或数据流不一致，请修正：\n\n{error_summary}\n\n"
                             "修正要求：\n"
+                            "0. TaskProfile 中每个不同的业务意图必须由能力匹配的 Agent 形成独立步骤，不得把请假记录查询合并进员工基础信息查询\n"
                             "1. 如果某个Agent需要的参数（在'Requires'字段中）没有来源，你必须在它之前添加一个步骤来获取这些数据\n"
                             "2. 每个有'Requires'字段的Agent都必须在inputs中明确映射所有必需参数\n"
                             "3. 每个InputMapping的source_step必须是之前步骤中存在的agent_name\n"
@@ -768,9 +996,15 @@ async def planner_node(state: State) -> Command[Literal["publisher", "__end__"]]
                                 is_fixed_valid, fixed_errors = await _validate_plan_data_flow(
                                     fixed_steps, state.get("user_id", "")
                                 )
+                                fixed_profile_errors = _validate_plan_against_task_profile(
+                                    fixed_steps, state
+                                )
+                                fixed_errors = list(fixed_errors) + fixed_profile_errors
+                                is_fixed_valid = is_fixed_valid and not fixed_profile_errors
                                 if is_fixed_valid:
                                     steps = fixed_steps
                                     raw_content = fix_content
+                                    is_valid = True
                                     logger.info("[PERF] Plan fix succeeded")
                                 else:
                                     logger.warning(
@@ -783,7 +1017,20 @@ async def planner_node(state: State) -> Command[Literal["publisher", "__end__"]]
                     except Exception as exc:
                         logger.warning(f"[PERF] Plan fix exception: {exc}")
 
-        if steps == [] and state["workflow_mode"] == "launch":
+                if not is_valid:
+                    plan_validation_failed = True
+                    steps = []
+                    raw_content = json.dumps(
+                        {
+                            "thought": "Planner 计划未通过任务画像一致性校验，已停止执行。",
+                            "validation_errors": validation_errors,
+                            "steps": [],
+                            "new_agents_needed": [],
+                        },
+                        ensure_ascii=False,
+                    )
+
+        if steps == [] and state["workflow_mode"] == "launch" and not plan_validation_failed:
             fallback_steps = _fallback_plan_steps(state)
             if fallback_steps:
                 steps = fallback_steps

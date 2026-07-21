@@ -1,0 +1,23 @@
+{
+  "diagram_id": "superagent-launch-planning-flow",
+  "diagram_name": "02 Launch 规划流程",
+  "canvas": {"w": 2500, "h": 1200, "page_width": 2500, "page_height": 1200},
+  "style_tokens": {"font_title": 25, "font_title_family": "Microsoft YaHei", "font_body": 17, "font_body_family": "Microsoft YaHei", "font_caption": 15, "font_caption_family": "Microsoft YaHei", "font_formula": 20, "font_formula_family": "Arial", "stroke": 2, "stack_dx": 18, "stack_dy": -16, "arrow_width": 2, "palette": "cool_gray_blue", "default_connector_route": "straight", "centerline_tolerance": 150, "title_gap": 50, "body_gap": 55, "caption_gap": 35, "formula_gap": 35},
+  "constraints": ["launch planning main path reads left to right", "clarify or reject branch terminates below routing", "saved plan is the final station"],
+  "nodes": [
+    {"id":"input","kind":"flat_box","lane":"main","role":"primary","x":50,"y":400,"w":190,"h":85,"title":{"text":"用户任务","anchor":"center","box_w":180}},
+    {"id":"cache","kind":"flat_box","lane":"main","role":"primary","x":300,"y":400,"w":220,"h":85,"title":{"text":"初始化 WorkflowCache","anchor":"center","box_w":210}},
+    {"id":"team","kind":"flat_box","lane":"main","role":"primary","x":580,"y":400,"w":220,"h":85,"title":{"text":"构建可用 Agent 集合","anchor":"center","box_w":210}},
+    {"id":"route","kind":"flat_box","lane":"main","role":"primary","x":860,"y":400,"w":230,"h":85,"title":{"text":"主 Agent 路由","anchor":"center","box_w":220},"body":{"text":"画像 → 能力卡 → 权限候选","anchor":"bottom","gap":36,"box_w":280}},
+    {"id":"coordinator","kind":"flat_box","lane":"main","role":"primary","x":1170,"y":400,"w":210,"h":85,"title":{"text":"Coordinator","anchor":"center","box_w":200}},
+    {"id":"planner","kind":"flat_box","lane":"main","role":"primary","x":1450,"y":400,"w":220,"h":85,"title":{"text":"Planner","anchor":"center","box_w":210},"body":{"text":"生成步骤并校验数据流","anchor":"bottom","gap":36,"box_w":290}},
+    {"id":"publisher","kind":"flat_box","lane":"main","role":"primary","x":1750,"y":400,"w":210,"h":85,"title":{"text":"Publisher","anchor":"center","box_w":200}},
+    {"id":"save","kind":"flat_box","lane":"main","role":"primary","x":2040,"y":400,"w":270,"h":85,"title":{"text":"保存工作流与规划步骤","anchor":"center","box_w":260}},
+    {"id":"clarify","kind":"flat_box","lane":"auxiliary","role":"primary","x":840,"y":720,"w":280,"h":80,"title":{"text":"CLARIFY / REJECT","anchor":"center","box_w":270},"body":{"text":"当前生成空计划并结束","anchor":"bottom","gap":34,"box_w":280}},
+    {"id":"edit","kind":"flat_box","lane":"auxiliary","role":"primary","x":1730,"y":720,"w":260,"h":80,"title":{"text":"用户修改 / 重试规划","anchor":"center","box_w":250}}
+  ],
+  "connectors": [
+    {"id":"e1","kind":"connector_arrow","source":"input","target":"cache","route":"straight"},{"id":"e2","kind":"connector_arrow","source":"cache","target":"team","route":"straight"},{"id":"e3","kind":"connector_arrow","source":"team","target":"route","route":"straight"},{"id":"e4","kind":"connector_arrow","source":"route","target":"coordinator","route":"straight"},{"id":"e5","kind":"connector_arrow","source":"coordinator","target":"planner","route":"straight"},{"id":"e6","kind":"connector_arrow","source":"planner","target":"publisher","route":"straight"},{"id":"e7","kind":"connector_arrow","source":"publisher","target":"save","route":"straight"},
+    {"id":"e8","kind":"connector_arrow","source":"route","target":"clarify","source_anchor":"bottom","target_anchor":"top","route":"orthogonal"},{"id":"e9","kind":"connector_arrow","source":"publisher","target":"edit","source_anchor":"bottom","target_anchor":"top","route":"orthogonal"},{"id":"e10","kind":"connector_arrow","source":"edit","target":"planner","source_anchor":"left","target_anchor":"bottom","route":"orthogonal","waypoints":[{"x":1550,"y":760}]}
+  ]
+}

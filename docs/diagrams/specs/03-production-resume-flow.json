@@ -1,0 +1,25 @@
+{
+  "diagram_id": "superagent-production-resume-flow",
+  "diagram_name": "03 Production 执行与恢复",
+  "canvas": {"w": 2500, "h": 1250, "page_width": 2500, "page_height": 1250},
+  "style_tokens": {"font_title": 24, "font_title_family": "Microsoft YaHei", "font_body": 17, "font_body_family": "Microsoft YaHei", "font_caption": 15, "font_caption_family": "Microsoft YaHei", "font_formula": 20, "font_formula_family": "Arial", "stroke": 2, "stack_dx": 18, "stack_dy": -16, "arrow_width": 2, "palette": "cool_gray_blue", "default_connector_route": "straight", "centerline_tolerance": 150, "title_gap": 50, "body_gap": 55, "caption_gap": 35, "formula_gap": 35},
+  "constraints": ["production path reads left to right", "publisher and agent proxy form an explicit loop", "resume path feeds into prepared execution state"],
+  "nodes": [
+    {"id":"start","kind":"flat_box","lane":"main","role":"primary","x":50,"y":400,"w":200,"h":85,"title":{"text":"Production 请求","anchor":"center","box_w":190}},
+    {"id":"load","kind":"flat_box","lane":"main","role":"primary","x":310,"y":400,"w":230,"h":85,"title":{"text":"加载工作流与步骤","anchor":"center","box_w":220}},
+    {"id":"prepare","kind":"flat_box","lane":"main","role":"primary","x":610,"y":400,"w":260,"h":85,"title":{"text":"构建执行 Graph / Queue","anchor":"center","box_w":250}},
+    {"id":"checkpoint0","kind":"flat_box","lane":"main","role":"primary","x":940,"y":400,"w":220,"h":85,"title":{"text":"保存 Step 0","anchor":"center","box_w":210}},
+    {"id":"publisher","kind":"flat_box","lane":"main","role":"primary","x":1240,"y":400,"w":210,"h":85,"title":{"text":"Publisher 选下一步","anchor":"center","box_w":200}},
+    {"id":"proxy","kind":"flat_box","lane":"main","role":"primary","x":1530,"y":400,"w":210,"h":85,"title":{"text":"AgentProxy 执行","anchor":"center","box_w":200}},
+    {"id":"savecp","kind":"flat_box","lane":"main","role":"primary","x":1820,"y":400,"w":230,"h":85,"title":{"text":"日志 + Checkpoint","anchor":"center","box_w":220}},
+    {"id":"end","kind":"flat_box","lane":"main","role":"primary","x":2140,"y":400,"w":220,"h":85,"title":{"text":"结束节点 / 最终事件","anchor":"center","box_w":210}},
+    {"id":"resume","kind":"flat_box","lane":"auxiliary","role":"primary","x":250,"y":760,"w":230,"h":85,"title":{"text":"Resume 请求","anchor":"center","box_w":220}},
+    {"id":"restore","kind":"flat_box","lane":"auxiliary","role":"primary","x":570,"y":760,"w":300,"h":85,"title":{"text":"读取上一步 Checkpoint","anchor":"center","box_w":290},"body":{"text":"恢复状态和下一节点","anchor":"bottom","gap":36,"box_w":260}},
+    {"id":"fast","kind":"flat_box","lane":"auxiliary","role":"primary","x":960,"y":760,"w":280,"h":85,"title":{"text":"清理未来检查点并快进队列","anchor":"center","box_w":270}}
+  ],
+  "connectors": [
+    {"id":"e1","kind":"connector_arrow","source":"start","target":"load","route":"straight"},{"id":"e2","kind":"connector_arrow","source":"load","target":"prepare","route":"straight"},{"id":"e3","kind":"connector_arrow","source":"prepare","target":"checkpoint0","route":"straight"},{"id":"e4","kind":"connector_arrow","source":"checkpoint0","target":"publisher","route":"straight"},{"id":"e5","kind":"connector_arrow","source":"publisher","target":"proxy","route":"straight"},{"id":"e6","kind":"connector_arrow","source":"proxy","target":"savecp","route":"straight"},{"id":"e7","kind":"connector_arrow","source":"savecp","target":"end","route":"straight"},
+    {"id":"loop","kind":"connector_arrow","source":"savecp","target":"publisher","source_anchor":"bottom","target_anchor":"bottom","route":"orthogonal","waypoints":[{"x":1930,"y":610},{"x":1345,"y":610}]},
+    {"id":"r1","kind":"connector_arrow","source":"resume","target":"restore","route":"straight"},{"id":"r2","kind":"connector_arrow","source":"restore","target":"fast","route":"straight"},{"id":"r3","kind":"connector_arrow","source":"fast","target":"publisher","source_anchor":"top","target_anchor":"bottom","route":"orthogonal"}
+  ]
+}

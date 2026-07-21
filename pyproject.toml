@@ -10,8 +10,9 @@ authors = [
 ]
 description = "Cooragent project"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.12,<3.13"
 dependencies = [
+    "click>=8.1.7",
     "httpx>=0.28.1",
     "langchain-community>=0.3.19",
     "langchain-experimental>=0.3.4",

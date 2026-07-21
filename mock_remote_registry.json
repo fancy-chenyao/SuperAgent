@@ -506,7 +506,7 @@
         "llm_type": "basic",
         "prompt": "You are an office assistant that helps employees with leave and travel applications. Extract employee_id and employee_name from previous agent results in the conversation history.",
         "requires": ["employee.id", "employee.name"],
-        "produces": ["application.record_id", "application.status", "application.message"],
+        "produces": ["application.record_id", "application.status", "application.message", "employee.leave_records", "employee.travel_records"],
         "selected_tools": [
           {
             "name": "save_leave_record",

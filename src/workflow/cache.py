@@ -312,11 +312,10 @@ class WorkflowCache:
         Returns:
             迭代轮次，如果不存在则返回0
         """
-        try:
-            return self.cache[workflow_id]["lap"]
-        except Exception as e:
-            logger.error(f"Error getting lap: {e}")
-            return 0  # Return default value instead of None
+        workflow = self.cache.get(workflow_id)
+        if not isinstance(workflow, dict):
+            return 0
+        return workflow.get("lap", 0)
 
     def restore_system_node(self, workflow_id: str, node: Union[Component, str], user_id: str):
         """恢复系统节点到工作流缓存

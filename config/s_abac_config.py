@@ -86,7 +86,7 @@ AGENT_SECURITY_ATTRIBUTES = {
         "job_role": "office_operations_agent",
         "clearance_level": 3,
         "trust_level": "HIGH",
-        "grants": ["leave_write", "travel_write"],
+        "grants": ["leave_read", "leave_write", "travel_read", "travel_write"],
     },
     "RemoteDocumentGeneratorAgent": {
         "role": "DocumentAgent",
@@ -346,8 +346,8 @@ RESOURCE_SECURITY_ATTRIBUTES = {
         "allowed_roles": ["UniversalAssistant", "OperationAgent", "CommunicationAgent"],
         "allowed_job_roles": ["office_operator", "office_manager", "communication_officer", "hr_manager", "system_orchestrator"],
         "allowed_operation_modes": ["delegate", "write", "query"],
-        "scenario_tags": ["leave_request", "travel_request", "office_operation"],
-        "expected_capabilities": ["Operations"],
+        "scenario_tags": ["leave_record_query", "leave_request", "travel_service", "travel_request", "office_operation"],
+        "expected_capabilities": ["HR", "Office", "Operations"],
     },
     "tavily_search_results_json": {
         "owner_agent": "researcher",
@@ -490,6 +490,17 @@ RESOURCE_SECURITY_ATTRIBUTES = {
         "scenario_tags": ["leave_request"],
         "expected_capabilities": ["Operations"],
         "requires_approval": True,
+    },
+    "query_leave_record": {
+        "owner_agent": "RemoteOfficeAssistantAgent",
+        "capability_domain": "HR",
+        "department_domain": "Office",
+        "sensitivity": "HIGH",
+        "allowed_roles": ["OperationAgent", "HRAgent", "UniversalAssistant"],
+        "allowed_job_roles": ["office_operator", "office_manager", "hr_manager", "system_orchestrator"],
+        "allowed_operation_modes": ["query", "read"],
+        "scenario_tags": ["leave_record_query", "leave_request", "hr_service"],
+        "expected_capabilities": ["HR", "Office", "Operations"],
     },
     "save_travel_record": {
         "owner_agent": "RemoteOfficeAssistantAgent",

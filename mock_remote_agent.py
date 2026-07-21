@@ -17,8 +17,8 @@ from dotenv import load_dotenv
 # Import agent factory
 from remote_agents.factory import AgentFactory
 
-# 加载.env文件
-load_dotenv()
+# 本地远程 Agent Demo 与主服务共用项目 .env。
+load_dotenv(override=True)
 
 # Configure logging
 logging.basicConfig(
@@ -220,10 +220,12 @@ Special Extraction Rules for {tool_name}:
 - For document generation tools (remote_docx_generator_tool):
   * Extract employee data from previous agent results in the conversation history
   * Look for employee information in JSON format from RemoteHRAssistantAgent
-  * The "data" parameter should contain: name, id_number, position, join_date, monthly_salary, annual_salary
+  * The "data" parameter should contain: name, id_number, position, join_date, monthly_salary, annual_salary, document_type
   * Extract these fields from the employee record in previous messages
   * If generating income_proof, use template_name="income_proof"
   * If generating employment_certificate, use template_name="employment_certificate"
+  * If the user asks for "请假申请书", "请假申请", "请假条", or task_profile.entities.document_type is "leave_application", use template_name="leave_application"
+  * For leave_application, set output_filename to "leave_application_<员工姓名>_<YYYYMMDD>" and include leave_start_date, leave_end_date, leave_days, leave_reason in data. If dates/reason are not provided, use "待补充" for those fields.
 
 Examples:
 User: "查询二级分支行80后行长"
@@ -241,6 +243,10 @@ Output: {{"job_keywords": ["行长", "秘书"]}}
 User: "帮王强开买房用的个人收入证明"
 Previous Agent Result: {{"adtEmpeNm": "王强", "idvId": "86000103", "tcoPostNm": "支行行长", "jnUnitDt": "2005-07-01", "monthly_salary": 28000.0, "annual_salary": 336000.0}}
 Output: {{"template_name": "income_proof", "data": {{"name": "王强", "id_number": "86000103", "position": "支行行长", "join_date": "2005年7月1日", "monthly_salary": "28000.00", "annual_salary": "336000.00"}}, "output_filename": "income_proof_王强_20260326"}}
+
+User: "帮李娜生成一份请假申请书"
+Previous Agent Result: {{"adtEmpeNm": "李娜", "idvId": "86000102", "tcoPostNm": "系统工程师", "jnUnitDt": "2019-03-01"}}
+Output: {{"template_name": "leave_application", "data": {{"name": "李娜", "id_number": "86000102", "position": "系统工程师", "join_date": "2019年3月1日", "document_type": "leave_application", "leave_start_date": "待补充", "leave_end_date": "待补充", "leave_days": "待补充", "leave_reason": "待补充"}}, "output_filename": "leave_application_李娜_20260720"}}
 
 Output Format:
 {{

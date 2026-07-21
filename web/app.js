@@ -1,4 +1,8 @@
 ﻿const statusIndicator = document.getElementById("statusIndicator");
+const readinessBanner = document.getElementById("readinessBanner");
+const readinessTitle = document.getElementById("readinessTitle");
+const readinessComponents = document.getElementById("readinessComponents");
+const readinessHint = document.getElementById("readinessHint");
 const tabs = document.querySelectorAll(".tab");
 const panels = document.querySelectorAll(".panel");
 
@@ -67,6 +71,14 @@ const cancelPlanNlBtn = document.getElementById("cancelPlanNl");
 const applyPlanNlBtn = document.getElementById("applyPlanNl");
 const planNlInput = document.getElementById("planNlInput");
 const planNlHint = document.getElementById("planNlHint");
+const mainAgentDecisionCard = document.getElementById("mainAgentDecisionCard");
+const routingDecisionBadge = document.getElementById("routingDecisionBadge");
+const taskProfileView = document.getElementById("taskProfileView");
+const routingCandidatesView = document.getElementById("routingCandidatesView");
+const routingExcludedView = document.getElementById("routingExcludedView");
+const decisionTopAgentSummary = document.getElementById("decisionTopAgentSummary");
+const decisionDetailTabs = document.getElementById("decisionDetailTabs");
+const decisionDetailPanel = document.getElementById("decisionDetailPanel");
 
 let currentAbortController = null;
 let planningOutputBlocks = new Map();
@@ -74,6 +86,7 @@ let executionOutputBlocks = new Map();
 let executionStepCards = [];       // Step cards for execution log: {id, agentName, displayName, status, content, startTime, endTime, summary}
 let currentStepCard = null;        // Currently active (running) step card
 let executionStepCount = 0;        // Monotonic step counter
+let activeDecisionDetailTab = null;
 let flowSteps = [];
 let activeStepIndex = -1;
 const MAX_FLOW_STEPS = 40;
@@ -104,6 +117,7 @@ let instructionHistory = [];
 let originalUserQuery = "";
 let currentRunContext = null;
 let executionInProgress = false;
+let runtimeCanRun = false;
 let workflowsPage = 1;
 let workflowsPageSize = 5;
 let workflowsTotal = 0;
@@ -133,6 +147,67 @@ const setStatus = (text, active = true) => {
     : "0 0 12px rgba(255, 106, 106, 0.7)";
 };
 
+const readinessChip = (label, ok) =>
+  `<span class="readiness-chip${ok ? "" : " warn"}">${label}</span>`;
+
+const loadReadiness = async () => {
+  if (!readinessBanner) return;
+  runtimeCanRun = false;
+  runBtn.disabled = true;
+  readinessBanner.className = "readiness-banner loading";
+  try {
+    const response = await fetch("/api/health/ready");
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const data = await response.json();
+    const components = data.components || {};
+    const modelsReady = Boolean(components.models?.configured);
+    const agentsReady = Boolean(components.agents?.ready);
+    const searchReady = Boolean(components.search?.configured);
+    const mcpConfigured = Boolean(components.mcp?.configured);
+    runtimeCanRun = modelsReady && agentsReady;
+
+    readinessBanner.className = `readiness-banner ${data.ready ? "ready" : "degraded"}`;
+    readinessTitle.textContent = data.ready ? "核心运行环境已就绪" : "运行环境部分可用";
+    readinessComponents.innerHTML = [
+      readinessChip("页面可用", true),
+      readinessChip(modelsReady ? "模型已配置" : "模型未配置", modelsReady),
+      readinessChip(
+        agentsReady ? `Agent ${components.agents?.count || 0} 个` : "Agent 未就绪",
+        agentsReady,
+      ),
+      readinessChip(searchReady ? "规划搜索可用" : "规划搜索未配置", searchReady),
+      readinessChip(
+        mcpConfigured ? `MCP 已配置 ${components.mcp?.server_count || 0} 个` : "MCP 未配置",
+        mcpConfigured,
+      ),
+    ].join("");
+
+    if (!modelsReady) {
+      readinessHint.textContent = "缺少基础模型或推理模型配置：可以浏览页面，但暂不能运行任务。";
+    } else if (!agentsReady) {
+      readinessHint.textContent = components.agents?.error || "Agent 初始化失败，请查看服务端日志。";
+    } else if (!searchReady) {
+      readinessHint.textContent = "核心工作流可运行；未配置 Tavily，已自动关闭规划前搜索。";
+    } else {
+      readinessHint.textContent = "页面、模型和 Agent 已就绪；MCP 状态按具体服务配置独立判断。";
+    }
+
+    if (searchBeforeInput && !searchReady) {
+      searchBeforeInput.checked = false;
+      searchBeforeInput.disabled = true;
+      searchBeforeInput.title = components.search?.reason || "规划前搜索未配置";
+    }
+    runBtn.disabled = !runtimeCanRun;
+  } catch (error) {
+    runtimeCanRun = false;
+    readinessBanner.className = "readiness-banner error";
+    readinessTitle.textContent = "运行环境检查失败";
+    readinessComponents.innerHTML = readinessChip("就绪接口不可用", false);
+    readinessHint.textContent = error.message || String(error);
+    runBtn.disabled = true;
+  }
+};
+
 const resetSummary = () => {
   summaryFlow.innerHTML = "";
   summaryHint.classList.add("hidden");
@@ -144,6 +219,14 @@ const resetSummary = () => {
 };
 
 const resetPlan = () => {
+  if (mainAgentDecisionCard) mainAgentDecisionCard.style.display = "none";
+  activeDecisionDetailTab = null;
+  if (decisionTopAgentSummary) decisionTopAgentSummary.innerHTML = "";
+  if (decisionDetailTabs) decisionDetailTabs.innerHTML = "";
+  if (decisionDetailPanel) {
+    decisionDetailPanel.classList.remove("open");
+    decisionDetailPanel.innerHTML = "";
+  }
   if (planSummary) planSummary.innerHTML = "";
   if (planHint) {
     planHint.classList.add("hidden");
@@ -834,6 +917,74 @@ const formatResult = (rawContent) => {
   return wrap;
 };
 
+const RESULT_FIELD_LABELS = {
+  adtEmpeNm: "姓名",
+  gnd: "性别",
+  brthDt: "出生日期",
+  age: "年龄",
+  education: "学历",
+  hgstEddgrNm: "最高学历",
+  grdtUnvrstNm: "毕业院校",
+  mjrNm: "专业",
+  holdposInstNm: "工作单位",
+  instFullNm: "机构路径",
+  instAttrChnNm: "机构性质",
+  nwgntPstNm: "岗位",
+  tcoPostNm: "职务",
+  postCmnt: "职务性质",
+  empeStdsc: "在职状态",
+  officePhone: "办公电话",
+  internalMaiBox: "内部邮箱",
+  idvId: "员工编号",
+  empeInfBtlmprBtnc: "7位工号",
+  a001735: "15位工号",
+  psntype: "员工类别",
+  profTechQuaDsc: "职称",
+  jnUnitDt: "来本行时间",
+  jnCcbDt: "来建行时间",
+  pcsTrdYrlmt: "工龄",
+  mbshYrlmt: "行龄",
+  monthly_salary: "月收入",
+  annual_salary: "年收入",
+  currency: "币种",
+  salary_last_updated: "薪资更新日期",
+  employee_id: "员工编号",
+  employee_name: "姓名",
+  id_number: "证件号",
+  status: "状态",
+};
+
+const RESULT_FIELD_PRIORITY = [
+  "adtEmpeNm",
+  "employee_name",
+  "gnd",
+  "age",
+  "hgstEddgrNm",
+  "education",
+  "tcoPostNm",
+  "nwgntPstNm",
+  "instFullNm",
+  "holdposInstNm",
+  "empeStdsc",
+  "idvId",
+  "empeInfBtlmprBtnc",
+  "a001735",
+  "internalMaiBox",
+  "monthly_salary",
+  "annual_salary",
+  "currency",
+  "salary_last_updated",
+];
+
+const getResultColumnLabel = (key) => RESULT_FIELD_LABELS[key] || key;
+
+const getResultColumns = (records) => {
+  const all = Array.from(new Set(records.flatMap((row) => Object.keys(row || {}))));
+  const priority = RESULT_FIELD_PRIORITY.filter((key) => all.includes(key));
+  const rest = all.filter((key) => !priority.includes(key));
+  return priority.concat(rest);
+};
+
 const buildResultTable = (records) => {
   const wrapper = document.createElement("div");
   wrapper.className = "step-result-table-wrapper";
@@ -841,14 +992,14 @@ const buildResultTable = (records) => {
   const MAX_ROWS = 10;
   const displayRecords = records.slice(0, MAX_ROWS);
   const hasMore = records.length > MAX_ROWS;
-  const cols = Object.keys(displayRecords[0]);
+  const cols = getResultColumns(displayRecords);
 
   const table = document.createElement("table");
   table.className = "step-result-table";
 
   const thead = document.createElement("thead");
   const hr = document.createElement("tr");
-  cols.forEach((c) => { const th = document.createElement("th"); th.textContent = c; hr.appendChild(th); });
+  cols.forEach((c) => { const th = document.createElement("th"); th.textContent = getResultColumnLabel(c); hr.appendChild(th); });
   thead.appendChild(hr);
   table.appendChild(thead);
 
@@ -939,6 +1090,242 @@ const escapeHtml = (str) => {
   const div = document.createElement("div");
   div.textContent = str || "";
   return div.innerHTML;
+};
+
+const renderDecisionDetailControls = (sections) => {
+  if (!decisionDetailTabs || !decisionDetailPanel) return;
+  const visibleSections = sections.filter((section) => section && !section.hidden);
+  if (!visibleSections.some((section) => section.id === activeDecisionDetailTab)) {
+    activeDecisionDetailTab = null;
+  }
+
+  decisionDetailTabs.innerHTML = visibleSections.map((section) => {
+    const active = section.id === activeDecisionDetailTab;
+    const label = section.count !== undefined && section.count !== null
+      ? `${section.label} ${section.count}`
+      : section.label;
+    return `<button
+        type="button"
+        class="decision-detail-tab${active ? " active" : ""}"
+        data-decision-tab="${escapeHtml(section.id)}"
+        aria-expanded="${active ? "true" : "false"}"
+        aria-controls="decision-detail-panel-content"
+      >${escapeHtml(label)}</button>`;
+  }).join("");
+
+  decisionDetailTabs.querySelectorAll("button[data-decision-tab]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const nextTab = button.dataset.decisionTab;
+      activeDecisionDetailTab = activeDecisionDetailTab === nextTab ? null : nextTab;
+      renderDecisionDetailControls(sections);
+    });
+  });
+
+  const activeSection = visibleSections.find((section) => section.id === activeDecisionDetailTab);
+  if (!activeSection) {
+    decisionDetailPanel.classList.remove("open");
+    decisionDetailPanel.innerHTML = '<div class="decision-detail-panel-inner" id="decision-detail-panel-content"></div>';
+    return;
+  }
+
+  decisionDetailPanel.classList.add("open");
+  decisionDetailPanel.innerHTML = `
+    <div class="decision-detail-panel-inner" id="decision-detail-panel-content" role="region" aria-label="${escapeHtml(activeSection.title)}">
+      <div class="decision-detail-section">
+        <h4>${escapeHtml(activeSection.title)}</h4>
+        ${activeSection.html}
+      </div>
+    </div>`;
+};
+
+const renderRoutingDecision = (eventData) => {
+  if (!mainAgentDecisionCard) return;
+  const profile = eventData?.task_profile || {};
+  const route = eventData?.routing_decision || {};
+  const candidates = Array.isArray(route.candidate_agents) ? route.candidate_agents : [];
+  const excluded = Array.isArray(route.excluded_agents) ? route.excluded_agents : [];
+  const decision = route.decision || "UNKNOWN";
+  const subtasks = Array.isArray(profile.subtasks) ? profile.subtasks : [];
+  const segments = Array.isArray(profile.segments) ? profile.segments : [];
+  const intentNodes = Array.isArray(profile.intent_nodes) ? profile.intent_nodes : [];
+  const confidenceFactors = Array.isArray(profile.confidence_factors) ? profile.confidence_factors : [];
+  const entities = profile.entities && typeof profile.entities === "object" && !Array.isArray(profile.entities)
+    ? profile.entities
+    : {};
+  const subIntents = Array.isArray(profile.sub_intents) && profile.sub_intents.length
+    ? profile.sub_intents
+    : profile.intent
+      ? [profile.intent]
+      : [];
+  const formatList = (value) => {
+    if (Array.isArray(value)) return value.length ? value.join(", ") : "-";
+    return value || "-";
+  };
+  const formatEntityValue = (value) => Array.isArray(value) ? value.join(", ") : String(value ?? "");
+  mainAgentDecisionCard.style.display = "";
+  routingDecisionBadge.textContent = `${decision} · ${Math.round((route.confidence || 0) * 100)}%`;
+  routingDecisionBadge.className = `tag ${decision === "DISPATCH" ? "accent" : "warn"}`;
+
+  const profileItems = [
+    ["主意图", profile.intent || "-"],
+    ["复合任务", profile.is_composite ? "是" : "否"],
+    ["任务类型", profile.task_type || "-"],
+    ["动作", profile.action || profile.operation_mode || "-"],
+    ["风险", profile.risk_level || profile.risk_profile || "-"],
+    ["期望能力", formatList(profile.expected_capabilities)],
+    ["缺失字段", formatList(profile.missing_fields) === "-" ? "无" : formatList(profile.missing_fields)],
+    ["子任务数", subtasks.length ? String(subtasks.length) : "-"],
+    ["画像置信度", `${Math.round((profile.confidence || 0) * 100)}%`],
+  ];
+  const profileHtml = profileItems
+    .map(([label, value]) => `<div class="decision-profile-item"><small>${escapeHtml(label)}</small>${escapeHtml(String(value))}</div>`)
+    .join("");
+  const subIntentsHtml = `<div class="decision-profile-item decision-profile-wide">
+      <small>多意图识别 / 子意图</small>
+      ${intentNodes.length
+        ? `<div class="decision-tags">${intentNodes.map((item) => `<span title="${escapeHtml(item.text_span || "")}">${escapeHtml(item.name || "-")} · ${Math.round((item.confidence || 0) * 100)}%</span>`).join("")}</div>`
+        : subIntents.length
+          ? `<div class="decision-tags">${subIntents.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}</div>`
+        : '<div class="decision-empty">暂无子意图；当前结果可能是旧任务记录，或该输入被识别为单意图。</div>'}
+    </div>`;
+  const segmentsHtml = `<div class="decision-profile-item decision-profile-wide">
+      <small>任务边界 / 文本片段</small>
+      ${segments.length
+        ? `<div class="decision-subtask-list">
+            ${segments.map((item, index) => `
+              <div class="decision-subtask">
+                <span>${index + 1}. ${escapeHtml(item.text || "-")}</span>
+                <em>${escapeHtml(item.id || "-")} · ${escapeHtml(String(item.start ?? "-"))}-${escapeHtml(String(item.end ?? "-"))}</em>
+              </div>`).join("")}
+          </div>`
+        : '<div class="decision-empty">暂无文本片段。</div>'}
+    </div>`;
+  const entitiesHtml = `<div class="decision-profile-item decision-profile-wide">
+      <small>实体识别</small>
+      ${Object.keys(entities).length
+        ? `<div class="decision-tags">${Object.entries(entities).map(([key, value]) => `<span>${escapeHtml(key)}：${escapeHtml(formatEntityValue(value))}</span>`).join("")}</div>`
+        : '<div class="decision-empty">暂无实体。</div>'}
+    </div>`;
+  const dataScopeHtml = profile.data_scope
+    ? `<div class="decision-profile-item decision-profile-wide">
+        <small>数据范围</small>
+        <div class="decision-tags">${(Array.isArray(profile.data_scope) ? profile.data_scope : String(profile.data_scope).split(",")).filter(Boolean).map((item) => `<span>${escapeHtml(String(item).trim())}</span>`).join("")}</div>
+      </div>`
+    : "";
+  const subtasksHtml = `<div class="decision-profile-item decision-profile-wide">
+      <small>子任务拆解</small>
+      ${subtasks.length
+        ? `<div class="decision-subtask-list">
+            ${subtasks.map((item, index) => `
+              <div class="decision-subtask">
+                <span>${index + 1}. ${escapeHtml(item.goal || item.intent || "-")}</span>
+                <em>${escapeHtml(item.intent || "-")} · ${escapeHtml(item.task_type || "-")} · ${escapeHtml(formatList(item.expected_capabilities))} · 依赖：${escapeHtml(formatList(item.depends_on))}</em>
+              </div>`).join("")}
+          </div>`
+        : '<div class="decision-empty">暂无子任务拆解；请重新 Run 一次复杂指令生成新结果。</div>'}
+    </div>`;
+  const confidenceFactorsHtml = `<div class="decision-profile-item decision-profile-wide">
+      <small>置信度原因</small>
+      ${confidenceFactors.length
+        ? `<div class="decision-subtask-list">
+            ${confidenceFactors.map((item) => `<div class="decision-reason">• ${escapeHtml(item)}</div>`).join("")}
+          </div>`
+        : '<div class="decision-empty">暂无置信度原因。</div>'}
+    </div>`;
+  const candidatesHtml = candidates.length
+    ? candidates.map((item) => `
+        <div class="decision-item">
+          <strong>${escapeHtml(item.agent_id || "-")}</strong>
+          <span class="decision-score">${Math.round((item.score || 0) * 100)}%</span>
+          <div class="decision-reason">${escapeHtml((item.reason_codes || []).join(" · "))}</div>
+        </div>`).join("")
+    : '<div class="decision-item decision-reason">没有合法候选 Agent</div>';
+
+  const visibleExcluded = excluded.slice(0, 8);
+  const excludedHtml = visibleExcluded.length
+    ? visibleExcluded.map((item) => `
+        <div class="decision-item">
+          <strong>${escapeHtml(item.agent_id || "-")}</strong>
+          <div class="decision-reason">${escapeHtml(item.reason_code || "")}：${escapeHtml(item.reason || "")}</div>
+        </div>`).join("")
+        + (excluded.length > visibleExcluded.length
+          ? `<div class="decision-reason">另有 ${excluded.length - visibleExcluded.length} 个排除项</div>`
+          : "")
+    : '<div class="decision-item decision-reason">没有被排除的 Agent</div>';
+
+  taskProfileView.innerHTML = profileHtml;
+  if (decisionTopAgentSummary) {
+    const topCandidate = candidates[0];
+    decisionTopAgentSummary.innerHTML = topCandidate
+      ? `<span>推荐：${escapeHtml(topCandidate.agent_id || "-")} · ${Math.round((topCandidate.score || 0) * 100)}%</span>`
+      : '<span>推荐：暂无合法候选 Agent</span>';
+  }
+
+  if (routingCandidatesView) routingCandidatesView.innerHTML = candidatesHtml;
+  if (routingExcludedView) routingExcludedView.innerHTML = excludedHtml;
+
+  const routeReasonsHtml = `
+    <div class="decision-profile-item decision-profile-wide">
+      <small>路由决策</small>
+      <div class="decision-tags">
+        <span>${escapeHtml(decision)}</span>
+        <span>路由置信度：${Math.round((route.confidence || 0) * 100)}%</span>
+        ${(route.reason_codes || []).map((item) => `<span>${escapeHtml(item)}</span>`).join("")}
+      </div>
+    </div>`;
+
+  renderDecisionDetailControls([
+    {
+      id: "intent",
+      label: "意图详情",
+      count: intentNodes.length || subIntents.length,
+      title: "意图详情",
+      html: subIntentsHtml + segmentsHtml,
+      hidden: !(intentNodes.length || subIntents.length || segments.length),
+    },
+    {
+      id: "entities",
+      label: "实体与数据",
+      count: Object.keys(entities).length + (profile.data_scope ? (Array.isArray(profile.data_scope) ? profile.data_scope.length : String(profile.data_scope).split(",").filter(Boolean).length) : 0),
+      title: "实体与数据",
+      html: entitiesHtml + dataScopeHtml,
+      hidden: !(Object.keys(entities).length || profile.data_scope),
+    },
+    {
+      id: "subtasks",
+      label: "子任务",
+      count: subtasks.length,
+      title: "子任务拆解",
+      html: subtasksHtml,
+      hidden: !subtasks.length,
+    },
+    {
+      id: "agents",
+      label: "Agent 候选",
+      count: candidates.length,
+      title: "Agent 候选与排除原因",
+      html: `
+        <div class="decision-columns">
+          <div>
+            <div class="label">合法候选与得分</div>
+            <div class="decision-list">${candidatesHtml}</div>
+          </div>
+          <div>
+            <div class="label">被排除 Agent 与原因</div>
+            <div class="decision-list">${excludedHtml}</div>
+          </div>
+        </div>`,
+      hidden: !(candidates.length || excluded.length),
+    },
+    {
+      id: "basis",
+      label: "决策依据",
+      count: confidenceFactors.length + ((route.reason_codes || []).length),
+      title: "决策依据",
+      html: routeReasonsHtml + confidenceFactorsHtml,
+      hidden: !(confidenceFactors.length || (route.reason_codes || []).length),
+    },
+  ]);
 };
 
 // Lightweight Markdown -> HTML
@@ -1261,6 +1648,10 @@ const handleEvent = (eventName, payload) => {
     updateConfirmExecuteState();
     return;
   }
+  if (eventName === "routing_decision") {
+    renderRoutingDecision(payload.data || {});
+    return;
+  }
   if (eventName === "start_of_agent") {
     const agentName = payload.data?.agent_name || payload.agent_name || "agent";
     const subAgentName = payload.data?.sub_agent_name || null;
@@ -1422,6 +1813,11 @@ const handleEvent = (eventName, payload) => {
 };
 
 const runWorkflow = async () => {
+  if (!runtimeCanRun) {
+    setStatus("Environment not ready", false);
+    readinessBanner?.scrollIntoView({ behavior: "smooth", block: "center" });
+    return;
+  }
   const userId = userIdInput.value.trim();
   if (!userId) {
     setStatus("User ID required", false);
@@ -2909,6 +3305,7 @@ if (healthCheckSelectedBtn) {
 
 updateAutoScrollBtn();
 setStatus("Ready", true);
+loadReadiness();
 updateCoorCount();
 setAgentDetailEmpty("Select an agent to view details.");
 
@@ -3580,4 +3977,3 @@ const _origCreateAgentCard = function(card, agent) {
     }
   };
 })();
-

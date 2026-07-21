@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>CoorAgent Web Studio</title>
-    <link rel="stylesheet" href="/static/styles.css" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260720-decision-collapse-6" />
     <script src="/static/mermaid.min.js"></script>
   </head>
   <body>
@@ -28,6 +28,15 @@
           <span class="label">Ready</span>
         </div>
       </header>
+
+      <section id="readinessBanner" class="readiness-banner loading" aria-live="polite">
+        <div class="readiness-main">
+          <span class="readiness-dot"></span>
+          <strong id="readinessTitle">正在检查运行环境...</strong>
+        </div>
+        <div id="readinessComponents" class="readiness-components"></div>
+        <div id="readinessHint" class="readiness-hint">页面功能可先浏览，检查完成后再发起任务。</div>
+      </section>
 
       <main class="layout">
         <aside class="sidebar">
@@ -100,6 +109,27 @@
                   <h3>🔐 权限摘要</h3>
                 </div>
                 <div id="permissionSummary" class="security-perm-summary"></div>
+              </div>
+
+              <div class="summary-card main-agent-decision-card" id="mainAgentDecisionCard" style="display:none">
+                <div class="summary-header">
+                  <h3>主 Agent 决策台</h3>
+                  <span id="routingDecisionBadge" class="tag">等待路由</span>
+                </div>
+                <div id="taskProfileView" class="decision-profile"></div>
+                <div id="decisionTopAgentSummary" class="decision-top-agent"></div>
+                <div id="decisionDetailTabs" class="decision-detail-tabs" aria-label="主 Agent 决策详情"></div>
+                <div id="decisionDetailPanel" class="decision-detail-panel" aria-live="polite"></div>
+                <div class="decision-columns" hidden>
+                  <div>
+                    <div class="label">合法候选与得分</div>
+                    <div id="routingCandidatesView" class="decision-list"></div>
+                  </div>
+                  <div>
+                    <div class="label">被排除 Agent 与原因</div>
+                    <div id="routingExcludedView" class="decision-list"></div>
+                  </div>
+                </div>
               </div>
 
               <div class="summary-card plan-editor-card">
@@ -436,7 +466,7 @@
       </main>
     </div>
 
-    <script src="/static/app.js"></script>
+    <script src="/static/app.js?v=20260720-decision-collapse-6"></script>
     <script src="/static/security.js"></script>
   </body>
 </html>

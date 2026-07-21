@@ -1,6 +1,7 @@
 import logging
 import datetime
 import functools
+import os
 import re
 from langchain_community.tools.tavily_search import TavilySearchResults
 from langchain_core.tools import BaseTool
@@ -8,6 +9,53 @@ from .decorators import create_logged_tool
 
 TAVILY_MAX_RESULTS = 5
 logger = logging.getLogger(__name__)
+
+_PLACEHOLDER_MARKERS = (
+    "your_",
+    "replace_",
+    "replace-me",
+    "placeholder",
+    "changeme",
+)
+
+
+def _has_valid_tavily_key() -> bool:
+    value = os.getenv("TAVILY_API_KEY", "").strip()
+    if not value:
+        return False
+    normalized = value.lower()
+    return not any(marker in normalized for marker in _PLACEHOLDER_MARKERS)
+
+
+def is_search_available() -> bool:
+    """Whether pre-planning web search can be used safely."""
+    return _has_valid_tavily_key()
+
+
+def get_search_status() -> dict:
+    configured = is_search_available()
+    return {
+        "configured": configured,
+        "provider": "tavily",
+        "reason": None if configured else "TAVILY_API_KEY is missing or still a placeholder",
+    }
+
+
+class UnavailableSearchTool(BaseTool):
+    """A schema-compatible fallback that keeps Agent/Tool registration available."""
+
+    name: str = "tavily_tool"
+    description: str = (
+        "Web search is currently unavailable because TAVILY_API_KEY is not configured. "
+        "This fallback returns no results instead of failing application startup."
+    )
+
+    def _run(self, query: str, **kwargs):
+        logger.warning("Skipped Tavily search because TAVILY_API_KEY is not configured")
+        return []
+
+    async def _arun(self, query: str, **kwargs):
+        return self._run(query, **kwargs)
 
 
 # Templates for English and Chinese
@@ -92,6 +140,12 @@ def inject_current_time(tool_cls: type[BaseTool]) -> type[BaseTool]:
 
     return tool_cls
 
-TimeInjectedTavily = inject_current_time(TavilySearchResults)
-LoggedTimeInjectedTavily = create_logged_tool(TimeInjectedTavily)
-tavily_tool = LoggedTimeInjectedTavily(name="tavily_tool", max_results=TAVILY_MAX_RESULTS)
+if is_search_available():
+    TimeInjectedTavily = inject_current_time(TavilySearchResults)
+    LoggedTimeInjectedTavily = create_logged_tool(TimeInjectedTavily)
+    tavily_tool = LoggedTimeInjectedTavily(
+        name="tavily_tool",
+        max_results=TAVILY_MAX_RESULTS,
+    )
+else:
+    tavily_tool = UnavailableSearchTool()

@@ -15,7 +15,7 @@
         },
         {
           "type": "paragraph",
-          "text": "兹证明 {{name}}（身份证号：{{id_number}}）为我单位正式员工，现任 {{position}} 职务，于 {{join_date}} 入职。",
+          "text": "兹证明 {{name}}（员工编号：{{id_number}}）为我单位正式员工，现任 {{position}} 职务，于 {{join_date}} 入职。",
           "indent": 2
         },
         {
@@ -76,7 +76,7 @@
         },
         {
           "type": "paragraph",
-          "text": "兹证明 {{name}}（身份证号：{{id_number}}）为我单位正式员工，现任 {{position}} 职务，于 {{join_date}} 入职至今。",
+          "text": "兹证明 {{name}}（员工编号：{{id_number}}）为我单位正式员工，现任 {{position}} 职务，于 {{join_date}} 入职至今。",
           "indent": 2
         },
         {
@@ -109,6 +109,71 @@
         {
           "type": "paragraph",
           "text": "（盖章）",
+          "align": "right"
+        }
+      ]
+    },
+    "leave_application": {
+      "title": "请假申请书",
+      "content": [
+        {
+          "type": "heading",
+          "text": "请假申请书",
+          "level": 1,
+          "align": "center"
+        },
+        {
+          "type": "paragraph",
+          "text": ""
+        },
+        {
+          "type": "paragraph",
+          "text": "尊敬的领导："
+        },
+        {
+          "type": "paragraph",
+          "text": "本人 {{name}}，员工编号 {{id_number}}，现任 {{position}}，因个人事务需要申请请假。",
+          "indent": 2
+        },
+        {
+          "type": "paragraph",
+          "text": "请假时间：{{leave_start_date}} 至 {{leave_end_date}}，共 {{leave_days}} 天。",
+          "indent": 2
+        },
+        {
+          "type": "paragraph",
+          "text": "请假事由：{{leave_reason}}。",
+          "indent": 2
+        },
+        {
+          "type": "paragraph",
+          "text": "请假期间本人将提前做好工作交接，确保相关工作不受影响。恳请批准。",
+          "indent": 2
+        },
+        {
+          "type": "paragraph",
+          "text": ""
+        },
+        {
+          "type": "paragraph",
+          "text": "此致"
+        },
+        {
+          "type": "paragraph",
+          "text": "敬礼！"
+        },
+        {
+          "type": "paragraph",
+          "text": ""
+        },
+        {
+          "type": "paragraph",
+          "text": "申请人：{{name}}",
+          "align": "right"
+        },
+        {
+          "type": "paragraph",
+          "text": "{{current_date}}",
           "align": "right"
         }
       ]

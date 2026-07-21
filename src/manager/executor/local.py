@@ -17,6 +17,16 @@ class LocalExecutor(AgentExecutor):
         self._tool_registry: Optional[ToolRegistry] = None
         self._agent_cache: Dict[str, Any] = {}
 
+    @staticmethod
+    def _is_direct_programming_learning(context: ExecutionContext) -> bool:
+        metadata = context.metadata or {}
+        profile = metadata.get("task_profile") or {}
+        task_type = str(
+            metadata.get("task_type") or profile.get("task_type") or ""
+        ).upper()
+        intent = str(profile.get("intent") or "").lower()
+        return task_type == "LEARNING" and intent == "programming_learning"
+
     async def _do_initialize(self):
         self._tool_registry = await ToolRegistry.get_instance()
 
@@ -82,6 +92,11 @@ class LocalExecutor(AgentExecutor):
                 return ExecuteResult(status=ExecutionStatus.FAILED, error="Agent validation failed")
 
             tools = await self.load_tools(agent)
+
+            # 编程学习/知识问答应直接由模型回答。为这类任务挂载终端工具会诱导
+            # ReAct Agent 反复探测本地环境，既无助于答案，也容易触发递归上限。
+            if self._is_direct_programming_learning(context):
+                tools = []
 
             from langgraph.prebuilt import create_react_agent
 
@@ -150,6 +165,9 @@ class LocalExecutor(AgentExecutor):
 
         try:
             await self.initialize()
+
+            if self._is_direct_programming_learning(context):
+                tools = []
 
             from langgraph.prebuilt import create_react_agent
 

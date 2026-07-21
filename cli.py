@@ -372,6 +372,8 @@ def _is_likely_markdown(text):
 HISTORY_FILE = os.path.expanduser("~/.cooragent_history")
 
 def _init_readline():
+    if readline is None:
+        return
     try:
         def _safe_parse_and_bind(command: str) -> None:
             try:
@@ -407,6 +409,8 @@ def _init_readline():
 
 def _save_history():
     """Safely save command history"""
+    if readline is None:
+        return
     try:
         readline.write_history_file(HISTORY_FILE)
     except Exception as e:

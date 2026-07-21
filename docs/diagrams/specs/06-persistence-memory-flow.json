@@ -1,0 +1,22 @@
+{
+  "diagram_id": "superagent-persistence-memory-flow",
+  "diagram_name": "06 会话、记忆与持久化现状",
+  "canvas": {"w": 2450, "h": 1250, "page_width": 2450, "page_height": 1250},
+  "style_tokens": {"font_title": 24, "font_title_family": "Microsoft YaHei", "font_body": 17, "font_body_family": "Microsoft YaHei", "font_caption": 15, "font_caption_family": "Microsoft YaHei", "font_formula": 20, "font_formula_family": "Arial", "stroke": 2, "stack_dx": 18, "stack_dy": -16, "arrow_width": 2, "palette": "cool_gray_blue", "default_connector_route": "straight", "centerline_tolerance": 180, "title_gap": 50, "body_gap": 55, "caption_gap": 35, "formula_gap": 35},
+  "constraints": ["runtime state fans out to current persistence stores", "memory gap remains visually separate", "all stores are shown on one lower lane"],
+  "nodes": [
+    {"id":"request","kind":"flat_box","lane":"main","role":"primary","x":80,"y":300,"w":210,"h":85,"title":{"text":"请求 / 工作流执行","anchor":"center","box_w":200}},
+    {"id":"runtime","kind":"flat_box","lane":"main","role":"primary","x":420,"y":300,"w":280,"h":85,"title":{"text":"运行时 State / Queue","anchor":"center","box_w":270}},
+    {"id":"session","kind":"flat_box","lane":"auxiliary","role":"primary","x":120,"y":650,"w":270,"h":90,"title":{"text":"SessionManager","anchor":"center","box_w":260},"body":{"text":"内存、最多 10 条；执行只取 3 条","anchor":"bottom","gap":38,"box_w":310}},
+    {"id":"workflow","kind":"flat_box","lane":"auxiliary","role":"primary","x":470,"y":650,"w":270,"h":90,"title":{"text":"WorkflowCache JSON","anchor":"center","box_w":260},"body":{"text":"流程、节点、规划步骤、修改历史","anchor":"bottom","gap":38,"box_w":310}},
+    {"id":"tasklog","kind":"flat_box","lane":"auxiliary","role":"primary","x":820,"y":650,"w":250,"h":90,"title":{"text":"TaskLogger JSON","anchor":"center","box_w":240},"body":{"text":"逐步执行事件","anchor":"bottom","gap":38,"box_w":240}},
+    {"id":"checkpoint","kind":"flat_box","lane":"auxiliary","role":"primary","x":1150,"y":650,"w":270,"h":90,"title":{"text":"Checkpoint JSON","anchor":"center","box_w":260},"body":{"text":"每步完整状态与下一节点","anchor":"bottom","gap":38,"box_w":300}},
+    {"id":"agentfiles","kind":"flat_box","lane":"auxiliary","role":"primary","x":1500,"y":650,"w":270,"h":90,"title":{"text":"Agent / Prompt 文件","anchor":"center","box_w":260}},
+    {"id":"approval","kind":"flat_box","lane":"auxiliary","role":"primary","x":1850,"y":650,"w":270,"h":90,"title":{"text":"Approval JSON","anchor":"center","box_w":260},"body":{"text":"当前未接入执行闭环","anchor":"bottom","gap":38,"box_w":270}},
+    {"id":"memorygap","kind":"flat_box","lane":"main","role":"primary","x":950,"y":270,"w":620,"h":120,"title":{"text":"当前没有真正的长期记忆系统","anchor":"center","box_w":600},"body":{"text":"缺少对话 ID、回答回写、摘要、检索式记忆与统一工作记忆","anchor":"bottom","gap":45,"box_w":680}}
+  ],
+  "connectors": [
+    {"id":"e1","kind":"connector_arrow","source":"request","target":"runtime","route":"straight"},
+    {"id":"s1","kind":"connector_arrow","source":"runtime","target":"session","source_anchor":"bottom","target_anchor":"top","route":"orthogonal"},{"id":"s2","kind":"connector_arrow","source":"runtime","target":"workflow","source_anchor":"bottom","target_anchor":"top","route":"orthogonal"},{"id":"s3","kind":"connector_arrow","source":"runtime","target":"tasklog","source_anchor":"bottom","target_anchor":"top","route":"orthogonal"},{"id":"s4","kind":"connector_arrow","source":"runtime","target":"checkpoint","source_anchor":"bottom","target_anchor":"top","route":"orthogonal"},{"id":"s5","kind":"connector_arrow","source":"runtime","target":"agentfiles","source_anchor":"bottom","target_anchor":"top","route":"orthogonal"},{"id":"s6","kind":"connector_arrow","source":"runtime","target":"approval","source_anchor":"bottom","target_anchor":"top","route":"orthogonal"},{"id":"g1","kind":"connector_arrow","source":"runtime","target":"memorygap","route":"straight","dashed":true}
+  ]
+}

@@ -218,6 +218,21 @@ def _number_to_chinese(num: float) -> str:
     return result
 
 
+def _parse_optional_amount(value: Any) -> Optional[float]:
+    """Parse optional numeric amount. Empty strings and placeholders are treated as missing."""
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip()
+    if not text or text in {"-", "N/A", "n/a", "None", "null", "未提供", "暂无"}:
+        return None
+    text = text.replace(",", "").replace("元", "").replace("人民币", "").strip()
+    if not text:
+        return None
+    return float(text)
+
+
 def _calendar_path() -> Path:
     return Path(__file__).resolve().parent / "assets" / "calendar_events.json"
 
@@ -956,38 +971,23 @@ async def tool(req: ToolRequest, authorization: Optional[str] = Header(default=N
             title = req.arguments.get("title", "分析报告")
             sections = req.arguments.get("sections") or []
             instruction = req.arguments.get("instruction") or "生成清晰、专业的Markdown分析报告。"
-            llm_timeout_sec = req.arguments.get("llm_timeout_sec", 60)  # 增加超时时间
+            llm_timeout_sec = req.arguments.get("llm_timeout_sec", 120)
 
             # 如果提供了原始数据，使用 LLM 生成完整报告
             if data is not None:
                 try:
                     llm = get_llm_by_type("basic")
 
-                    # 构建专业的报告生成 prompt
-                    prompt = f"""你是一位专业的企业分析报告撰写专家。请基于以下数据生成一份专业的Markdown格式分析报告。
+                    # 根据任务标题和指令生成通用业务报告，避免把 HR 等数据硬套进风控模板。
+                    prompt = f"""你是一位专业的业务报告撰写人员。请严格基于输入数据生成Markdown格式报告。
 
 # 报告要求
 
-1. 报告结构：
-   - 标题和概述
-   - 核心发现
-   - 详细分析（按企业分组）
-   - 风险评估总结
-   - 结论与建议
-
-2. 写作风格：
-   - 使用专业、客观的语言
-   - 数据驱动，有理有据
-   - 突出关键指标和风险点
-   - 使用表格和列表增强可读性
-
-3. 分析维度：
-   - 信用评分分布
-   - 风险等级分类
-   - 现金流健康状况
-   - 债务比率分析
-   - 违约事件统计
-   - 各类风险（监管、市场、运营）评估
+1. 标题：{title}
+2. 用户要求：{instruction}
+3. 只使用输入中存在的事实，不补造姓名、日期、记录、结论或评价。
+4. 根据数据所属业务领域组织章节；员工资料和请假记录应形成人事情况汇总，不得套用企业风控结构。
+5. 优先使用简洁表格和项目符号，明确区分基础信息、业务记录与汇总结论。
 
 # 数据输入
 
@@ -1007,30 +1007,9 @@ async def tool(req: ToolRequest, authorization: Optional[str] = Header(default=N
                     markdown = _invoke_with_timeout(_call_llm, float(llm_timeout_sec))
                     result = {"status": "success", "markdown": markdown}
 
-                except Exception as exc:
-                    # LLM 失败时使用 fallback
-                    print(f"[WARN] LLM failed for report generation: {exc}")
-                    import traceback
-                    traceback.print_exc()
-
-                    # 生成简单的 fallback 报告
-                    fallback_lines = [
-                        f"# {title}",
-                        "",
-                        "## 数据概览",
-                        "",
-                        "```json",
-                        json.dumps(data, ensure_ascii=False, indent=2),
-                        "```",
-                        "",
-                        "**注意**: 由于LLM服务异常，此报告为原始数据展示。",
-                    ]
-                    fallback = "\n".join(fallback_lines)
-                    result = {
-                        "status": "success",
-                        "markdown": fallback,
-                        "warning": f"llm_fallback: {type(exc).__name__}",
-                    }
+                except Exception:
+                    # 不把模型失败伪装成成功；交给外层返回明确错误并停止执行。
+                    raise
 
             # 如果提供了结构化的 sections，使用原有逻辑
             elif sections and isinstance(sections, list):
@@ -1061,14 +1040,9 @@ async def tool(req: ToolRequest, authorization: Optional[str] = Header(default=N
 
                         markdown = _invoke_with_timeout(_call_llm, float(llm_timeout_sec))
                         result = {"status": "success", "markdown": markdown}
-                    except Exception as exc:
-                        print(f"[WARN] LLM failed, using fallback: {exc}")
-                        fallback = _build_markdown_report(title, sections)
-                        result = {
-                            "status": "success",
-                            "markdown": fallback,
-                            "warning": f"llm_fallback: {type(exc).__name__}",
-                        }
+                    except Exception:
+                        # use_llm=true 时不做静默降级。
+                        raise
                 else:
                     result = {"status": "success", "markdown": _build_markdown_report(title, sections)}
 
@@ -1418,6 +1392,20 @@ async def tool(req: ToolRequest, authorization: Optional[str] = Header(default=N
             data = req.arguments.get("data", {})
             output_filename = req.arguments.get("output_filename") or f"document_{int(time.time())}"
 
+            document_type = str(
+                req.arguments.get("document_type")
+                or data.get("document_type")
+                or ""
+            ).strip()
+            filename_hint = str(output_filename or "")
+            if (
+                document_type == "leave_application"
+                or "leave_application" in filename_hint
+                or "请假" in filename_hint
+            ):
+                template_name = "leave_application"
+                data["document_type"] = "leave_application"
+
             logger.info(f"Generating document: template={template_name}, filename={output_filename}")
 
             # Load template configuration
@@ -1431,14 +1419,32 @@ async def tool(req: ToolRequest, authorization: Optional[str] = Header(default=N
             current_date = datetime.datetime.now().strftime("%Y年%m月%d日")
             company_name = data.get("company_name", "中国建设银行股份有限公司")
 
-            # Convert salary to Chinese if needed
-            if "monthly_salary" in data and "monthly_salary_cn" not in data:
-                data["monthly_salary_cn"] = _number_to_chinese(float(data["monthly_salary"]))
-            if "annual_salary" in data and "annual_salary_cn" not in data:
-                data["annual_salary_cn"] = _number_to_chinese(float(data["annual_salary"]))
+            # Convert salary to Chinese if needed. Missing salary values should not crash the tool.
+            monthly_salary = _parse_optional_amount(data.get("monthly_salary"))
+            annual_salary = _parse_optional_amount(data.get("annual_salary"))
+            if monthly_salary is not None:
+                data["monthly_salary"] = f"{monthly_salary:.2f}"
+                if "monthly_salary_cn" not in data:
+                    data["monthly_salary_cn"] = _number_to_chinese(monthly_salary)
+            else:
+                data["monthly_salary"] = data.get("monthly_salary") or "未提供"
+                data.setdefault("monthly_salary_cn", "未提供")
+
+            if annual_salary is not None:
+                data["annual_salary"] = f"{annual_salary:.2f}"
+                if "annual_salary_cn" not in data:
+                    data["annual_salary_cn"] = _number_to_chinese(annual_salary)
+            else:
+                data["annual_salary"] = data.get("annual_salary") or "未提供"
+                data.setdefault("annual_salary_cn", "未提供")
 
             data["current_date"] = current_date
             data["company_name"] = company_name
+            if template_name == "leave_application":
+                data.setdefault("leave_start_date", "待补充")
+                data.setdefault("leave_end_date", "待补充")
+                data.setdefault("leave_days", "待补充")
+                data.setdefault("leave_reason", "待补充")
 
             # Create document
             doc = Document()

@@ -1,4 +1,5 @@
 import logging
+import re
 import subprocess
 from typing import ClassVar, Type
 from pydantic import BaseModel, Field
@@ -40,11 +41,16 @@ class BashTool(BaseTool):
                 "cat": "type"
             }
             
-            # Simple command replacement
-            cmd_parts = cmd.split()
-            if cmd_parts and cmd_parts[0] in cmd_map:
-                cmd_parts[0] = cmd_map[cmd_parts[0]]
-                cmd = " ".join(cmd_parts)
+            # Replace Unix commands at the start of every chained command, not
+            # only at the start of the full string (for example: cd x && ls).
+            command_pattern = re.compile(r"(^|&&|\|\|)\s*([A-Za-z-]+)(?=\s|$)")
+
+            def replace_command(match: re.Match) -> str:
+                separator, command = match.groups()
+                mapped = cmd_map.get(command.lower(), command)
+                return f"{separator} {mapped}".lstrip() if not separator else f"{separator} {mapped}"
+
+            cmd = command_pattern.sub(replace_command, cmd)
                 
             # Handle here-document syntax (<<) which is not supported in Windows CMD/PowerShell
             if "<<" in cmd:
@@ -52,8 +58,18 @@ class BashTool(BaseTool):
 
         try:
             # Execute the command and capture output
+            if platform.system() == "Windows":
+                # Force the child shell to emit UTF-8 so Chinese paths/output do
+                # not crash subprocess reader threads under the default GBK locale.
+                cmd = f"chcp 65001 >NUL && {cmd}"
             result = subprocess.run(
-                cmd, shell=True, check=True, text=True, capture_output=True
+                cmd,
+                shell=True,
+                check=True,
+                text=True,
+                capture_output=True,
+                encoding="utf-8",
+                errors="replace",
             )
             # Return stdout as the result
             return result.stdout

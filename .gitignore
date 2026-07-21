@@ -9,7 +9,7 @@ wheels/
 agent_history.gif
 
 # Virtual environments
-.venv
+.venv*/
 
 # Environment variables
 .env
@@ -31,6 +31,7 @@ config/mcp.json
 # Log files
 blackd.log
 /log
+/output/*.log
 
 # mypy
 .mypy_cache/

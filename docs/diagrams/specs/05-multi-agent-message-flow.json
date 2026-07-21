@@ -1,0 +1,22 @@
+{
+  "diagram_id": "superagent-multi-agent-message-flow",
+  "diagram_name": "05 多 Agent 消息传递现状",
+  "canvas": {"w": 2400, "h": 1200, "page_width": 2400, "page_height": 1200},
+  "style_tokens": {"font_title": 24, "font_title_family": "Microsoft YaHei", "font_body": 17, "font_body_family": "Microsoft YaHei", "font_caption": 15, "font_caption_family": "Microsoft YaHei", "font_formula": 20, "font_formula_family": "Arial", "stroke": 2, "stack_dx": 18, "stack_dy": -16, "arrow_width": 2, "palette": "cool_gray_blue", "default_connector_route": "straight", "centerline_tolerance": 150, "title_gap": 50, "body_gap": 55, "caption_gap": 35, "formula_gap": 35},
+  "constraints": ["current message path reads left to right", "shared state is visually central", "protocol gap is shown below the path"],
+  "nodes": [
+    {"id":"user","kind":"flat_box","lane":"main","role":"primary","x":60,"y":400,"w":190,"h":85,"title":{"text":"用户消息","anchor":"center","box_w":180}},
+    {"id":"state","kind":"flat_box","lane":"main","role":"primary","x":320,"y":400,"w":260,"h":85,"title":{"text":"共享 State.messages","anchor":"center","box_w":250}},
+    {"id":"planner","kind":"flat_box","lane":"main","role":"primary","x":650,"y":400,"w":220,"h":85,"title":{"text":"Planner 生成步骤","anchor":"center","box_w":210}},
+    {"id":"publisher","kind":"flat_box","lane":"main","role":"primary","x":940,"y":400,"w":210,"h":85,"title":{"text":"Publisher 选择 Agent","anchor":"center","box_w":200}},
+    {"id":"proxy","kind":"flat_box","lane":"main","role":"primary","x":1220,"y":400,"w":210,"h":85,"title":{"text":"AgentProxy","anchor":"center","box_w":200}},
+    {"id":"agent","kind":"flat_box","lane":"main","role":"primary","x":1500,"y":400,"w":220,"h":85,"title":{"text":"执行 Agent / Tool","anchor":"center","box_w":210}},
+    {"id":"result","kind":"flat_box","lane":"main","role":"primary","x":1790,"y":400,"w":240,"h":85,"title":{"text":"结构化结果 JSON","anchor":"center","box_w":230}},
+    {"id":"back","kind":"flat_box","lane":"main","role":"primary","x":2100,"y":400,"w":220,"h":85,"title":{"text":"写回 messages","anchor":"center","box_w":210}},
+    {"id":"gap","kind":"flat_box","lane":"auxiliary","role":"primary","x":760,"y":760,"w":860,"h":100,"title":{"text":"当前缺口：没有统一消息信封和工作记忆","anchor":"center","box_w":820},"body":{"text":"字符串、临时 JSON、共享字典并存；发送方、接收方、产物引用和错误字段不统一","anchor":"bottom","gap":40,"box_w":900}}
+  ],
+  "connectors": [
+    {"id":"e1","kind":"connector_arrow","source":"user","target":"state","route":"straight"},{"id":"e2","kind":"connector_arrow","source":"state","target":"planner","route":"straight"},{"id":"e3","kind":"connector_arrow","source":"planner","target":"publisher","route":"straight"},{"id":"e4","kind":"connector_arrow","source":"publisher","target":"proxy","route":"straight"},{"id":"e5","kind":"connector_arrow","source":"proxy","target":"agent","route":"straight"},{"id":"e6","kind":"connector_arrow","source":"agent","target":"result","route":"straight"},{"id":"e7","kind":"connector_arrow","source":"result","target":"back","route":"straight"},
+    {"id":"loop","kind":"connector_arrow","source":"back","target":"publisher","source_anchor":"bottom","target_anchor":"bottom","route":"orthogonal","waypoints":[{"x":2210,"y":620},{"x":1045,"y":620}]},{"id":"g1","kind":"connector_arrow","source":"gap","target":"state","source_anchor":"top","target_anchor":"bottom","route":"orthogonal","dashed":true}
+  ]
+}

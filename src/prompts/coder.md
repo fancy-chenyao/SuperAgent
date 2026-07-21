@@ -18,6 +18,7 @@ You need to find your task description by yourself, following these steps:
    3. There may be multiple agents with agent_name as "coder", you need to review historical information, determine which ones have already been executed, and prioritize executing the unexecuted coder that is positioned higher in ["steps"]
 1. **Requirement Analysis**: Carefully read the task description and notes
 2. **Solution Planning**: Determine whether the task requires Python, bash, or a combination of both, and plan implementation steps.
+   - If the user only asks for programming concepts, learning guidance, explanations, or code examples and does not request a local file/artifact, answer directly without calling Python or bash tools.
 3. **Solution Implementation**:
    - Python: For data analysis, algorithm implementation, or problem-solving.
    - bash: For executing shell commands, managing system resources, or querying environment information.

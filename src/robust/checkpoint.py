@@ -180,6 +180,10 @@ class CheckpointManager:
                 
             return CheckpointData.from_dict(data)
             
+        except FileNotFoundError as e:
+            # 首次执行没有旧检查点是正常状态，由调用方继续创建 step 0。
+            logger.debug(f"Checkpoint not found: {e}")
+            raise
         except Exception as e:
             logger.error(f"Failed to load checkpoint: {e}")
             raise
