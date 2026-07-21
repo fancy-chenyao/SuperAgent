@@ -415,6 +415,9 @@ async def run_agent_workflow(
     instruction: str | None = None,
     instruction_history: list[str] | None = None,
     original_user_query: str | None = None,
+    memory_session_id: str | None = None,
+    memory_context: dict[str, Any] | None = None,
+    request_input_messages: list | None = None,
 ):
     """Run the agent workflow with the given user input.
 
@@ -425,10 +428,11 @@ async def run_agent_workflow(
     Returns:
         The final state after the workflow completes
     """
+    identity_messages = request_input_messages or user_input_messages
     if not workflow_id:
         if not polish_id:
             if workmode == "launch":
-                msg = f"{user_id}_{user_input_messages}_{deep_thinking_mode}_{search_before_planning}_{coor_agents}"
+                msg = f"{user_id}_{identity_messages}_{deep_thinking_mode}_{search_before_planning}_{coor_agents}"
                 polish_id = hashlib.md5(msg.encode("utf-8")).hexdigest()
             else:
                 polish_id = cache.get_latest_polish_id(user_id)
@@ -447,7 +451,7 @@ async def run_agent_workflow(
         workflow_id=workflow_id,
         lap=lap,
         version=1,
-        user_input_messages=user_input_messages.copy(),
+        user_input_messages=identity_messages.copy(),
         deep_thinking_mode=deep_thinking_mode,
         search_before_planning=search_before_planning,
         coor_agents=coor_agents,
@@ -524,6 +528,8 @@ async def run_agent_workflow(
             "initialized": False,
             "stop_after_planner": stop_after_planner,
             "instruction_history": cache.get_instruction_history(workflow_id),
+            "memory_session_id": memory_session_id or "",
+            "memory_context": dict(memory_context or {}),
         },
         resume_step=resume_step,
         task_id=task_id,
@@ -548,6 +554,17 @@ async def _process_workflow(
         execution_phase: 执行阶段 ("initial_planning" | "re_planning" | "execution")
     """
     current_node = None
+
+    runtime_context = {
+        key: initial_state.get(key)
+        for key in (
+            "TEAM_MEMBERS",
+            "TEAM_MEMBERS_DESCRIPTION",
+            "TOOLS",
+            "RESOURCE_CATALOG",
+        )
+        if initial_state.get(key) is not None
+    }
 
     workflow_id = initial_state["workflow_id"]
     checkpoint_manager = CheckpointManager()
@@ -677,6 +694,10 @@ async def _process_workflow(
                     if checkpoint.next_node:
                         current_node = checkpoint.next_node
                         state = State(**checkpoint.state)
+                        # Runtime capabilities are authoritative at resume time. A
+                        # checkpoint restores execution state, not stale prompt,
+                        # tool, MCP, or remote-resource catalogs.
+                        state.update(runtime_context)
                         step_count = resume_step
                         # Clean up stale checkpoints from previous failed runs
                         # Delete checkpoints with step >= resume_step (they may be from earlier failed attempts)
