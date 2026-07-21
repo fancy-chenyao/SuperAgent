@@ -15,6 +15,9 @@ from src.workflow.cache import workflow_cache
 from src.service.env import USE_MCP_TOOLS
 from src.manager.mcp import get_mcp_hot_reload_manager
 from src.manager.registry import ToolRegistry
+from src.memory import get_memory_manager
+from src.service.env import MEMORY_ENABLED
+from src.memory.utils import redact_secrets
 
 
 logger = logging.getLogger(__name__)
@@ -45,7 +48,55 @@ class Server:
         session = session_manager.get_session(request.user_id)
         for message in request.messages:
             session.add_message(message.role, message.content)
-        session_messages = session.history[-3:]
+
+        incoming_messages = [
+            {
+                "role": message.role,
+                "content": message.content,
+                "message_id": message.message_id,
+                "metadata": message.metadata,
+            }
+            for message in request.messages
+        ]
+        memory_manager = None
+        memory_metadata = {}
+        memory_session_id = ""
+        memory_active = MEMORY_ENABLED and request.memory_enabled is not False
+        if memory_active:
+            memory_manager = get_memory_manager()
+            try:
+                current_plan = (
+                    workflow_cache.get_planning_steps(request.workflow_id)
+                    if request.workflow_id
+                    else request.instruction_history
+                )
+            except Exception:
+                current_plan = request.instruction_history
+            prepared = await memory_manager.prepare_context(
+                user_id=request.user_id,
+                incoming_messages=incoming_messages,
+                session_id=request.memory_session_id or request.session_id,
+                workflow_id=request.workflow_id,
+                request_enabled=request.memory_enabled,
+                retrieval_query=request.original_user_query,
+                attachments={
+                    "current_plan": current_plan,
+                    "extra": {"workflow_id": request.workflow_id},
+                },
+            )
+            session_messages = list(prepared.messages)
+            memory_metadata = prepared.metadata.to_dict()
+            memory_session_id = prepared.metadata.session_id
+            if prepared.metadata.warning:
+                yield {
+                    "event": "memory_warning",
+                    "data": {
+                        "warning": prepared.metadata.warning,
+                        "session_id": memory_session_id,
+                    },
+                }
+        else:
+            session_messages = session.history[-3:]
 
         response_stream = run_agent_workflow(
             user_id=request.user_id,
@@ -60,22 +111,58 @@ class Server:
             instruction=getattr(request, "instruction", None),
             instruction_history=getattr(request, "instruction_history", None),
             original_user_query=getattr(request, "original_user_query", None),
+            memory_session_id=memory_session_id,
+            memory_context=memory_metadata,
+            request_input_messages=[
+                {"role": item["role"], "content": redact_secrets(item["content"])}
+                for item in incoming_messages
+            ],
         )
-        async for res in response_stream:
-            try:
-                event_type = res.get("event")
-                # replace agent_obj with agent_json 
-                if event_type == "new_agent_created" and "data" in res and "agent_obj" in res["data"]:
-                    agent_obj: BaseModel = res["data"]["agent_obj"]
-                    agent_json = agent_obj.model_dump_json(indent=2) if agent_obj else None
-                    if agent_json:
-                        res["data"]["agent_obj"] = agent_json
-                    else:
-                        logger.warning("Could not serialize agent object for new_agent_created event.")
-                        if "agent_obj" in res["data"]: del res["data"]["agent_obj"]
-                yield res
-            except (TypeError, ValueError, json.JSONDecodeError) as e:
-                logging.error(f"Error serializing event: {e}", exc_info=True)
+        assistant_buffers: Dict[str, str] = {}
+        actual_workflow_id = request.workflow_id
+        try:
+            async for res in response_stream:
+                try:
+                    event_type = res.get("event")
+                    data = res.get("data") or {}
+                    if data.get("workflow_id"):
+                        actual_workflow_id = data.get("workflow_id")
+                    if event_type == "messages":
+                        agent_name = str(res.get("agent_name") or "assistant")
+                        delta = (data.get("delta") or {}).get("content", "")
+                        assistant_buffers[agent_name] = (
+                            assistant_buffers.get(agent_name, "") + str(delta)
+                        )
+                    # replace agent_obj with agent_json
+                    if event_type == "new_agent_created" and "agent_obj" in data:
+                        agent_obj: BaseModel = data["agent_obj"]
+                        agent_json = agent_obj.model_dump_json(indent=2) if agent_obj else None
+                        if agent_json:
+                            data["agent_obj"] = agent_json
+                        else:
+                            logger.warning("Could not serialize agent object for new_agent_created event.")
+                            data.pop("agent_obj", None)
+                    yield res
+                except (TypeError, ValueError, json.JSONDecodeError) as e:
+                    logging.error(f"Error serializing event: {e}", exc_info=True)
+        finally:
+            if memory_manager is not None and assistant_buffers:
+                try:
+                    await memory_manager.record_assistant_outputs(
+                        user_id=request.user_id,
+                        session_id=memory_session_id,
+                        workflow_id=actual_workflow_id,
+                        outputs=[
+                            {"agent_name": name, "content": content}
+                            for name, content in assistant_buffers.items()
+                            if content
+                        ],
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to persist streamed assistant memory: %s",
+                        type(exc).__name__,
+                    )
                 
     async def _run_agent_workflow_with_resume(
             self,
@@ -94,6 +181,19 @@ class Server:
         # 不依赖session，因为resume可能在很久之后执行，session已过期
         # request.messages是AgentMessage列表，需要转换为dict列表
         session_messages = [{"role": m.role, "content": m.content} for m in request.messages]
+        memory_session_id = ""
+        memory_metadata = {}
+        memory_manager = None
+        if MEMORY_ENABLED and request.memory_enabled is not False:
+            memory_manager = get_memory_manager()
+            memory_session_id = memory_manager.resolve_session_id(
+                request.user_id,
+                session_id=request.memory_session_id or request.session_id,
+            )
+            memory_metadata = {
+                "session_id": memory_session_id,
+                "resume_uses_checkpoint_state": True,
+            }
 
         response_stream = run_agent_workflow(
             user_id=request.user_id,
@@ -110,22 +210,51 @@ class Server:
             instruction=getattr(request, "instruction", None),
             instruction_history=getattr(request, "instruction_history", None),
             original_user_query=getattr(request, "original_user_query", None),
+            memory_session_id=memory_session_id,
+            memory_context=memory_metadata,
+            request_input_messages=session_messages,
         )
-        async for res in response_stream:
-            try:
-                event_type = res.get("event")
-                # replace agent_obj with agent_json 
-                if event_type == "new_agent_created" and "data" in res and "agent_obj" in res["data"]:
-                    agent_obj: BaseModel = res["data"]["agent_obj"]
-                    agent_json = agent_obj.model_dump_json(indent=2) if agent_obj else None
-                    if agent_json:
-                        res["data"]["agent_obj"] = agent_json
-                    else:
-                        logger.warning("Could not serialize agent object for new_agent_created event.")
-                        if "agent_obj" in res["data"]: del res["data"]["agent_obj"]
-                yield res
-            except (TypeError, ValueError, json.JSONDecodeError) as e:
-                logging.error(f"Error serializing event: {e}", exc_info=True)
+        assistant_buffers: Dict[str, str] = {}
+        try:
+            async for res in response_stream:
+                try:
+                    event_type = res.get("event")
+                    data = res.get("data") or {}
+                    if event_type == "messages":
+                        agent_name = str(res.get("agent_name") or "assistant")
+                        delta = (data.get("delta") or {}).get("content", "")
+                        assistant_buffers[agent_name] = (
+                            assistant_buffers.get(agent_name, "") + str(delta)
+                        )
+                    if event_type == "new_agent_created" and "agent_obj" in data:
+                        agent_obj: BaseModel = data["agent_obj"]
+                        agent_json = agent_obj.model_dump_json(indent=2) if agent_obj else None
+                        if agent_json:
+                            data["agent_obj"] = agent_json
+                        else:
+                            logger.warning("Could not serialize agent object for new_agent_created event.")
+                            data.pop("agent_obj", None)
+                    yield res
+                except (TypeError, ValueError, json.JSONDecodeError) as e:
+                    logging.error(f"Error serializing event: {e}", exc_info=True)
+        finally:
+            if memory_manager is not None and assistant_buffers:
+                try:
+                    await memory_manager.record_assistant_outputs(
+                        user_id=request.user_id,
+                        session_id=memory_session_id,
+                        workflow_id=request.workflow_id,
+                        outputs=[
+                            {"agent_name": name, "content": content}
+                            for name, content in assistant_buffers.items()
+                            if content
+                        ],
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to persist resumed assistant memory: %s",
+                        type(exc).__name__,
+                    )
 
     @staticmethod
     async def _list_agents(

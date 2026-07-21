@@ -8,6 +8,7 @@ prompts_dir = get_project_root() / "store" / "prompts"
 workflows_dir = get_project_root() / "store" / "workflows"
 checkpoints_dir = get_project_root() / "store" / "checkpoints"
 task_logs_dir = get_project_root() / "store" / "task_logs"
+memory_dir = get_project_root() / "store" / "memory"
 
 context_variables = {
     "has_lauched": False

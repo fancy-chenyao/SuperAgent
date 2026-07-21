@@ -1,5 +1,6 @@
 import json
 import logging
+from copy import deepcopy
 from src.workflow.template import WORKFLOW_TEMPLATE
 from typing import Union, List
 from src.interface.agent import Agent
@@ -108,7 +109,7 @@ class WorkflowCache:
                         self.cache[workflow_id] = workflow
                     else:
                         # New workflow: initialize from template
-                        self.cache[workflow_id] = WORKFLOW_TEMPLATE.copy()
+                        self.cache[workflow_id] = deepcopy(WORKFLOW_TEMPLATE)
                         self.cache[workflow_id]["mode"] = mode
                         self.cache[workflow_id]["lap"] = lap
                         self.cache[workflow_id]["workflow_id"] = workflow_id

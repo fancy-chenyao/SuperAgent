@@ -37,3 +37,8 @@ blackd.log
 .dmypy.json
 dmypy.json
 /.qoder
+
+# Local agent planning artifacts
+/.codex/
+/openspec/
+/docs/agent-memory-design.md
