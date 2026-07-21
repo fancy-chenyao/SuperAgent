@@ -190,6 +190,9 @@ class State(MessagesState):
     runtime_event_handler: Optional[Callable[[dict[str, Any]], Awaitable[None]]]
     memory_session_id: str
     memory_context: dict[str, Any]
+    # Execution-engine (Plan §7): captured artifacts and per-step results.
+    artifacts: dict
+    step_results: dict
 
 
 class RemoveAgentRequest(BaseModel):

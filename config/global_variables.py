@@ -18,6 +18,10 @@ context_variables = {
 # Set to True to enable, False to disable.
 mermaid_enabled = True
 
+# Execution-engine feature flags (default OFF: main behavior unchanged, B1 preserved).
+# Phase 2: agent_proxy captures each executed step's output as a typed Artifact.
+artifact_capture_enabled = False
+
 system_agents = {
         "coordinator": {
             "type": "system_agent",

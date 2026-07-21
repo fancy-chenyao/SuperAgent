@@ -2,7 +2,7 @@ import logging
 import json
 import time
 from copy import deepcopy
-from typing import Literal
+from typing import Any, Dict, Literal, Optional
 
 try:
     from langgraph.types import Command
@@ -25,6 +25,7 @@ from src.utils.content_process import clean_response_tags
 from src.manager.executor.base import ExecutionContext
 from src.manager.executor.factory import execute_agent
 from src.security.enforcement import enforce_agent_dispatch
+from config.global_variables import artifact_capture_enabled
 
 try:
     from src.llm.llm import get_llm_by_type
@@ -651,6 +652,45 @@ async def agent_proxy_node(state: State) -> Command[Literal["publisher", "__end_
         structured_result["result"] = parsed_json
     else:
         structured_result["result"] = raw_payload
+
+    # Execution-engine (Phase 2): optionally capture this step's output as a typed
+    # Artifact. Gated OFF by default and wrapped so capture never breaks the legacy
+    # flow; the messages/return below are unchanged.
+    if artifact_capture_enabled:
+        try:
+            from src.manager.executor.artifact_adapter import to_artifact
+            from src.interface.artifact import StepResult, StepStatus
+
+            artifact = to_artifact(
+                execute_result,
+                step=None,  # legacy publisher/while path has no TaskStep
+                context=context,
+                logical_name=f"{state['next']}_result",
+            )
+            artifacts = state.get("artifacts")
+            if not isinstance(artifacts, dict):
+                artifacts = {}
+            artifacts[artifact.artifact_id] = artifact.model_dump()
+            state["artifacts"] = artifacts
+
+            step_results = state.get("step_results")
+            if not isinstance(step_results, dict):
+                step_results = {}
+            step_key = f"{state.get('current_step')}:{_agent.agent_name}"
+            step_results[step_key] = StepResult(
+                step_id=step_key,
+                status=StepStatus.SUCCEEDED,
+                outputs={artifact.logical_name: artifact.ref()},
+            ).model_dump()
+            state["step_results"] = step_results
+            logger.info(
+                "artifact captured: %s (%s) for agent %s",
+                artifact.artifact_id,
+                artifact.logical_name,
+                _agent.agent_name,
+            )
+        except Exception as exc:  # pragma: no cover - defensive; never break flow
+            logger.warning("artifact capture skipped: %s", exc)
 
     if state["workflow_mode"] == "launch":
         cache.restore_node(
