@@ -11,7 +11,7 @@ from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 import httpx
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from src.interface.agent import AgentRequest
 from src.manager import agent_manager
@@ -30,6 +30,28 @@ from config.s_abac_config import (
     SENSITIVITY_LEVELS,
 )
 from src.service.env import S_ABAC_ENABLED, USE_MCP_TOOLS
+from src.memory import get_memory_manager
+from src.memory.store import SecretDetectedError
+
+
+class MemoryWriteRequest(BaseModel):
+    user_id: str
+    content: str
+    kind: str = "fact"
+    memory_key: Optional[str] = None
+    scope: str = "user"
+    confidence: float = 1.0
+    workflow_id: Optional[str] = None
+    session_id: Optional[str] = None
+    expires_at: Optional[datetime] = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class MemoryCompactRequest(BaseModel):
+    user_id: str
+    session_id: Optional[str] = None
+    attachments: dict[str, Any] = Field(default_factory=dict)
+    hook_results: list[dict[str, Any]] = Field(default_factory=list)
 
 
 def _sse_format(event: str, data: dict[str, Any]) -> str:
@@ -320,6 +342,65 @@ def create_app() -> FastAPI:
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
         )
+
+    @app.get("/api/memory/long-term")
+    async def list_long_term_memory(
+        user_id: str,
+        query: Optional[str] = None,
+    ):
+        manager = get_memory_manager()
+        results = await manager.list_long_term(user_id, query=query)
+        return [item.to_dict() for item in results]
+
+    @app.post("/api/memory/long-term")
+    async def write_long_term_memory(body: MemoryWriteRequest):
+        manager = get_memory_manager()
+        try:
+            record = await manager.remember(
+                user_id=body.user_id,
+                content=body.content,
+                kind=body.kind,
+                memory_key=body.memory_key,
+                scope=body.scope,
+                confidence=body.confidence,
+                workflow_id=body.workflow_id,
+                session_id=body.session_id,
+                expires_at=body.expires_at,
+                provenance={"source": "memory_api", "actor": body.user_id},
+                metadata=body.metadata,
+            )
+            return record.to_dict()
+        except SecretDetectedError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.delete("/api/memory/long-term/{memory_id}")
+    async def delete_long_term_memory(memory_id: str, user_id: str):
+        deleted = await get_memory_manager().forget(user_id, memory_id)
+        if not deleted:
+            raise HTTPException(status_code=404, detail="memory not found")
+        return {"result": "deleted", "memory_id": memory_id}
+
+    @app.get("/api/memory/session")
+    async def list_session_memory(user_id: str, session_id: Optional[str] = None):
+        messages = await get_memory_manager().list_session_messages(
+            user_id, session_id=session_id
+        )
+        return [message.to_dict() for message in messages]
+
+    @app.post("/api/memory/compact")
+    async def compact_session_memory(body: MemoryCompactRequest):
+        try:
+            record = await get_memory_manager().compact_session(
+                user_id=body.user_id,
+                session_id=body.session_id,
+                attachments=body.attachments,
+                hook_results=body.hook_results,
+            )
+            return record.to_dict()
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.get("/api/agents")
     async def list_agents(user_id: Optional[str] = None, match: Optional[str] = None):

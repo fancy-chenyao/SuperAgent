@@ -114,6 +114,8 @@ class Agent(BaseModel):
 class AgentMessage(BaseModel):
     content: str
     role: str
+    message_id: Optional[str] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
 class AgentRequest(BaseModel):
@@ -130,6 +132,9 @@ class AgentRequest(BaseModel):
     instruction: Optional[str] = None
     instruction_history: Optional[list[str]] = None
     original_user_query: Optional[str] = None
+    session_id: Optional[str] = None
+    memory_session_id: Optional[str] = None
+    memory_enabled: Optional[bool] = None
 
 
 class listAgentRequest(BaseModel):
@@ -183,6 +188,8 @@ class State(MessagesState):
     ROUTING_DECISION_TEXT: str
     agent_cards: list[dict]
     runtime_event_handler: Optional[Callable[[dict[str, Any]], Awaitable[None]]]
+    memory_session_id: str
+    memory_context: dict[str, Any]
 
 
 class RemoveAgentRequest(BaseModel):
