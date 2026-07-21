@@ -22,6 +22,10 @@ mermaid_enabled = True
 # Phase 2: agent_proxy captures each executed step's output as a typed Artifact.
 artifact_capture_enabled = False
 
+# Phase 3: route the workflow through the TaskGraph scheduler when the state
+# carries an explicit task graph (falls back to the legacy loop otherwise).
+orchestration_scheduler_enabled = False
+
 system_agents = {
         "coordinator": {
             "type": "system_agent",

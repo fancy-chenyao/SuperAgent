@@ -17,6 +17,7 @@ from src.manager.registry import ToolRegistry
 from src.robust.checkpoint import CheckpointManager
 from src.robust.task_logger import TaskLogger
 from config.s_abac_demo_users import get_user_available_agents
+from config.global_variables import orchestration_scheduler_enabled
 from src.llm.llm import get_llm_by_type
 from src.manager.resource import get_resource_registry
 
@@ -791,6 +792,23 @@ async def _process_workflow(
         # Only log workflow_start for new executions, not for resume
         if not should_resume:
             task_logger.log_workflow_start(user_query=user_query)
+
+        # Execution-engine (Phase 3): when enabled and the state carries an explicit
+        # task graph, drive the TaskGraph scheduler instead of the legacy
+        # publisher/while loop. Gated OFF by default -> B1 behavior is unchanged.
+        if orchestration_scheduler_enabled:
+            from src.orchestration.runtime import has_task_graph, run_scheduler_workflow
+
+            if has_task_graph(state):
+                async for scheduler_event in run_scheduler_workflow(
+                    state,
+                    task_id=task_id,
+                    checkpoint_manager=checkpoint_manager,
+                    task_logger=task_logger,
+                    hook_engine=hook_engine,
+                ):
+                    yield scheduler_event
+                return
 
         while current_node != "__end__":
             agent_name = current_node
