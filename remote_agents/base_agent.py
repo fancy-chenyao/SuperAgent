@@ -65,9 +65,23 @@ class BaseRemoteAgent(ABC):
                     json={"tool": tool_name, "arguments": arguments},
                     headers={"Content-Type": "application/json"},
                 )
-                result = resp.json().get("result")
+                resp.raise_for_status()
+                payload = resp.json()
+                result = payload.get("result")
+                if not isinstance(result, dict):
+                    raise RuntimeError(
+                        f"Tool {tool_name} returned an invalid result payload"
+                    )
+                if str(result.get("status") or "").lower() in {"error", "failed"}:
+                    detail = result.get("error") or result.get("message") or "unknown tool error"
+                    raise RuntimeError(f"Tool {tool_name} failed: {detail}")
                 logger.info(f"Tool {tool_name} executed successfully")
                 return result
+        except httpx.TimeoutException as exc:
+            message = f"Tool {tool_name} timed out after {timeout}s"
+            logger.error(message)
+            raise TimeoutError(message) from exc
         except Exception as e:
-            logger.error(f"Tool {tool_name} execution failed: {e}")
+            detail = str(e) or type(e).__name__
+            logger.error(f"Tool {tool_name} execution failed: {detail}")
             raise

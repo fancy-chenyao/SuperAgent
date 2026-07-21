@@ -23,7 +23,10 @@ KNOWN_AGENT_CAPABILITIES = {
     "RemoteHRCalendarAgent": (["HR", "Office"], ["schedule_management", "hr_calendar"]),
     "RemoteKnowledgeAgent": (["Knowledge"], ["knowledge_lookup"]),
     "RemoteDocumentGeneratorAgent": (["Document"], ["document_generation", "report_generation"]),
-    "RemoteOfficeAssistantAgent": (["Office"], ["schedule_management", "office_assistance"]),
+    "RemoteOfficeAssistantAgent": (
+        ["HR", "Office"],
+        ["leave_record_query", "travel_service", "office_assistance"],
+    ),
     "RemoteMeetingManagerAgent": (["Meeting", "Office"], ["meeting_arrangement"]),
     "RemoteCommunicationAgent": (["Communication"], ["message_or_email_send"]),
 }
@@ -41,6 +44,7 @@ KNOWN_ACTIONS = {
     "RemoteMeetingManagerAgent": ["read", "write", "delete"],
     "RemoteScheduleAgent": ["read", "write", "delete"],
     "RemoteTodoAgent": ["read", "write", "delete"],
+    "RemoteOfficeAssistantAgent": ["read", "query", "write"],
 }
 
 RISK_LEVEL = {"LOW": 1, "MEDIUM": 2, "HIGH": 3, "CRITICAL": 4}
@@ -68,6 +72,51 @@ def _overlap(left: Iterable[str], right: Iterable[str]) -> float:
 
 def _any_overlap(left: Iterable[str], right: Iterable[str]) -> float:
     return 1.0 if _normalized(left) & _normalized(right) else 0.0
+
+
+def _coverage_score(items: Iterable[dict[str, Any]], field: str, card_values: Iterable[str]) -> float:
+    subtasks = list(items or [])
+    if not subtasks:
+        return 0.0
+    card_set = _normalized(card_values)
+    if not card_set:
+        return 0.0
+    matched = 0
+    for item in subtasks:
+        values = item.get(field)
+        if isinstance(values, str):
+            item_values = [values]
+        else:
+            item_values = list(values or [])
+        if _normalized(item_values) & card_set:
+            matched += 1
+    return matched / len(subtasks)
+
+
+def _composite_candidate_coverage(
+    task_profile: TaskProfile,
+    candidates: list[RoutingCandidate],
+    agent_cards: list[AgentCard],
+) -> float:
+    subtasks = list(getattr(task_profile, "subtasks", []) or [])
+    if not subtasks:
+        return 0.0
+    candidate_ids = {item.agent_id for item in candidates}
+    candidate_cards = [card for card in agent_cards if card.agent_id in candidate_ids]
+    covered = 0
+    for subtask in subtasks:
+        intent = _normalized([subtask.get("intent")])
+        capabilities = _normalized(subtask.get("expected_capabilities") or [])
+        scenario_tags = _normalized(subtask.get("scenario_tags") or [])
+        for card in candidate_cards:
+            if (
+                intent & _normalized(card.intents)
+                or capabilities & _normalized(card.capabilities)
+                or scenario_tags & _normalized(card.scenario_tags + card.intents)
+            ):
+                covered += 1
+                break
+    return covered / len(subtasks)
 
 
 def _tool_names(agent: Any) -> list[str]:
@@ -191,9 +240,19 @@ def route_task(
             )
             continue
 
-        intent_score = 1.0 if task_profile.intent in card.intents else 0.0
-        capability_score = _any_overlap(task_profile.expected_capabilities, card.capabilities)
-        scenario_score = _any_overlap(task_profile.scenario_tags, card.scenario_tags + card.intents)
+        task_intents = _normalized(
+            [task_profile.intent] + list(getattr(task_profile, "sub_intents", []) or [])
+        )
+        card_intents = _normalized(card.intents)
+        subtasks = list(getattr(task_profile, "subtasks", []) or [])
+        if composite_task and subtasks:
+            intent_score = _coverage_score(subtasks, "intent", card.intents)
+            capability_score = _coverage_score(subtasks, "expected_capabilities", card.capabilities)
+            scenario_score = _coverage_score(subtasks, "scenario_tags", card.scenario_tags + card.intents)
+        else:
+            intent_score = 1.0 if task_intents & card_intents else 0.0
+            capability_score = _any_overlap(task_profile.expected_capabilities, card.capabilities)
+            scenario_score = _any_overlap(task_profile.scenario_tags, card.scenario_tags + card.intents)
         data_score = 1.0 if "general" in card.accepted_data_scopes else _overlap(
             task_profile.data_scope,
             card.accepted_data_scopes,
@@ -246,9 +305,21 @@ def route_task(
     candidates.sort(key=lambda item: (-item.score, item.agent_id))
     candidates = candidates[:top_k]
     top_score = candidates[0].score if candidates else 0.0
-    if task_profile.missing_fields:
+    composite_coverage = (
+        _composite_candidate_coverage(task_profile, candidates, agent_cards)
+        if composite_task
+        else 0.0
+    )
+    if task_profile.missing_fields or getattr(task_profile, "needs_clarification", False):
         decision = "CLARIFY"
-        reason_codes = ["MISSING_REQUIRED_FIELDS"]
+        reason_codes = (
+            ["MISSING_REQUIRED_FIELDS"]
+            if task_profile.missing_fields
+            else ["INTENT_CLARIFICATION_REQUIRED"]
+        )
+    elif composite_task and composite_coverage >= 0.80:
+        decision = "DISPATCH"
+        reason_codes = ["COMPOSITE_ROUTE_COVERED"]
     elif top_score >= 0.80:
         decision = "DISPATCH"
         reason_codes = ["HIGH_CONFIDENCE_ROUTE"]
@@ -271,7 +342,7 @@ def route_task(
         selected_agent=selected,
         candidate_agents=candidates,
         decision=decision,
-        confidence=top_score,
+        confidence=max(top_score, composite_coverage) if composite_task else top_score,
         reason_codes=reason_codes,
         required_grants=required_grants,
         excluded_agents=excluded,

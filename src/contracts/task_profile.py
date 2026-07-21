@@ -23,6 +23,20 @@ class TaskProfile(BaseModel):
     missing_fields: list[str] = Field(default_factory=list)
     confidence: float = Field(default=0.5, ge=0.0, le=1.0)
     reason: str = ""
+    sub_intents: list[str] = Field(default_factory=list)
+    subtasks: list[dict[str, Any]] = Field(default_factory=list)
+    is_composite: bool = False
+    segments: list[dict[str, Any]] = Field(default_factory=list)
+    intent_nodes: list[dict[str, Any]] = Field(default_factory=list)
+    confidence_factors: list[str] = Field(default_factory=list)
+    # 新版识别结果。旧字段继续保留，供现有 Router、Planner 和前端使用。
+    primary_goal_intent: str = "general_assistance"
+    ambiguities: list[str] = Field(default_factory=list)
+    needs_clarification: bool = False
+    clarification_questions: list[str] = Field(default_factory=list)
+    recognition_mode: str = "rule"
+    recognition_degraded: bool = False
+    recognition: dict[str, Any] = Field(default_factory=dict)
 
     def to_legacy_scenario(self) -> dict[str, Any]:
         """兼容现有 S-ABAC 和 Planner 使用的字段命名。"""
@@ -35,4 +49,3 @@ class TaskProfile(BaseModel):
             }
         )
         return data
-

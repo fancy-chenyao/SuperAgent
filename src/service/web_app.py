@@ -29,7 +29,7 @@ from config.s_abac_config import (
     S_ABAC_POLICIES,
     SENSITIVITY_LEVELS,
 )
-from src.service.env import S_ABAC_ENABLED
+from src.service.env import S_ABAC_ENABLED, USE_MCP_TOOLS
 
 
 def _sse_format(event: str, data: dict[str, Any]) -> str:
@@ -107,6 +107,11 @@ def _workflow_last_used_score(workflow: dict) -> float:
         return dt.timestamp()
     except Exception:
         return float("-inf")
+
+
+class PlanningStepsRequest(BaseModel):
+    workflow_id: str
+    planning_steps: list[dict[str, Any]]
 
 
 def _format_datetime(dt: Optional[datetime]) -> Optional[str]:
@@ -256,12 +261,22 @@ def create_app() -> FastAPI:
             }
 
         try:
-            mcp_servers = mcp_client_config() if mcp_client_config else {}
+            mcp_servers = (
+                mcp_client_config()
+                if USE_MCP_TOOLS and mcp_client_config
+                else {}
+            )
             mcp_status = {
-                "enabled": bool(mcp_servers),
+                "enabled": USE_MCP_TOOLS,
                 "configured": bool(mcp_servers),
                 "server_count": len(mcp_servers),
-                "status": "configured" if mcp_servers else "not_configured",
+                "status": (
+                    "configured"
+                    if mcp_servers
+                    else "not_configured"
+                    if USE_MCP_TOOLS
+                    else "disabled"
+                ),
             }
         except Exception as exc:
             mcp_status = {

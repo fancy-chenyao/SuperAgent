@@ -1,7 +1,17 @@
-from langchain_openai import ChatOpenAI
-from langchain_deepseek import ChatDeepSeek
+from __future__ import annotations
+
 import os
 from typing import Optional
+
+try:
+    from langchain_openai import ChatOpenAI
+except Exception:  # pragma: no cover
+    ChatOpenAI = None  # type: ignore
+
+try:
+    from langchain_deepseek import ChatDeepSeek
+except Exception:  # pragma: no cover
+    ChatDeepSeek = None  # type: ignore
 
 from src.service.env import (
     REASONING_MODEL,
@@ -30,6 +40,10 @@ def create_openai_llm(
     """
     Create a ChatOpenAI instance with the specified configuration
     """
+    if ChatOpenAI is None:
+        raise RuntimeError(
+            "langchain-openai is not installed. Run: pip install langchain-openai"
+        )
     # Only include base_url in the arguments if it's not None or empty
     llm_kwargs = {"model": model, "temperature": temperature, **kwargs}
 
@@ -52,6 +66,10 @@ def create_deepseek_llm(
     """
     Create a ChatDeepSeek instance with the specified configuration
     """
+    if ChatDeepSeek is None:
+        raise RuntimeError(
+            "langchain-deepseek is not installed. Run: pip install langchain-deepseek"
+        )
     # Only include base_url in the arguments if it's not None or empty
     llm_kwargs = {"model": model, "temperature": temperature, **kwargs}
 

@@ -3,6 +3,7 @@
 
 from typing import Any, Dict, List
 import logging
+import os
 
 from .base_agent import BaseRemoteAgent
 
@@ -40,11 +41,19 @@ class RemoteReportAgent(BaseRemoteAgent):
             messages=messages
         )
 
+        llm_timeout = int(os.getenv("REMOTE_REPORT_LLM_TIMEOUT", "120"))
+        tool_timeout = int(os.getenv("REMOTE_REPORT_TOOL_TIMEOUT", "150"))
+        if tool_timeout <= llm_timeout:
+            raise ValueError(
+                "REMOTE_REPORT_TOOL_TIMEOUT must be greater than REMOTE_REPORT_LLM_TIMEOUT"
+            )
+        arguments["llm_timeout_sec"] = llm_timeout
+
         logger.info(f"[{self.name}] Calling {tool_name}")
         result = await self.call_tool(
             tool_name=tool_name,
             arguments=arguments,
-            timeout=60  # Report generation may take longer
+            timeout=tool_timeout,
         )
 
         return result

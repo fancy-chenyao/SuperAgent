@@ -1,6 +1,6 @@
 # SuperAgent
 
-[![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/downloads/)
 [![GitHub stars](https://img.shields.io/github/stars/LeapLabTHU/SuperAgent?style=social)](https://github.com/LeapLabTHU/SuperAgent/stargazers)
 
 [English](./README.md) | [简体中文](./README_zh.md)
@@ -117,19 +117,25 @@ Configure the following environment variables in the `.env` file:
 
 ```bash
 # Reasoning model (for complex reasoning tasks)
-REASONING_MODEL=qwen-max-latest
+REASONING_MODEL=qwen3.5-27b
 
 # Basic model (for straightforward tasks)
-BASIC_MODEL=qwen-max-latest
+BASIC_MODEL=qwen3.5-27b
 
 # Code model
-CODE_MODEL=deepseek-chat
+CODE_MODEL=deepseek-v4-flash
 
 # Vision-language model
-VL_MODEL=qwen2.5-vl-72b-instruct
+VL_MODEL=qwen3.5-27b
+
+# Remote department Agent demo
+REMOTE_MODEL=qwen3.5-27b
 
 # Browser tool (disabled by default due to long wait time)
 USE_BROWSER=False
+
+# MCP tools (disabled in the shared development environment)
+USE_MCP_TOOLS=False
 
 # Optional: Search API Keys
 # TAVILY_API_KEY=

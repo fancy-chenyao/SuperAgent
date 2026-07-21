@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>CoorAgent Web Studio</title>
-    <link rel="stylesheet" href="/static/styles.css" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260720-decision-collapse-6" />
     <script src="/static/mermaid.min.js"></script>
   </head>
   <body>
@@ -117,7 +117,10 @@
                   <span id="routingDecisionBadge" class="tag">等待路由</span>
                 </div>
                 <div id="taskProfileView" class="decision-profile"></div>
-                <div class="decision-columns">
+                <div id="decisionTopAgentSummary" class="decision-top-agent"></div>
+                <div id="decisionDetailTabs" class="decision-detail-tabs" aria-label="主 Agent 决策详情"></div>
+                <div id="decisionDetailPanel" class="decision-detail-panel" aria-live="polite"></div>
+                <div class="decision-columns" hidden>
                   <div>
                     <div class="label">合法候选与得分</div>
                     <div id="routingCandidatesView" class="decision-list"></div>
@@ -463,7 +466,7 @@
       </main>
     </div>
 
-    <script src="/static/app.js"></script>
+    <script src="/static/app.js?v=20260720-decision-collapse-6"></script>
     <script src="/static/security.js"></script>
   </body>
 </html>
