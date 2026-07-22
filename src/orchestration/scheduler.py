@@ -59,7 +59,9 @@ class TaskScheduler:
 
         # Runtime state (reset per run)
         self._outputs: Dict[str, Dict[str, Any]] = {}
-        self._agent_to_step: Dict[str, str] = {}
+        # An agent may drive multiple steps, so map each agent to *all* of its
+        # step ids (declaration order) instead of clobbering to the last one.
+        self._agent_to_steps: Dict[str, List[str]] = {}
 
     async def run(
         self,
@@ -76,9 +78,10 @@ class TaskScheduler:
         context = context or {}
 
         self._outputs = {}
-        self._agent_to_step = {
-            getattr(s, "agent_name", None) or s.step_id: s.step_id for s in graph.steps
-        }
+        self._agent_to_steps = {}
+        for s in graph.steps:
+            key = getattr(s, "agent_name", None) or s.step_id
+            self._agent_to_steps.setdefault(key, []).append(s.step_id)
 
         completed: set[str] = set(initial_completed or [])
         attempted: set[str] = set(completed)
@@ -133,6 +136,32 @@ class TaskScheduler:
         on_step_start: Optional[StepHook],
         on_step_end: Optional[StepHook],
     ) -> StepResult:
+        # A single step must never crash the whole batch: routing, input
+        # resolution, the start hook or completion evaluation raising would
+        # otherwise abort ``asyncio.gather`` and kill independent branches.
+        try:
+            result = await self._execute_step_core(step, context, on_step_start)
+        except Exception as exc:  # noqa: BLE001 - degrade to a failed step
+            result = StepResult(
+                step_id=step.step_id,
+                status=StepStatus.FAILED,
+                error=f"step crashed: {exc}",
+                metrics={"crashed": True},
+            )
+
+        if on_step_end is not None:
+            try:
+                await on_step_end(step=step, result=result)
+            except Exception:  # noqa: BLE001 - the end hook must not crash the batch
+                pass
+        return result
+
+    async def _execute_step_core(
+        self,
+        step: TaskStep,
+        context: dict,
+        on_step_start: Optional[StepHook],
+    ) -> StepResult:
         selected_agent = await self._route(step, context)
         inputs = self._resolve_inputs(step, context)
 
@@ -146,15 +175,12 @@ class TaskScheduler:
             idem_key = idempotency_key(context.get("task_id", ""), step.step_id, inputs)
             prior = self.receipt_store.get(idem_key)
             if prior and validate_receipt(prior):
-                result = StepResult(
+                return StepResult(
                     step_id=step.step_id,
                     status=StepStatus.SUCCEEDED,
                     outputs=prior.get("outputs") or {},
                     metrics={"idempotent_reuse": True, "selected_agent": selected_agent},
                 )
-                if on_step_end is not None:
-                    await on_step_end(step=step, result=result)
-                return result
 
         attempts = max(1, step.retry + 1)
         last_error: Optional[str] = None
@@ -176,38 +202,35 @@ class TaskScheduler:
             last_error = getattr(exec_result, "error", None) or "step failed"
 
         if result is None:
-            result = StepResult(
+            return StepResult(
                 step_id=step.step_id,
                 status=StepStatus.FAILED,
                 error=last_error,
                 metrics={"attempts": attempts, "selected_agent": selected_agent},
             )
-        else:
-            # Completion conditions gate success; a failing predicate marks FAILED.
-            passed, failed_expr = evaluate_completion(
-                step.completion_conditions, result.outputs, result.metrics, "SUCCEEDED"
-            )
-            if not passed:
-                result = StepResult(
-                    step_id=step.step_id,
-                    status=StepStatus.FAILED,
-                    error=f"completion condition failed: {failed_expr}",
-                    outputs=result.outputs,
-                    metrics=result.metrics,
-                )
-            elif self.receipt_store is not None and not step.is_read_only and idem_key:
-                self.receipt_store.put(
-                    idem_key,
-                    {
-                        "step_id": step.step_id,
-                        "status": "SUCCEEDED",
-                        "outputs": result.outputs,
-                        "idempotency_key": idem_key,
-                    },
-                )
 
-        if on_step_end is not None:
-            await on_step_end(step=step, result=result)
+        # Completion conditions gate success; a failing predicate marks FAILED.
+        passed, failed_expr = evaluate_completion(
+            step.completion_conditions, result.outputs, result.metrics, "SUCCEEDED"
+        )
+        if not passed:
+            return StepResult(
+                step_id=step.step_id,
+                status=StepStatus.FAILED,
+                error=f"completion condition failed: {failed_expr}",
+                outputs=result.outputs,
+                metrics=result.metrics,
+            )
+        if self.receipt_store is not None and not step.is_read_only and idem_key:
+            self.receipt_store.put(
+                idem_key,
+                {
+                    "step_id": step.step_id,
+                    "status": "SUCCEEDED",
+                    "outputs": result.outputs,
+                    "idempotency_key": idem_key,
+                },
+            )
         return result
 
     async def _invoke(
@@ -248,6 +271,23 @@ class TaskScheduler:
         )
         return getattr(result, "selected_agent", None) or step.preferred_resource_id
 
+    def _find_source_step(self, src_agent: Optional[str]) -> Optional[str]:
+        """Resolve an agent name in a binding to a concrete producer step id.
+
+        A given agent may drive several steps, so bind to the most recent one
+        that has already produced outputs; fall back to the first declared step
+        when none has run yet (yields empty outputs, handled by the caller).
+        """
+        if not src_agent:
+            return None
+        step_ids = self._agent_to_steps.get(src_agent)
+        if not step_ids:
+            return None
+        for sid in reversed(step_ids):
+            if sid in self._outputs:
+                return sid
+        return step_ids[0]
+
     def _resolve_inputs(self, step: TaskStep, context: dict) -> Dict[str, Any]:
         """Best-effort resolve symbolic ``input_bindings`` to concrete values."""
         bindings = getattr(step, "input_bindings", None)
@@ -261,7 +301,7 @@ class TaskScheduler:
             param = binding.get("parameter_name")
             src_agent = binding.get("source_step")
             src_output = binding.get("source_output")
-            src_step_id = self._agent_to_step.get(src_agent)
+            src_step_id = self._find_source_step(src_agent)
             if not param or not src_step_id:
                 continue
             outputs = self._outputs.get(src_step_id, {})

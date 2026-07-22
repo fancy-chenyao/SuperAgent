@@ -43,3 +43,6 @@ dmypy.json
 /.codex/
 /openspec/
 /docs/agent-memory-design.md
+
+# Local docs / notes
+/doc-yz/

@@ -98,6 +98,50 @@ def test_runtime_reports_failure_status():
     assert state["completed_steps"] == ["s1"]
 
 
+def test_runtime_emits_end_of_workflow_when_scheduler_crashes():
+    """An unexpected error inside scheduler.run() must still close the stream."""
+
+    async def _boom(*, step, selected_agent, inputs, context):
+        raise RuntimeError("routing exploded")
+
+    # Force run_scheduler_workflow to fail *outside* per-step handling by using a
+    # routing provider that raises: routing is invoked before any try guard the
+    # step-level fix adds is irrelevant here because we monkeypatch run() below.
+    state = _two_step_state()
+
+    class _ExplodingScheduler:
+        def __init__(self, *a, **k):
+            pass
+
+        async def run(self, *a, **k):
+            raise RuntimeError("scheduler exploded")
+
+    import src.orchestration.runtime as runtime_mod
+
+    original = runtime_mod.TaskScheduler
+    runtime_mod.TaskScheduler = _ExplodingScheduler
+    try:
+        async def _run():
+            events = []
+            async for ev in run_scheduler_workflow(
+                state,
+                task_id="task-1",
+                execute_step=_boom,
+                routing_provider=StubRoutingProvider(),
+            ):
+                events.append(ev)
+            return events
+
+        events = asyncio.run(_run())
+    finally:
+        runtime_mod.TaskScheduler = original
+
+    assert events[0]["event"] == "start_of_workflow"
+    assert events[-1]["event"] == "end_of_workflow"
+    assert events[-1]["data"]["status"] == "error"
+    assert "scheduler exploded" in events[-1]["data"]["error"]
+
+
 def test_has_task_graph_gating():
     assert has_task_graph({"task_graph": {"spec": {"task_id": "t"}, "steps": []}}) is True
     assert has_task_graph({"planning_steps": [{"agent_name": "A"}]}) is False

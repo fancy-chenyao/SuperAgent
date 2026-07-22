@@ -161,3 +161,49 @@ def test_downstream_receives_resolved_inputs_from_upstream_artifact():
     # b's executor received the resolved upstream payload
     assert "employee" in fake.received["step_2"]["inputs"]
     assert fake.received["step_2"]["inputs"]["employee"] == {"ok": "step_1"}
+
+
+def test_binding_resolves_to_most_recent_completed_step_of_same_agent():
+    """When one agent drives multiple steps, a binding must point at the
+    already-completed upstream, not the latest declared step."""
+    fake = FakeExecutor()
+    # Agent A drives step_1 (upstream) and step_3 (downstream, not yet run when
+    # step_2 resolves its inputs). step_2 binds source_step="A".
+    s1 = _step("step_1", agent_name="A", expected_outputs=["person_info"])
+    s2 = _step(
+        "step_2",
+        deps=["step_1"],
+        agent_name="B",
+        input_bindings=[
+            {"parameter_name": "employee", "source_step": "A", "source_output": "person_info"}
+        ],
+    )
+    s3 = _step("step_3", deps=["step_2"], agent_name="A")
+    results = _run(fake, _graph(s1, s2, s3))
+    assert results["step_2"].is_success
+    # step_2 must have received step_1's output, not an empty/未运行 step_3.
+    assert fake.received["step_2"]["inputs"]["employee"] == {"ok": "step_1"}
+
+
+def test_routing_crash_degrades_to_failed_and_isolates_branch():
+    """A routing failure must fail only that step, not crash the whole DAG."""
+
+    class ExplodingRouting:
+        async def decide(self, step, **kwargs):
+            if step.step_id == "b":
+                raise RuntimeError("routing boom")
+
+            class _R:
+                selected_agent = None
+
+            return _R()
+
+    fake = FakeExecutor()
+    # a -> b(routing crashes) -> d ; a -> c(ok)
+    g = _graph(_step("a"), _step("b", ["a"]), _step("c", ["a"]), _step("d", ["b"]))
+    results = _run(fake, g, routing=ExplodingRouting())
+    assert results["a"].status == StepStatus.SUCCEEDED
+    assert results["b"].status == StepStatus.FAILED
+    assert "step crashed" in (results["b"].error or "")
+    assert results["c"].status == StepStatus.SUCCEEDED  # independent branch survives
+    assert "d" not in results  # blocked by failed dependency

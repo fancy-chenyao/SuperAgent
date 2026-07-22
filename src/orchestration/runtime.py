@@ -291,6 +291,22 @@ async def run_scheduler_workflow(
             except asyncio.TimeoutError:
                 continue
         results = await run_task
+    except Exception as exc:  # noqa: BLE001 - guarantee end_of_workflow is emitted
+        logger.exception("scheduler.run() raised unexpectedly")
+        # Drain any events enqueued before the failure so nothing is lost.
+        while not event_queue.empty():
+            yield await event_queue.get()
+        yield {
+            "event": "end_of_workflow",
+            "data": {
+                "workflow_id": workflow_id,
+                "task_id": task_id,
+                "mode": "scheduler",
+                "status": "error",
+                "error": str(exc),
+            },
+        }
+        return
     finally:
         if not run_task.done():
             run_task.cancel()
