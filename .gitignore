@@ -23,7 +23,11 @@ agent_history.gif
 store
 .uv/
 .pytest_cache/
+.pytest-tmp-daily-*/
 .ruff_cache/
+
+# Tool-generated logs
+src/tools/excel/excel-mcp.log
 
 # Configuration files
 config/mcp.json
