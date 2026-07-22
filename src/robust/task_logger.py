@@ -61,6 +61,8 @@ class TaskLogger:
         self.status = "running"
         self.error: Optional[str] = None
         self.execution_phase: str = "initial_planning"  # 新增: 执行阶段
+        self.planning_steps: List[Dict[str, Any]] = []
+        self.task_profile: Dict[str, Any] = {}
         self._step_counter: Dict[str, int] = {}  # track per-node step
 
         self._logs_dir = _get_task_logs_dir()
@@ -162,6 +164,17 @@ class TaskLogger:
         self.execution_phase = execution_phase
         self._flush()
 
+    def set_workflow_snapshot(
+        self,
+        planning_steps: List[Dict[str, Any]],
+        task_profile: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Persist the approved plan and scenario used by this execution."""
+
+        self.planning_steps = [dict(step) for step in planning_steps if isinstance(step, dict)]
+        self.task_profile = dict(task_profile or {})
+        self._flush()
+
     @staticmethod
     def determine_execution_phase(workmode: str, instruction_history: List[str]) -> str:
         """
@@ -190,6 +203,8 @@ class TaskLogger:
             "workflow_id": self.workflow_id,
             "user_query": self.user_query,
             "execution_phase": self.execution_phase,  # 新增
+            "planning_steps": self.planning_steps,
+            "task_profile": self.task_profile,
             "created_at": self.created_at,
             "finished_at": datetime.now().isoformat() if self.status != "running" else None,
             "status": self.status,
@@ -226,6 +241,8 @@ class TaskLogger:
 
             # 兼容性处理：如果缺少新字段，设置默认值
             inst.execution_phase = data.get("execution_phase", "initial_planning")
+            inst.planning_steps = data.get("planning_steps", [])
+            inst.task_profile = data.get("task_profile", {})
 
             inst._step_counter = {"__global__": len(inst.history)}
             inst._logs_dir = logs_dir

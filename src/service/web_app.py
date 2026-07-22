@@ -1,4 +1,5 @@
 import asyncio
+import hmac
 import json
 import time
 from datetime import datetime, timezone
@@ -7,7 +8,7 @@ from typing import Any, AsyncGenerator, Optional
 
 import math
 
-from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 import httpx
@@ -29,9 +30,10 @@ from config.s_abac_config import (
     S_ABAC_POLICIES,
     SENSITIVITY_LEVELS,
 )
-from src.service.env import S_ABAC_ENABLED, USE_MCP_TOOLS
+from src.service.env import S_ABAC_ENABLED, USE_MCP_TOOLS, WORKFLOW_SKILL_ADMIN_API_KEY
 from src.memory import get_memory_manager
 from src.memory.store import SecretDetectedError
+from src.skills.workflow_skill import get_workflow_skill_manager
 
 
 class MemoryWriteRequest(BaseModel):
@@ -52,6 +54,54 @@ class MemoryCompactRequest(BaseModel):
     session_id: Optional[str] = None
     attachments: dict[str, Any] = Field(default_factory=dict)
     hook_results: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class WorkflowSkillUserRequest(BaseModel):
+    user_id: str
+
+
+class WorkflowSkillDistillRequest(BaseModel):
+    user_id: str
+    task_id: str
+    workflow_id: Optional[str] = None
+
+
+class WorkflowSkillBootstrapRequest(BaseModel):
+    user_id: str
+    lookup_agent_name: str = "RemoteHRAssistantAgent"
+    action_agent_name: str = "RemoteOfficeAssistantAgent"
+    activate: bool = True
+
+
+def _authorize_workflow_skill_api(
+    authorization: Optional[str] = Header(default=None),
+) -> None:
+    configured = WORKFLOW_SKILL_ADMIN_API_KEY or ""
+    if not configured:
+        raise HTTPException(
+            status_code=503,
+            detail="工作流技能管理 API 尚未配置管理员凭据",
+        )
+    scheme, separator, supplied = (authorization or "").partition(" ")
+    if (
+        not separator
+        or scheme.casefold() != "bearer"
+        or not hmac.compare_digest(supplied, configured)
+    ):
+        raise HTTPException(status_code=401, detail="工作流技能管理 API 认证失败")
+
+
+def _normalize_workflow_steps(raw: Any) -> list[dict[str, Any]]:
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except Exception:
+            return []
+    if isinstance(raw, dict):
+        raw = raw.get("steps") or raw.get("planning_steps") or []
+    if not isinstance(raw, list):
+        return []
+    return [step for step in raw if isinstance(step, dict)]
 
 
 def _sse_format(event: str, data: dict[str, Any]) -> str:
@@ -882,6 +932,99 @@ def create_app() -> FastAPI:
             return {"result": "success", "message": f"Task {task_id} deleted successfully"}
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Failed to delete task: {str(e)}")
+
+    # ---- Workflow skill administration API ----
+
+    @app.get("/api/workflow-skills")
+    def list_workflow_skills(
+        user_id: str,
+        include_shared: bool = True,
+        _authorized: None = Depends(_authorize_workflow_skill_api),
+    ):
+        cards = get_workflow_skill_manager().store.list(
+            user_id,
+            include_shared=include_shared,
+        )
+        return [card.model_dump(mode="json") for card in cards]
+
+    @app.get("/api/workflow-skills/{skill_id}")
+    def get_workflow_skill(
+        skill_id: str,
+        user_id: str,
+        _authorized: None = Depends(_authorize_workflow_skill_api),
+    ):
+        manager = get_workflow_skill_manager()
+        card = manager.store.get(user_id, skill_id)
+        if card is None and user_id != "share":
+            card = manager.store.get("share", skill_id)
+        if card is None:
+            raise HTTPException(status_code=404, detail="未找到工作流技能")
+        return card.model_dump(mode="json")
+
+    @app.post("/api/workflow-skills/distill")
+    def distill_workflow_skill(
+        body: WorkflowSkillDistillRequest,
+        _authorized: None = Depends(_authorize_workflow_skill_api),
+    ):
+        task = TaskLogger.load(body.task_id)
+        if task is None:
+            raise HTTPException(status_code=404, detail="未找到任务日志")
+        if task.status != "completed" or task.execution_phase != "execution":
+            raise HTTPException(status_code=400, detail="只能蒸馏已经完成的 Production 任务")
+        planning_steps = _normalize_workflow_steps(getattr(task, "planning_steps", []))
+        task_profile = getattr(task, "task_profile", {})
+        if not planning_steps:
+            raise HTTPException(status_code=400, detail="任务日志中没有可蒸馏的规划步骤")
+        try:
+            card = get_workflow_skill_manager().distill(
+                user_id=body.user_id,
+                task_id=body.task_id,
+                user_query=task.user_query,
+                planning_steps=planning_steps,
+                task_profile=task_profile if isinstance(task_profile, dict) else {},
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"skill": card.model_dump(mode="json")}
+
+    @app.post("/api/workflow-skills/bootstrap/leave")
+    def bootstrap_leave_workflow_skill(
+        body: WorkflowSkillBootstrapRequest,
+        _authorized: None = Depends(_authorize_workflow_skill_api),
+    ):
+        manager = get_workflow_skill_manager()
+        card = manager.bootstrap_leave_request(
+            body.user_id,
+            lookup_agent_name=body.lookup_agent_name,
+            action_agent_name=body.action_agent_name,
+        )
+        if body.activate:
+            card = manager.store.activate(body.user_id, card.skill_id)
+        return {"skill": card.model_dump(mode="json")}
+
+    @app.post("/api/workflow-skills/{skill_id}/activate")
+    def activate_workflow_skill(
+        skill_id: str,
+        body: WorkflowSkillUserRequest,
+        _authorized: None = Depends(_authorize_workflow_skill_api),
+    ):
+        try:
+            card = get_workflow_skill_manager().store.activate(body.user_id, skill_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return {"event": "skill_activated", "skill": card.model_dump(mode="json")}
+
+    @app.post("/api/workflow-skills/{skill_id}/disable")
+    def disable_workflow_skill(
+        skill_id: str,
+        body: WorkflowSkillUserRequest,
+        _authorized: None = Depends(_authorize_workflow_skill_api),
+    ):
+        try:
+            card = get_workflow_skill_manager().store.disable(body.user_id, skill_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return {"event": "skill_disabled", "skill": card.model_dump(mode="json")}
 
     # ---- S-ABAC Security & Demo API ----
 

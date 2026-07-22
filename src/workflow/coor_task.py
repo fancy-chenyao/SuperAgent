@@ -624,9 +624,7 @@ async def agent_proxy_node(state: State) -> Command[Literal["publisher", "__end_
     execute_result = await execute_agent(_agent, messages_to_send, context)
     if not execute_result.is_success:
         error_detail = execute_result.error or "Unknown executor error"
-        raise RuntimeError(
-            f"Agent '{_agent.agent_name}' execution failed: {error_detail}"
-        )
+        logger.warning("Agent '%s' execution failed: %s", _agent.agent_name, error_detail)
     response_content = execute_result.result if execute_result.is_success else execute_result.error
     if response_content is None:
         response_content = ""
@@ -678,6 +676,8 @@ async def agent_proxy_node(state: State) -> Command[Literal["publisher", "__end_
             ],
             "processing_agent_name": _agent.agent_name,
             "agent_name": _agent.agent_name,
+            "workflow_execution_failed": bool(state.get("workflow_execution_failed"))
+            or not execute_result.is_success,
         },
         goto="publisher",
     )
@@ -697,6 +697,30 @@ async def planner_node(state: State) -> Command[Literal["publisher", "__end__"]]
     retry_llm = None
     plan_validation_failed = False
     runtime_event_handler = state.get("runtime_event_handler")
+
+    if state.get("workflow_mode") == "launch" and state.get("workflow_skill_match"):
+        steps = state.get("planning_steps") or cache.get_planning_steps(state["workflow_id"])
+        if isinstance(steps, str):
+            try:
+                steps = json.loads(steps)
+            except Exception:
+                steps = []
+        if isinstance(steps, list) and steps:
+            raw_content = json.dumps({"steps": steps}, ensure_ascii=False)
+            message_content = json.dumps({"steps": steps}, indent=2, ensure_ascii=False)
+            cache.restore_planning_steps(state["workflow_id"], steps, state["user_id"])
+            goto = "__end__" if state.get("stop_after_planner") else "publisher"
+            cache.restore_system_node(state["workflow_id"], goto, state["user_id"])
+            return Command(
+                update={
+                    "messages": [{"content": message_content, "tool": "planner", "role": "assistant"}],
+                    "agent_name": "planner",
+                    "full_plan": raw_content,
+                    "planning_steps": steps,
+                },
+                goto=goto,
+            )
+        state["workflow_skill_match"] = {}
 
     routing_decision = state.get("routing_decision") or {}
     if state["workflow_mode"] == "launch" and routing_decision.get("decision") != "DISPATCH":
@@ -1069,6 +1093,19 @@ async def coordinator_node(state: State) -> Command[Literal["planner", "__end__"
 
     goto = "__end__"
     content = ""
+
+    if state.get("workflow_mode") == "launch" and state.get("workflow_skill_match"):
+        cache.restore_system_node(state["workflow_id"], COORDINATOR, state["user_id"])
+        cache.restore_system_node(state["workflow_id"], "planner", state["user_id"])
+        return Command(
+            update={
+                "messages": [
+                    {"content": "handover_to_planner", "tool": "coordinator", "role": "assistant"}
+                ],
+                "agent_name": "coordinator",
+            },
+            goto="planner",
+        )
 
     if state.get("workflow_mode") == "production":
         goto = "publisher"

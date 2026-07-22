@@ -135,6 +135,7 @@ class AgentRequest(BaseModel):
     session_id: Optional[str] = None
     memory_session_id: Optional[str] = None
     memory_enabled: Optional[bool] = None
+    skill_reuse_enabled: Optional[bool] = None
 
 
 class listAgentRequest(BaseModel):
@@ -190,6 +191,11 @@ class State(MessagesState):
     runtime_event_handler: Optional[Callable[[dict[str, Any]], Awaitable[None]]]
     memory_session_id: str
     memory_context: dict[str, Any]
+    skill_reuse_enabled: bool
+    reused_skill_id: str
+    reused_skill_owner_id: str
+    workflow_skill_match: dict[str, Any]
+    workflow_execution_failed: bool
 
 
 class RemoveAgentRequest(BaseModel):

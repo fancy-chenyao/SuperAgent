@@ -113,6 +113,7 @@ class Server:
             original_user_query=getattr(request, "original_user_query", None),
             memory_session_id=memory_session_id,
             memory_context=memory_metadata,
+            skill_reuse_enabled=request.skill_reuse_enabled,
             request_input_messages=[
                 {"role": item["role"], "content": redact_secrets(item["content"])}
                 for item in incoming_messages
@@ -212,6 +213,7 @@ class Server:
             original_user_query=getattr(request, "original_user_query", None),
             memory_session_id=memory_session_id,
             memory_context=memory_metadata,
+            skill_reuse_enabled=request.skill_reuse_enabled,
             request_input_messages=session_messages,
         )
         assistant_buffers: Dict[str, str] = {}
