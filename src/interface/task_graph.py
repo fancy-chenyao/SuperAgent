@@ -6,11 +6,28 @@ the workflow/manager/LLM stack, so importable and unit-testable in isolation.
 
 from __future__ import annotations
 
+from enum import Enum
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from .artifact import ArtifactRef
+
+
+class WorkflowStatus(str, Enum):
+    """Canonical terminal status of a scheduler workflow run.
+
+    The scheduler returns exactly one of these; the runtime maps it verbatim to
+    the ``end_of_workflow`` SSE ``status`` so the frontend never has to guess
+    success from the mere presence of an ``end_of_workflow`` event.
+    """
+
+    SUCCEEDED = "SUCCEEDED"
+    FAILED = "FAILED"
+    PARTIAL_FAILED = "PARTIAL_FAILED"
+    CLARIFY_REQUIRED = "CLARIFY_REQUIRED"
+    REJECTED = "REJECTED"
+    NEEDS_RECONCILIATION = "NEEDS_RECONCILIATION"
 
 
 class TaskGraphValidationError(ValueError):

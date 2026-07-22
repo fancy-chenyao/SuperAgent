@@ -21,6 +21,25 @@ from src.orchestration.schema_registry import SchemaRegistry, get_schema_registr
 
 _WRITE_MODES = {"write", "send", "delete", "update", "create"}
 
+# Sensitivity ordering: an artifact is at least as sensitive as the most
+# sensitive datum it derives from (upstream) and at least as sensitive as the
+# task risk implies. Never blindly default to INTERNAL for sensitive lineage.
+_SENSITIVITY_ORDER = {
+    Sensitivity.PUBLIC.value: 0,
+    Sensitivity.INTERNAL.value: 1,
+    Sensitivity.CONFIDENTIAL.value: 2,
+    Sensitivity.RESTRICTED.value: 3,
+}
+_ORDER_TO_SENSITIVITY = {v: k for k, v in _SENSITIVITY_ORDER.items()}
+
+
+def _coerce_sensitivity_value(value: Any) -> Optional[str]:
+    raw = getattr(value, "value", value)
+    if raw is None:
+        return None
+    text = str(raw).lower()
+    return text if text in _SENSITIVITY_ORDER else None
+
 
 def _coerce_payload(result: Any) -> Any:
     """Best-effort turn a raw executor result into a structured payload.
@@ -91,12 +110,17 @@ def to_artifact(
     logical_name: Optional[str] = None,
     schema_ref: Optional[str] = None,
     schema_registry: Optional[SchemaRegistry] = None,
+    upstream_sensitivities: Optional[List[Any]] = None,
 ) -> Artifact:
     """Convert an executor result into a typed :class:`Artifact`.
 
     ``step`` (a TaskStep) and ``context`` (an ExecutionContext) are optional; in
     the legacy publisher/while path there is no TaskStep, so callers pass
     ``logical_name``/``schema_ref`` explicitly or rely on context metadata.
+
+    ``upstream_sensitivities`` are the sensitivities of the artifacts this step
+    consumed; the produced artifact's sensitivity is raised to the maximum of
+    the task-risk-derived level and the upstream levels.
     """
     registry = schema_registry or get_schema_registry()
 
@@ -113,10 +137,49 @@ def to_artifact(
     resolved_schema = _resolve_schema_ref(step, schema_ref)
     name = _resolve_logical_name(step, context, logical_name)
 
+    ctx_meta = getattr(context, "metadata", None) or {
+    } if context is not None else {}
+    risk_level = str(ctx_meta.get("risk_profile", "LOW")).upper()
+
     metadata: dict[str, Any] = {
         "operation_mode": operation_mode,
         "executor_success": is_success,
+        "risk_level": risk_level,
     }
+    # Carry the acting scenario/capability domain + provenance so a downstream
+    # artifact-read guard can evaluate S-ABAC scenario fit, ownership and
+    # clearance against real data.
+    if context is not None:
+        scenario_tags = ctx_meta.get("scenario_tags")
+        if scenario_tags:
+            metadata["scenario_tags"] = list(scenario_tags)
+        expected_capabilities = ctx_meta.get("expected_capabilities")
+        if expected_capabilities:
+            metadata["expected_capabilities"] = list(expected_capabilities)
+        acting_user = getattr(context, "user_id", None)
+        if acting_user:
+            metadata["owner_user_id"] = acting_user
+            metadata["producer_subject"] = acting_user
+        # Governed collaboration: a producing step may declare the users allowed
+        # to read its output across ownership. The artifact guard honors this
+        # ``allowed_reader_ids`` roster so cross-user sharing is *governed* rather
+        # than impossible. Sourced from the step first, then context metadata.
+        # NOTE (production hardening): in production this roster must come from a
+        # TRUSTED authority, not raw (untrusted) planner output.
+        allowed_readers = None
+        if step is not None:
+            allowed_readers = getattr(step, "allowed_reader_ids", None)
+        if not allowed_readers:
+            allowed_readers = ctx_meta.get("allowed_reader_ids")
+        if allowed_readers:
+            metadata["allowed_reader_ids"] = [str(r) for r in allowed_readers]
+        producer_agent_id = ctx_meta.get(
+            "producer_agent_id") or ctx_meta.get("selected_agent")
+        if producer_agent_id:
+            metadata["producer_agent_id"] = producer_agent_id
+        metadata["data_source"] = (
+            producer_agent_id or ctx_meta.get("node_name") or "executor"
+        )
     schema_valid: Optional[bool] = None
 
     if resolved_schema and registry.has(resolved_schema):
@@ -136,11 +199,17 @@ def to_artifact(
                 "must not consume it as typed data"
             )
 
-    sensitivity = Sensitivity.INTERNAL
-    if context is not None:
-        meta = getattr(context, "metadata", None) or {}
-        if str(meta.get("risk_profile", "")).upper() in {"HIGH", "CRITICAL"}:
-            sensitivity = Sensitivity.CONFIDENTIAL
+    # Sensitivity = max(task-risk-derived, most sensitive upstream datum).
+    if risk_level in {"HIGH", "CRITICAL"}:
+        sensitivity_order = _SENSITIVITY_ORDER[Sensitivity.CONFIDENTIAL.value]
+    else:
+        sensitivity_order = _SENSITIVITY_ORDER[Sensitivity.INTERNAL.value]
+    for upstream in upstream_sensitivities or []:
+        value = _coerce_sensitivity_value(upstream)
+        if value is not None:
+            sensitivity_order = max(
+                sensitivity_order, _SENSITIVITY_ORDER[value])
+    sensitivity = _ORDER_TO_SENSITIVITY[sensitivity_order]
 
     return Artifact(
         logical_name=name,

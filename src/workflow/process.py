@@ -109,6 +109,58 @@ async def _execute_node_with_runtime_events(
             command_task.cancel()
 
 
+def has_task_graph_state(state: dict) -> bool:
+    return bool(state.get("task_graph"))
+
+
+def load_production_task_graph(state: dict, execution_phase: str) -> tuple[bool, str]:
+    """For a production execution request, load + verify the PlanSnapshot and
+    inject its TaskGraph into ``state``.
+
+    Returns ``(injected, reason)``. Fails closed: on a missing or inconsistent
+    snapshot (workflow/user/plan_hash/version mismatch) nothing is injected, so
+    the downstream scheduler gate refuses execution and requires a re-plan.
+    """
+    if state.get("workflow_mode") != "production" or execution_phase != "execution":
+        return False, "not_production_exec"
+
+    # A graph restored from a checkpoint or supplied by a caller is not an
+    # approval artifact. Production execution must always replace it with the
+    # graph loaded from, and re-derived against, the persisted PlanSnapshot.
+    # Remove it before every fail-closed branch so the scheduler cannot consume
+    # an unverified graph when the snapshot is absent or invalid.
+    state.pop("task_graph", None)
+    from src.orchestration.plan_snapshot import (
+        load_plan_snapshot,
+        verify_snapshot_for_execution,
+    )
+
+    workflow_id = state.get("workflow_id")
+    snapshot = load_plan_snapshot(workflow_id)
+    if not snapshot:
+        return False, "no_snapshot"
+    current_steps = _normalize_planning_steps(
+        cache.get_planning_steps(workflow_id))
+    # Authoritative gate: re-derive the TaskGraph from the CURRENT planning
+    # steps and deep-compare against the approved snapshot (plus version +
+    # content-hash integrity). Only inject the approved graph on an exact match;
+    # any drift fails closed so the scheduler gate requires a re-plan.
+    task_graph, reason = verify_snapshot_for_execution(
+        snapshot,
+        workflow_id=workflow_id,
+        user_id=state.get("user_id"),
+        planning_steps=current_steps,
+        goal=state.get("original_user_query", "")
+        or state.get("USER_QUERY", ""),
+    )
+    if task_graph is None:
+        logger.warning("plan snapshot rejected for %s: %s",
+                       workflow_id, reason)
+        return False, reason
+    state["task_graph"] = task_graph
+    return True, "loaded"
+
+
 async def _prepare_execution_graph(workflow_id: str, user_id: str, resume_step: int = None) -> None:
     """Prepare execution graph and queue for production mode.
 
@@ -130,8 +182,10 @@ async def _prepare_execution_graph(workflow_id: str, user_id: str, resume_step: 
         raise RuntimeError("no planning steps found for execution")
 
     await agent_manager.ensure_initialized()
-    nodes = workflow.get("nodes") if isinstance(workflow.get("nodes"), dict) else {}
-    graph = workflow.get("graph") if isinstance(workflow.get("graph"), list) else []
+    nodes = workflow.get("nodes") if isinstance(
+        workflow.get("nodes"), dict) else {}
+    graph = workflow.get("graph") if isinstance(
+        workflow.get("graph"), list) else []
     system_graph = [
         node
         for node in graph
@@ -196,11 +250,13 @@ async def _prepare_execution_graph(workflow_id: str, user_id: str, resume_step: 
         )
 
     if missing:
-        raise RuntimeError(f"missing agents for execution: {', '.join(missing)}")
+        raise RuntimeError(
+            f"missing agents for execution: {', '.join(missing)}")
 
     for i, node in enumerate(exec_graph):
         if i + 1 < len(exec_graph):
-            node["config"]["next_to"] = [exec_graph[i + 1]["config"]["node_name"]]
+            node["config"]["next_to"] = [
+                exec_graph[i + 1]["config"]["node_name"]]
         else:
             node["config"]["next_to"] = []
 
@@ -247,24 +303,30 @@ async def _prepare_execution_graph(workflow_id: str, user_id: str, resume_step: 
         # Count agent_proxy steps that completed before resume_step:
         # - Agent_proxy steps are: 3, 5, 7, ... (odd steps >= 3)
         # - Count odd numbers in range [3, resume_step)
-        agent_proxy_steps_completed = sum(1 for s in range(3, resume_step) if s % 2 == 1)
-        
+        agent_proxy_steps_completed = sum(
+            1 for s in range(3, resume_step) if s % 2 == 1)
+
         # Log initial queue state
         initial_queue = list(cache.queue[workflow_id])
-        logger.info(f"Queue BEFORE fast-forward (resume_step={resume_step}): {[n['name'] for n in initial_queue]}")
-        logger.info(f"Agent_proxy steps completed: {agent_proxy_steps_completed}")
-        
+        logger.info(
+            f"Queue BEFORE fast-forward (resume_step={resume_step}): {[n['name'] for n in initial_queue]}")
+        logger.info(
+            f"Agent_proxy steps completed: {agent_proxy_steps_completed}")
+
         # Pop that many elements from queue
         for i in range(agent_proxy_steps_completed):
             if cache.queue[workflow_id]:
                 popped = cache.queue[workflow_id].popleft()
-                logger.info(f"Fast-forward pop {i+1}: removed '{popped.get('name')}' from queue")
+                logger.info(
+                    f"Fast-forward pop {i+1}: removed '{popped.get('name')}' from queue")
             else:
-                logger.warning(f"Queue empty at iteration {i+1}, stopping fast-forward")
+                logger.warning(
+                    f"Queue empty at iteration {i+1}, stopping fast-forward")
                 break
-        
+
         final_queue = list(cache.queue[workflow_id])
-        logger.info(f"Queue AFTER fast-forward: {[n['name'] for n in final_queue]}")
+        logger.info(
+            f"Queue AFTER fast-forward: {[n['name'] for n in final_queue]}")
 
 if USE_BROWSER and not DISABLE_DEFAULT_AGENTS:
     DEFAULT_TEAM_MEMBERS_DESCRIPTION = """
@@ -464,7 +526,8 @@ async def run_agent_workflow(
     )
 
     if instruction_history is not None:
-        cache.set_instruction_history(workflow_id, instruction_history, user_id=user_id)
+        cache.set_instruction_history(
+            workflow_id, instruction_history, user_id=user_id)
     elif instruction:
         cache.append_instruction(workflow_id, instruction, user_id=user_id)
 
@@ -472,7 +535,8 @@ async def run_agent_workflow(
         try:
             await _prepare_execution_graph(workflow_id, user_id, resume_step=resume_step)
         except RuntimeError as exc:
-            logger.warning("S-ABAC workflow preparation blocked execution: %s", exc)
+            logger.warning(
+                "S-ABAC workflow preparation blocked execution: %s", exc)
             yield {
                 "event": "workflow_error",
                 "data": {
@@ -502,7 +566,8 @@ async def run_agent_workflow(
         coor_agents=coor_agents,
     )
     registered_agents = await agent_manager.agent_registry.list()
-    instruction_history_for_route = cache.get_instruction_history(workflow_id) or []
+    instruction_history_for_route = cache.get_instruction_history(workflow_id) or [
+    ]
     routing_query = "\n".join(
         str(item) for item in instruction_history_for_route if str(item).strip()
     ) or original_user_query or user_input_messages[-1]["content"]
@@ -553,7 +618,8 @@ async def run_agent_workflow(
 
     # 判断执行阶段（调用TaskLogger的静态方法）
     instruction_history_list = cache.get_instruction_history(workflow_id) or []
-    execution_phase = TaskLogger.determine_execution_phase(workmode, instruction_history_list)
+    execution_phase = TaskLogger.determine_execution_phase(
+        workmode, instruction_history_list)
     logger.info(f"Execution phase determined: {execution_phase}")
 
     async for event_data in _process_workflow(
@@ -607,14 +673,14 @@ async def run_agent_workflow(
 
 
 async def _process_workflow(
-    workflow: CompiledWorkflow, 
-    initial_state: dict[str, Any], 
-    resume_step: int = None, 
+    workflow: CompiledWorkflow,
+    initial_state: dict[str, Any],
+    resume_step: int = None,
     task_id: str = None,
     execution_phase: str = "initial_planning"  # 新增：执行阶段参数
 ) -> AsyncGenerator[dict[str, Any], None]:
     """处理自定义工作流的事件流
-    
+
     Args:
         resume_step: The step to START executing (not the checkpoint step).
                      So resume_step=5 means: load checkpoint from step 4, then execute step 5.
@@ -665,14 +731,15 @@ async def _process_workflow(
                 target_state[key] = source_state.get(key)
 
     # Initialize TaskLogger for this execution
-    user_query = initial_state.get("original_user_query") or initial_state.get("USER_QUERY", "")
+    user_query = initial_state.get(
+        "original_user_query") or initial_state.get("USER_QUERY", "")
     if not task_id:
         task_id = CheckpointManager.generate_task_id(workflow_id)
-    
+
     # Resume logic: Check if we are in a mode that supports resuming or resume_step is specified
     # resume_step indicates the step to START executing, so we need checkpoint from (resume_step - 1)
     should_resume = resume_step is not None and resume_step >= 1
-    
+
     if should_resume:
         # Load existing TaskLogger and truncate history
         from src.robust.task_logger import TaskLogger as TL
@@ -688,12 +755,15 @@ async def _process_workflow(
             existing_logger._step_counter = {"__global__": resume_step - 1}
             task_logger = existing_logger
             user_query = existing_logger.user_query
-            logger.info(f"Resumed TaskLogger for task {task_id}, truncated to step {resume_step - 1}")
+            logger.info(
+                f"Resumed TaskLogger for task {task_id}, truncated to step {resume_step - 1}")
         else:
-            task_logger = TaskLogger(task_id=task_id, workflow_id=workflow_id, user_query=user_query)
+            task_logger = TaskLogger(
+                task_id=task_id, workflow_id=workflow_id, user_query=user_query)
             task_logger.set_execution_phase(execution_phase)  # 设置执行阶段
     else:
-        task_logger = TaskLogger(task_id=task_id, workflow_id=workflow_id, user_query=user_query)
+        task_logger = TaskLogger(
+            task_id=task_id, workflow_id=workflow_id, user_query=user_query)
         task_logger.set_execution_phase(execution_phase)  # 设置执行阶段
 
     # Initialize hook system (controlled by AUTO_RECOVERY_ENABLED)
@@ -701,7 +771,7 @@ async def _process_workflow(
     if AUTO_RECOVERY_ENABLED:
         initialize_hook_system()
         hook_engine = HookEngine()
-    
+
     # Prepare LLM client for handlers
     llm_client = get_llm_by_type("reasoning")
 
@@ -737,12 +807,14 @@ async def _process_workflow(
                     step=0,
                 )
                 if checkpoint_zero and isinstance(checkpoint_zero.state, dict):
-                    _restore_scenario_state_from_source(state, checkpoint_zero.state)
+                    _restore_scenario_state_from_source(
+                        state, checkpoint_zero.state)
             except Exception:
                 pass
 
         if not state.get("task_profile"):
-            original_user_query = state.get("original_user_query") or state.get("USER_QUERY", "")
+            original_user_query = state.get(
+                "original_user_query") or state.get("USER_QUERY", "")
             if original_user_query:
                 state["USER_QUERY"] = original_user_query
             task_profile = await analyze_task_context(
@@ -755,24 +827,32 @@ async def _process_workflow(
             state["task_profile"] = task_profile
             state["task_profile_reason"] = task_profile.get("reason", "")
             state["scenario_tags"] = task_profile.get("scenario_tags", [])
-            state["expected_capabilities"] = task_profile.get("expected_capabilities", [])
+            state["expected_capabilities"] = task_profile.get(
+                "expected_capabilities", [])
             state["task_type"] = task_profile.get("task_type", "GENERAL")
-            state["business_goal"] = task_profile.get("business_goal", original_user_query)
+            state["business_goal"] = task_profile.get(
+                "business_goal", original_user_query)
             state["data_scope"] = task_profile.get("data_scope", "targeted")
-            state["operation_mode"] = task_profile.get("operation_mode", "read")
+            state["operation_mode"] = task_profile.get(
+                "operation_mode", "read")
             state["risk_profile"] = task_profile.get("risk_profile", "LOW")
             state["scenario_fit_cache"] = {}
-            state["TASK_PROFILE_TEXT"] = json.dumps(task_profile, ensure_ascii=False, indent=2)
-            state["SCENARIO_TAGS_TEXT"] = ", ".join(task_profile.get("scenario_tags", []))
-            state["EXPECTED_CAPABILITIES_TEXT"] = ", ".join(task_profile.get("expected_capabilities", []))
+            state["TASK_PROFILE_TEXT"] = json.dumps(
+                task_profile, ensure_ascii=False, indent=2)
+            state["SCENARIO_TAGS_TEXT"] = ", ".join(
+                task_profile.get("scenario_tags", []))
+            state["EXPECTED_CAPABILITIES_TEXT"] = ", ".join(
+                task_profile.get("expected_capabilities", []))
 
         if should_resume:
             try:
                 # Load checkpoint from (resume_step - 1)
                 checkpoint_step = resume_step - 1
-                checkpoint = checkpoint_manager.load_checkpoint(workflow_id=workflow_id, task_id=task_id, step=checkpoint_step)
+                checkpoint = checkpoint_manager.load_checkpoint(
+                    workflow_id=workflow_id, task_id=task_id, step=checkpoint_step)
                 if checkpoint:
-                    logger.info(f"Resuming workflow {workflow_id} (task {task_id}) from checkpoint step {checkpoint.step}, will execute step {resume_step}")
+                    logger.info(
+                        f"Resuming workflow {workflow_id} (task {task_id}) from checkpoint step {checkpoint.step}, will execute step {resume_step}")
                     if checkpoint.next_node:
                         current_node = checkpoint.next_node
                         state = State(**checkpoint.state)
@@ -783,11 +863,14 @@ async def _process_workflow(
                         step_count = resume_step
                         # Clean up stale checkpoints from previous failed runs
                         # Delete checkpoints with step >= resume_step (they may be from earlier failed attempts)
-                        checkpoint_manager.clean_checkpoints_from_step(task_id=task_id, from_step=resume_step)
+                        checkpoint_manager.clean_checkpoints_from_step(
+                            task_id=task_id, from_step=resume_step)
                     else:
-                        logger.warning("Checkpoint missing next_node, starting from scratch")
+                        logger.warning(
+                            "Checkpoint missing next_node, starting from scratch")
             except Exception as e:
-                logger.warning(f"Could not load checkpoint for resume, starting from scratch: {e}")
+                logger.warning(
+                    f"Could not load checkpoint for resume, starting from scratch: {e}")
 
         # Only log workflow_start for new executions, not for resume
         if not should_resume:
@@ -797,9 +880,15 @@ async def _process_workflow(
         # task graph, drive the TaskGraph scheduler instead of the legacy
         # publisher/while loop. Gated OFF by default -> B1 behavior is unchanged.
         if orchestration_scheduler_enabled:
-            from src.orchestration.runtime import has_task_graph, run_scheduler_workflow
+            from src.orchestration.runtime import run_scheduler_workflow, scheduler_ready
+            from src.interface.task_graph import WorkflowStatus
 
-            if has_task_graph(state):
+            # Production execution: load + verify the approved PlanSnapshot and
+            # inject its TaskGraph so the real Web/API path drives the scheduler.
+            load_production_task_graph(state, execution_phase)
+
+            ready, category, detail = scheduler_ready(state)
+            if ready:
                 async for scheduler_event in run_scheduler_workflow(
                     state,
                     task_id=task_id,
@@ -808,6 +897,42 @@ async def _process_workflow(
                     hook_engine=hook_engine,
                 ):
                     yield scheduler_event
+                return
+
+            # Three-way gate:
+            #  - planning phase without a graph  -> enter the Planner (legacy).
+            #  - invalid / unknown graph (any phase), OR a missing graph in the
+            #    production execution phase       -> FAIL CLOSED (never fall back
+            #    to the legacy executor, so an unclassified side effect / illegal
+            #    graph / missing production graph never runs an Agent).
+            is_production_exec = (
+                state.get("workflow_mode") == "production"
+                and execution_phase == "execution"
+            )
+            if category == "no_graph" and not is_production_exec:
+                logger.info(
+                    "scheduler gate: planning phase, entering planner (%s)", detail
+                )
+            else:
+                logger.warning(
+                    "scheduler gate: fail-closed (category=%s): %s", category, detail
+                )
+                task_logger.log_error(
+                    error=f"scheduler gate fail-closed: {category}: {detail}",
+                    node_name="scheduler_gate",
+                    step=step_count,
+                )
+                yield {
+                    "event": "end_of_workflow",
+                    "data": {
+                        "workflow_id": workflow_id,
+                        "task_id": task_id,
+                        "mode": "scheduler",
+                        "status": WorkflowStatus.FAILED.value,
+                        "error": f"{category}: {detail}",
+                        "reason": "scheduler_gate_fail_closed",
+                    },
+                }
                 return
 
         while current_node != "__end__":
@@ -819,8 +944,10 @@ async def _process_workflow(
 
             # For agent_proxy, get the actual sub-agent name from state["next"]
             # Note: state["next"] is set by publisher in the previous iteration
-            sub_agent_name = state.get("next") if agent_name == "agent_proxy" else None
-            task_logger.log_agent_start(node_name=original_node_name, step=step_count, sub_agent_name=sub_agent_name)
+            sub_agent_name = state.get(
+                "next") if agent_name == "agent_proxy" else None
+            task_logger.log_agent_start(
+                node_name=original_node_name, step=step_count, sub_agent_name=sub_agent_name)
 
             # === Hook: NODE_START ===
             if hook_engine:
@@ -863,7 +990,8 @@ async def _process_workflow(
                     yield runtime_result
 
             if command is None:
-                raise RuntimeError(f"Node '{agent_name}' did not return a command")
+                raise RuntimeError(
+                    f"Node '{agent_name}' did not return a command")
 
             if hasattr(command, "update") and command.update:
                 for key, value in command.update.items():
@@ -888,14 +1016,16 @@ async def _process_workflow(
                                 content = last_message["content"]
                                 if not isinstance(content, str):
                                     try:
-                                        content = json.dumps(content, ensure_ascii=False)
+                                        content = json.dumps(
+                                            content, ensure_ascii=False)
                                     except Exception:
                                         content = str(content)
                                 # Log agent message to task log
-                                task_logger.log_message(node_name=original_node_name, content=content, step=step_count)
+                                task_logger.log_message(
+                                    node_name=original_node_name, content=content, step=step_count)
                                 chunk_size = 10  # send 10 words for each chunk
                                 for i in range(0, len(content), chunk_size):
-                                    chunk = content[i : i + chunk_size]
+                                    chunk = content[i: i + chunk_size]
                                     # Use sub_agent_name for display if available
                                     msg_display_name = f"{original_node_name}【{state.get('processing_agent_name')}】" if original_node_name == "agent_proxy" and "processing_agent_name" in state else original_node_name
 
@@ -913,8 +1043,10 @@ async def _process_workflow(
 
             # For agent_proxy, get the actual sub-agent name from state["processing_agent_name"]
             # Use original_node_name to ensure correct identification
-            sub_agent_name = state.get("processing_agent_name") if original_node_name == "agent_proxy" else None
-            task_logger.log_agent_end(node_name=original_node_name, next_node=next_node, step=step_count, sub_agent_name=sub_agent_name)
+            sub_agent_name = state.get(
+                "processing_agent_name") if original_node_name == "agent_proxy" else None
+            task_logger.log_agent_end(
+                node_name=original_node_name, next_node=next_node, step=step_count, sub_agent_name=sub_agent_name)
 
             # Save checkpoint after node execution and state update
             try:
@@ -928,7 +1060,8 @@ async def _process_workflow(
                 )
                 step_count += 1
             except Exception as e:
-                logger.error(f"Failed to save checkpoint at step {step_count}: {e}")
+                logger.error(
+                    f"Failed to save checkpoint at step {step_count}: {e}")
 
             # === Hook: NODE_END ===
             if hook_engine:
@@ -950,7 +1083,8 @@ async def _process_workflow(
                 # Handle recovery from hook result
                 if hook_result.resume_step is not None and hook_result.modified_state:
                     # Recovery triggered, resume workflow
-                    logger.info(f"Hook triggered recovery, resuming from step {hook_result.resume_step}")
+                    logger.info(
+                        f"Hook triggered recovery, resuming from step {hook_result.resume_step}")
                     async for event_data in _process_workflow(
                         workflow,
                         hook_result.modified_state,
@@ -991,12 +1125,13 @@ async def _process_workflow(
             # Inject dependencies for handlers
             hook_ctx.state["__llm_client__"] = llm_client
             hook_ctx.state["__checkpoint_manager__"] = checkpoint_manager
-            
+
             hook_result = await hook_engine.process(hook_ctx)
-            
+
             # Handle recovery from workflow_end hook
             if hook_result.resume_step is not None and hook_result.modified_state:
-                logger.info(f"Workflow end hook triggered recovery, resuming from step {hook_result.resume_step}")
+                logger.info(
+                    f"Workflow end hook triggered recovery, resuming from step {hook_result.resume_step}")
                 async for event_data in _process_workflow(
                     workflow,
                     hook_result.modified_state,
@@ -1049,7 +1184,8 @@ async def _process_workflow(
 
         traceback.print_exc()
         logger.error("Error in Agent workflow: %s", str(e))
-        task_logger.log_error(error=str(e), node_name=current_node or "system", step=step_count)
+        task_logger.log_error(
+            error=str(e), node_name=current_node or "system", step=step_count)
 
         # === Hook: ERROR ===
         if hook_engine:
@@ -1069,12 +1205,13 @@ async def _process_workflow(
             # Inject dependencies for handlers
             hook_ctx.state["__llm_client__"] = llm_client
             hook_ctx.state["__checkpoint_manager__"] = checkpoint_manager
-            
+
             hook_result = await hook_engine.process(hook_ctx)
-            
+
             # Handle recovery from error hook
             if hook_result.resume_step is not None and hook_result.modified_state:
-                logger.info(f"Error hook triggered recovery, resuming from step {hook_result.resume_step}")
+                logger.info(
+                    f"Error hook triggered recovery, resuming from step {hook_result.resume_step}")
                 async for event_data in _process_workflow(
                     workflow,
                     hook_result.modified_state,
@@ -1083,7 +1220,7 @@ async def _process_workflow(
                 ):
                     yield event_data
                 return
-        
+
         yield {
             "event": "error",
             "data": {

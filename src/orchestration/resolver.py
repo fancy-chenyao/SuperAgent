@@ -21,6 +21,16 @@ class ArtifactAccessDenied(PermissionError):
     """Raised when the guard denies read access to an artifact."""
 
 
+class ArtifactSchemaInvalid(ValueError):
+    """Raised when an artifact is flagged ``schema_valid=False`` (untyped write/send
+    output or a failed schema validation): it must not be consumed downstream."""
+
+
+class ArtifactSchemaIncompatible(ValueError):
+    """Raised when a ref's ``expected_schema_ref`` does not match the artifact's
+    actual ``schema_ref``."""
+
+
 @runtime_checkable
 class ArtifactAccessGuard(Protocol):
     """Access-control seam for reading artifacts.
@@ -101,20 +111,52 @@ class ArtifactResolver:
         *,
         scenario: Optional[Any] = None,
         action: str = "read",
+        consumer_agent: Optional[str] = None,
     ) -> Any:
-        """Return the value referenced by ``ref`` (after selector + access check).
+        """Return the value referenced by ``ref`` (after access + schema checks).
 
-        Raises :class:`ArtifactAccessDenied` if the guard refuses, or
+        Raises :class:`ArtifactAccessDenied` if the guard refuses,
+        :class:`ArtifactSchemaInvalid` if the artifact is flagged invalid,
+        :class:`ArtifactSchemaIncompatible` on an expected-schema mismatch, or
         ``KeyError``/``IndexError`` if the selector path is invalid.
+
+        ``consumer_agent`` (the agent that will consume the value) is surfaced to
+        the guard via the scenario so a downstream consumer can be authorized.
         """
-        artifact = self.store.get(ref)  # raises ArtifactNotFoundError if missing
+        artifact = self.store.get(
+            ref)  # raises ArtifactNotFoundError if missing
+
+        # Pass the consumer agent to the guard without changing its signature:
+        # merge it into the scenario mapping (guards accept ``scenario``).
+        guard_scenario = scenario
+        if consumer_agent is not None:
+            base = dict(scenario) if isinstance(scenario, dict) else {}
+            base["consumer_agent_id"] = consumer_agent
+            guard_scenario = base
+
         allowed = self.guard.can_read(
-            subject=subject, artifact=artifact, scenario=scenario, action=action
+            subject=subject, artifact=artifact, scenario=guard_scenario, action=action
         )
         if not allowed:
             raise ArtifactAccessDenied(
                 f"subject {subject!r} denied read on artifact "
                 f"{artifact.artifact_id!r} ({artifact.logical_name})"
+            )
+
+        # An artifact explicitly flagged invalid (untyped write/send output or a
+        # failed schema validation) must never be consumed as typed data.
+        if artifact.schema_valid is False:
+            raise ArtifactSchemaInvalid(
+                f"artifact {artifact.artifact_id!r} ({artifact.logical_name}) is "
+                f"flagged schema_valid=False and cannot be consumed downstream"
+            )
+
+        # A ref declaring an expected schema must match the artifact's schema.
+        expected = getattr(ref, "expected_schema_ref", None)
+        if expected and artifact.schema_ref and expected != artifact.schema_ref:
+            raise ArtifactSchemaIncompatible(
+                f"expected schema {expected!r} but artifact "
+                f"{artifact.artifact_id!r} has schema {artifact.schema_ref!r}"
             )
 
         if artifact.payload is None and artifact.uri is not None:

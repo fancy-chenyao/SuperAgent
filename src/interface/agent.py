@@ -193,6 +193,9 @@ class State(MessagesState):
     # Execution-engine (Plan §7): captured artifacts and per-step results.
     artifacts: dict
     step_results: dict
+    # Execution-engine (Plan §8): explicit TaskGraph + DAG resume bookkeeping.
+    task_graph: dict
+    completed_steps: list[str]
 
 
 class RemoveAgentRequest(BaseModel):

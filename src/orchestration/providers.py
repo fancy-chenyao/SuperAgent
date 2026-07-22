@@ -21,9 +21,17 @@ from src.interface.task_graph import TaskStep
 
 @dataclass
 class RoutingResult:
-    """Minimal routing outcome consumed by the scheduler."""
+    """Minimal routing outcome consumed by the scheduler.
+
+    ``decision`` mirrors the main agent's verdict (``DISPATCH`` / ``REJECT`` /
+    ``CLARIFY`` / ``NO_CAPABLE_AGENT``). The scheduler MUST honor it: only
+    ``DISPATCH`` with a concrete ``selected_agent`` may execute; a rejection or
+    clarification must never silently fall back to ``preferred_resource_id``.
+    """
 
     selected_agent: Optional[str]
+    decision: str = "DISPATCH"
+    clarification: Optional[str] = None
     confidence: float = 1.0
     reason_codes: List[str] = field(default_factory=list)
     raw: Any = None  # the underlying RoutingDecision when produced by the real provider
@@ -75,6 +83,7 @@ class StubRoutingProvider:
     ) -> RoutingResult:
         return RoutingResult(
             selected_agent=step.preferred_resource_id,
+            decision="DISPATCH",
             confidence=1.0,
             reason_codes=["stub:preferred_resource_id"],
         )
@@ -107,7 +116,7 @@ class MainAgentRoutingProvider:
         if step.preferred_resource_id:
             meta.setdefault("preferred_resource_id", step.preferred_resource_id)
 
-        _profile, _cards, decision = await make_routing_decision(
+        profile, _cards, decision = await make_routing_decision(
             user_query=user_query,
             task_id=task_id,
             workflow_id=workflow_id,
@@ -115,9 +124,20 @@ class MainAgentRoutingProvider:
             authorized_agent_ids=authorized_agent_ids,
             metadata=meta,
         )
-        selected = getattr(decision, "selected_agent", None) or step.preferred_resource_id
+        # Honor the main agent's verdict. Only DISPATCH may execute; on
+        # REJECT/CLARIFY/NO_CAPABLE_AGENT we return no agent so the scheduler
+        # cannot fall back to ``preferred_resource_id`` and bypass the decision.
+        decision_kind = str(getattr(decision, "decision", "DISPATCH") or "DISPATCH").upper()
+        selected = getattr(decision, "selected_agent", None)
+        clarification: Optional[str] = None
+        if decision_kind != "DISPATCH":
+            selected = None
+            questions = list(getattr(profile, "clarification_questions", []) or [])
+            clarification = "; ".join(questions) if questions else None
         return RoutingResult(
             selected_agent=selected,
+            decision=decision_kind,
+            clarification=clarification,
             confidence=float(getattr(decision, "confidence", 0.0) or 0.0),
             reason_codes=list(getattr(decision, "reason_codes", []) or []),
             raw=decision,
