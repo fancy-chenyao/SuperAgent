@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>CoorAgent Web Studio</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260720-decision-collapse-6" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260722-chat-1" />
     <script src="/static/mermaid.min.js"></script>
   </head>
   <body>
@@ -40,7 +40,8 @@
 
       <main class="layout">
         <aside class="sidebar">
-          <button class="tab active" data-tab="run">Run</button>
+          <button class="tab active" data-tab="run">Workflow</button>
+          <button class="tab" data-tab="chat">Chat</button>
           <button class="tab" data-tab="agents">Agents</button>
           <button class="tab" data-tab="tools">Tools</button>
           <button class="tab" data-tab="workflows">Workflows</button>
@@ -51,7 +52,7 @@
         <section class="content">
           <section class="panel active" id="panel-run">
             <div class="panel-header">
-              <h2>Run Workflow</h2>
+              <h2>Workflow</h2>
               <p>发起任务并实时查看输出。</p>
             </div>
             <div class="panel-body run-single-column">
@@ -94,14 +95,50 @@
                   <label for="workflowId">Workflow ID (optional)</label>
                   <input id="workflowId" type="text" placeholder="user:polish_id" />
                 </div>
-                <div class="form-row">
-                  <label for="message">Message</label>
-                  <textarea id="message" rows="6" placeholder="输入任务描述..."></textarea>
+                <div class="chat-workspace" aria-label="Task conversation">
+                  <div id="chatConversation" class="chat-conversation" aria-live="polite"></div>
+                  <div class="chat-composer">
+                    <label class="sr-only" for="message">Message</label>
+                    <button
+                      id="newConversationBtn"
+                      class="chat-new"
+                      type="button"
+                      title="New conversation"
+                      aria-label="Start a new conversation"
+                    ><span aria-hidden="true">+</span></button>
+                    <textarea id="message" rows="2" placeholder="输入消息..."></textarea>
+                    <button
+                      id="stopBtn"
+                      class="chat-submit chat-stop"
+                      type="button"
+                      title="Stop"
+                      aria-label="Stop task"
+                      disabled
+                    ><span aria-hidden="true">&#9632;</span></button>
+                    <button
+                      id="runBtn"
+                      class="chat-submit chat-send"
+                      type="button"
+                      title="Send"
+                      aria-label="Send message"
+                    ><span aria-hidden="true">&#8593;</span></button>
+                  </div>
                 </div>
-                <div class="form-actions">
-                  <button id="runBtn" class="primary">Run</button>
-                  <button id="stopBtn" class="ghost" disabled>Stop</button>
+              </div>
+
+              <div class="conversation-history-card" aria-labelledby="conversationHistoryTitle">
+                <div class="conversation-history-header">
+                  <div>
+                    <h3 id="conversationHistoryTitle">最近对话</h3>
+                    <div id="conversationHistoryMeta" class="conversation-history-meta"></div>
+                  </div>
+                  <button id="clearChatHistory" class="ghost" type="button">清空</button>
                 </div>
+                <div
+                  id="conversationHistoryList"
+                  class="conversation-history-list"
+                  aria-live="polite"
+                ></div>
               </div>
 
               <div class="summary-card" id="permissionSummaryCard" style="display:none">
@@ -192,6 +229,25 @@
                   <div id="planSummary" class="plan-summary"></div>
                   <div id="planHint" class="summary-hint hidden">No plan available.</div>
                 </div>
+              </div>
+            </div>
+          </section>
+
+          <section class="panel" id="panel-chat">
+            <div class="panel-header chat-panel-header">
+              <h2>Chat</h2>
+            </div>
+            <div class="panel-body chat-page">
+              <div id="chatConfigSlot" class="chat-config-slot"></div>
+              <div class="chat-page-layout">
+                <aside class="chat-history-pane" aria-labelledby="chatHistoryPaneTitle">
+                  <div class="chat-pane-title" id="chatHistoryPaneTitle">最近对话</div>
+                  <div id="chatHistorySlot" class="chat-history-slot"></div>
+                </aside>
+                <section class="chat-current-pane" aria-labelledby="chatCurrentPaneTitle">
+                  <div class="chat-pane-title" id="chatCurrentPaneTitle">当前对话</div>
+                  <div id="chatWorkspaceSlot" class="chat-workspace-slot"></div>
+                </section>
               </div>
             </div>
           </section>
@@ -466,7 +522,7 @@
       </main>
     </div>
 
-    <script src="/static/app.js?v=20260720-decision-collapse-6"></script>
+    <script src="/static/app.js?v=20260722-chat-1"></script>
     <script src="/static/security.js"></script>
   </body>
 </html>
