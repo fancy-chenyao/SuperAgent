@@ -1166,7 +1166,13 @@ async def tool(req: ToolRequest, authorization: Optional[str] = Header(default=N
                         matched_records.append(salary_record)
 
                 logger.info(f"Batch salary query: found {len(matched_records)} records out of {len(employee_id_list)} requested")
-                result = matched_records
+                # 工具调用契约要求 result 始终为对象。批量查询结果放入
+                # salary_records，RemoteHRAssistantAgent 会从该字段读取并合并。
+                result = {
+                    "status": "success",
+                    "matched_count": len(matched_records),
+                    "salary_records": matched_records,
+                }
             else:
                 # 单个查询（原有逻辑）
                 matched_record = None
