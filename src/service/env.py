@@ -103,6 +103,16 @@ MAX_STEPS = _parse_int("MAX_STEPS", 25)
 AUTO_RECOVERY_ENABLED = _parse_bool("AUTO_RECOVERY_ENABLED", False)
 S_ABAC_ENABLED = _parse_bool("S_ABAC_ENABLED", False)
 
+# Execution-engine feature flags. Default OFF so the legacy publisher/while
+# behavior (B1) is preserved; toggle via .env to enable the new data plane.
+# ARTIFACT_CAPTURE_ENABLED        -> Phase 2: capture each executed step's
+#                                    output as a typed Artifact.
+# ORCHESTRATION_SCHEDULER_ENABLED -> Phase 3: drive the workflow through the
+#                                    TaskGraph scheduler when the state carries
+#                                    an explicit task graph (else legacy loop).
+ARTIFACT_CAPTURE_ENABLED = _parse_bool("ARTIFACT_CAPTURE_ENABLED", False)
+ORCHESTRATION_SCHEDULER_ENABLED = _parse_bool("ORCHESTRATION_SCHEDULER_ENABLED", False)
+
 # 意图识别：默认混合模式；Basic LLM 未配置或调用异常时由识别层自动降级为 rule。
 INTENT_RECOGNITION_MODE = _parse_choice(
     "INTENT_RECOGNITION_MODE", "hybrid", {"rule", "hybrid", "semantic"}
