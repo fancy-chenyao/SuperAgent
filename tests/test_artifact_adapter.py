@@ -33,8 +33,10 @@ def test_typed_result_validates_against_schema():
 
 def test_schema_mismatch_flags_invalid_with_errors():
     reg = SchemaRegistry()
-    reg.register("person@v1", {"required": ["name"], "properties": {"name": {"type": "string"}}})
-    art = to_artifact(_ok({"id": 1}), schema_ref="person@v1", schema_registry=reg)
+    reg.register(
+        "person@v1", {"required": ["name"], "properties": {"name": {"type": "string"}}})
+    art = to_artifact(
+        _ok({"id": 1}), schema_ref="person@v1", schema_registry=reg)
     assert art.schema_valid is False
     assert art.metadata.get("schema_errors")
 
@@ -74,6 +76,66 @@ def test_lineage_carried_from_step_required_inputs():
 
 
 def test_none_result_still_valid_artifact():
-    art = to_artifact(ExecuteResult(status=ExecutionStatus.SUCCESS, result=None))
+    art = to_artifact(ExecuteResult(
+        status=ExecutionStatus.SUCCESS, result=None))
     # payload must never be None (Artifact model requires payload or uri)
     assert art.payload is not None
+
+
+# --------------------------------------------------------------------------- #
+# C3: producer/owner provenance + upstream-aware sensitivity
+# --------------------------------------------------------------------------- #
+def test_producer_owner_and_provenance_metadata():
+    ctx = ExecutionContext(
+        user_id="alice",
+        metadata={
+            "operation_mode": "read",
+            "producer_agent_id": "RemoteHRAssistantAgent",
+            "risk_profile": "LOW",
+            "scenario_tags": ["hr_service"],
+            "expected_capabilities": ["HR"],
+        },
+    )
+    art = to_artifact(_ok({"name": "王强"}), context=ctx)
+    assert art.metadata["owner_user_id"] == "alice"
+    assert art.metadata["producer_subject"] == "alice"
+    assert art.metadata["producer_agent_id"] == "RemoteHRAssistantAgent"
+    assert art.metadata["data_source"] == "RemoteHRAssistantAgent"
+    assert art.metadata["risk_level"] == "LOW"
+    assert art.metadata["scenario_tags"] == ["hr_service"]
+
+
+def test_sensitivity_raised_by_high_risk():
+    ctx = ExecutionContext(user_id="u", metadata={"risk_profile": "HIGH"})
+    art = to_artifact(_ok({"x": 1}), context=ctx)
+    assert art.sensitivity == "confidential"
+
+
+def test_sensitivity_raised_by_upstream_lineage():
+    """A low-risk step consuming CONFIDENTIAL upstream data stays CONFIDENTIAL."""
+    ctx = ExecutionContext(user_id="u", metadata={"risk_profile": "LOW"})
+    art = to_artifact(
+        _ok({"x": 1}), context=ctx, upstream_sensitivities=["confidential"]
+    )
+    assert art.sensitivity == "confidential"
+
+
+def test_allowed_reader_ids_from_step_propagated_for_governed_sharing():
+    """A producing step may declare an allowed-reader roster; it is carried onto
+    the artifact so the guard can permit governed cross-user reads."""
+    ctx = ExecutionContext(user_id="alice", metadata={
+                           "operation_mode": "read"})
+    step = TaskStep(step_id="s1", expected_outputs=[
+                    "person_info"], allowed_reader_ids=["bob", "carol"])
+    art = to_artifact(_ok({"name": "王强"}), step=step, context=ctx)
+    assert art.metadata["owner_user_id"] == "alice"
+    assert art.metadata["allowed_reader_ids"] == ["bob", "carol"]
+
+
+def test_allowed_reader_ids_from_context_metadata_when_step_absent():
+    ctx = ExecutionContext(
+        user_id="alice",
+        metadata={"operation_mode": "read", "allowed_reader_ids": ["bob"]},
+    )
+    art = to_artifact(_ok({"x": 1}), context=ctx)
+    assert art.metadata["allowed_reader_ids"] == ["bob"]

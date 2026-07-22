@@ -138,7 +138,8 @@ def _wangqiang_graph(include_email: bool):
             )
         )
     return TaskGraph(
-        spec=TaskSpec(task_id="wangqiang-integration", subject="integration_user"),
+        spec=TaskSpec(task_id="wangqiang-integration",
+                      subject="integration_user"),
         steps=steps,
     )
 
@@ -163,7 +164,8 @@ def _run_scenario(monkeypatch, include_email: bool) -> tuple[list, dict]:
     from src.orchestration.runtime import run_scheduler_workflow
 
     # Enable the Phase-3 flag for fidelity (run_scheduler_workflow is called directly).
-    monkeypatch.setattr(g, "orchestration_scheduler_enabled", True, raising=False)
+    monkeypatch.setattr(
+        g, "orchestration_scheduler_enabled", True, raising=False)
 
     state = _wangqiang_state(include_email)
     required = [HR_AGENT, DOC_AGENT] + ([EMAIL_AGENT] if include_email else [])
@@ -173,7 +175,8 @@ def _run_scenario(monkeypatch, include_email: bool) -> tuple[list, dict]:
             await agent_manager.ensure_initialized()
             for name in required:
                 if await agent_manager.agent_registry.get(name) is None:
-                    pytest.skip(f"注册表缺少 Agent：{name}（需先同步 mock_remote_registry.json）")
+                    pytest.skip(
+                        f"注册表缺少 Agent：{name}（需先同步 mock_remote_registry.json）")
         except pytest.skip.Exception:
             raise
         except Exception as exc:  # noqa: BLE001 - init failure -> skip, not fail
@@ -202,7 +205,7 @@ def test_wangqiang_read_only_chain_end_to_end(monkeypatch):
 
     assert events[0]["event"] == "start_of_workflow"
     assert events[-1]["event"] == "end_of_workflow"
-    assert events[-1]["data"]["status"] == "completed", (
+    assert events[-1]["data"]["status"] == "SUCCEEDED", (
         f"存在失败步骤：{events[-1]['data'].get('failed_steps')}"
     )
     assert state["completed_steps"] == ["step_1", "step_2"]
@@ -215,7 +218,7 @@ def test_wangqiang_full_chain_with_email(monkeypatch):
     events, state = _run_scenario(monkeypatch, include_email=True)
 
     assert events[-1]["event"] == "end_of_workflow"
-    assert events[-1]["data"]["status"] == "completed", (
+    assert events[-1]["data"]["status"] == "SUCCEEDED", (
         f"存在失败步骤：{events[-1]['data'].get('failed_steps')}"
     )
     assert state["completed_steps"] == ["step_1", "step_2", "step_3"]

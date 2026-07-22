@@ -18,9 +18,15 @@ from src.orchestration.resolver import (
     AllowAllGuard,
     ArtifactAccessDenied,
     ArtifactResolver,
+    ArtifactSchemaIncompatible,
+    ArtifactSchemaInvalid,
 )
 from src.orchestration.schema_registry import SchemaRegistry
-from src.orchestration.store import ArtifactNotFoundError, ArtifactStore
+from src.orchestration.store import (
+    ArtifactNotFoundError,
+    ArtifactStore,
+    ArtifactStoreCorruption,
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -32,14 +38,16 @@ def test_artifact_requires_payload_or_uri():
 
 
 def test_artifact_ref_and_checksum():
-    art = Artifact(logical_name="person", payload={"name": "王强"}, schema_ref="person@v1")
+    art = Artifact(logical_name="person", payload={
+                   "name": "王强"}, schema_ref="person@v1")
     ref = art.ref("name")
     assert ref.artifact_id == art.artifact_id
     assert ref.version == art.version
     assert ref.selector == "name"
     assert ref.expected_schema_ref == "person@v1"
 
-    assert compute_checksum({"a": 1, "b": 2}) == compute_checksum({"b": 2, "a": 1})
+    assert compute_checksum(
+        {"a": 1, "b": 2}) == compute_checksum({"b": 2, "a": 1})
     filled = art.with_checksum()
     assert filled.checksum == compute_checksum({"name": "王强"})
 
@@ -105,7 +113,8 @@ def _seed_resolver(guard=None):
     ref = store.put(
         Artifact(
             logical_name="record",
-            payload={"data": {"name": "王强", "rows": [{"id": "1"}, {"id": "2"}]}},
+            payload={"data": {"name": "王强", "rows": [
+                {"id": "1"}, {"id": "2"}]}},
         )
     )
     return ArtifactResolver(store, guard=guard), ref
@@ -121,7 +130,8 @@ def test_resolver_no_selector_returns_full_payload():
 def test_resolver_dict_and_list_selector():
     resolver, ref = _seed_resolver()
     name_ref = ArtifactRef(artifact_id=ref.artifact_id, selector="data.name")
-    row_ref = ArtifactRef(artifact_id=ref.artifact_id, selector="data.rows.1.id")
+    row_ref = ArtifactRef(artifact_id=ref.artifact_id,
+                          selector="data.rows.1.id")
     assert resolver.resolve(name_ref) == "王强"
     assert resolver.resolve(row_ref) == "2"
 
@@ -160,7 +170,76 @@ def test_resolver_guard_receives_subject_and_action():
 
     resolver, ref = _seed_resolver(guard=RecordingGuard())
     resolver.resolve(ref, subject="bob", action="read")
-    assert seen == {"subject": "bob", "action": "read", "artifact_name": "record"}
+    assert seen == {"subject": "bob",
+                    "action": "read", "artifact_name": "record"}
+
+
+# --------------------------------------------------------------------------- #
+# C3: resolver rejects invalid / incompatible schemas (fail closed)
+# --------------------------------------------------------------------------- #
+def test_resolver_rejects_schema_invalid_artifact():
+    store = ArtifactStore()
+    ref = store.put(
+        Artifact(logical_name="sent", payload={"ok": True}, schema_valid=False)
+    )
+    resolver = ArtifactResolver(store, guard=AllowAllGuard())
+    with pytest.raises(ArtifactSchemaInvalid):
+        resolver.resolve(ref)
+
+
+def test_resolver_rejects_incompatible_expected_schema():
+    store = ArtifactStore()
+    stored = store.put(
+        Artifact(logical_name="doc", payload={"a": 1}, schema_ref="doc@v1")
+    )
+    # Ask for a different schema than the artifact actually has.
+    bad = ArtifactRef(artifact_id=stored.artifact_id,
+                      expected_schema_ref="doc@v2")
+    resolver = ArtifactResolver(store, guard=AllowAllGuard())
+    with pytest.raises(ArtifactSchemaIncompatible):
+        resolver.resolve(bad)
+
+
+# --------------------------------------------------------------------------- #
+# C3: load_state fails closed on corruption (never silently skips)
+# --------------------------------------------------------------------------- #
+def _dump_one() -> dict:
+    store = ArtifactStore()
+    store.put(Artifact(logical_name="p", payload={
+              "name": "王强"}).with_checksum())
+    return store.dump_state()
+
+
+def test_load_state_roundtrip_ok():
+    data = _dump_one()
+    restored = ArtifactStore()
+    restored.load_state(data)  # valid -> no raise
+    assert len(restored.dump_state()) == 1
+
+
+def test_load_state_rejects_checksum_mismatch():
+    data = _dump_one()
+    aid = next(iter(data))
+    # checksum no longer matches
+    data[aid]["1"]["payload"] = {"name": "TAMPERED"}
+    with pytest.raises(ArtifactStoreCorruption):
+        ArtifactStore().load_state(data)
+
+
+def test_load_state_rejects_id_mismatch():
+    data = _dump_one()
+    aid = next(iter(data))
+    data[aid]["1"]["artifact_id"] = "different-id"
+    with pytest.raises(ArtifactStoreCorruption):
+        ArtifactStore().load_state(data)
+
+
+def test_load_state_rejects_version_mismatch():
+    data = _dump_one()
+    aid = next(iter(data))
+    data[aid]["1"]["version"] = 99  # key says 1, payload says 99
+    with pytest.raises(ArtifactStoreCorruption):
+        ArtifactStore().load_state(data)
 
 
 # --------------------------------------------------------------------------- #
@@ -170,7 +249,8 @@ def test_schema_validate_ok_and_missing_required():
     reg = SchemaRegistry()
     reg.register(
         "person@v1",
-        {"required": ["name"], "properties": {"name": {"type": "string"}, "age": {"type": "integer"}}},
+        {"required": ["name"], "properties": {
+            "name": {"type": "string"}, "age": {"type": "integer"}}},
     )
     ok, errs = reg.validate({"name": "王强", "age": 30}, "person@v1")
     assert ok and errs == []

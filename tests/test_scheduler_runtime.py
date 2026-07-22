@@ -6,6 +6,8 @@ the real agent/LLM stack. Verifies the emitted event stream and state updates.
 
 import asyncio
 
+import pytest
+
 from src.interface.task_graph import TaskGraph, TaskSpec, TaskStep
 from src.manager.executor.base import ExecuteResult, ExecutionStatus
 from src.orchestration.providers import StubRoutingProvider
@@ -14,6 +16,13 @@ from src.orchestration.runtime import (
     has_task_graph,
     run_scheduler_workflow,
 )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_stores(tmp_path, monkeypatch):
+    monkeypatch.setenv("ARTIFACT_PAYLOAD_STORE_DIR",
+                       str(tmp_path / "artifacts"))
+    monkeypatch.setenv("RECEIPT_STORE_DIR", str(tmp_path / "receipts"))
 
 
 async def _fake_execute(*, step, selected_agent, inputs, context):
@@ -39,8 +48,10 @@ def _two_step_state():
     graph = TaskGraph(
         spec=TaskSpec(task_id="task-1"),
         steps=[
-            TaskStep(step_id="s1", preferred_resource_id="A", agent_name="A", expected_outputs=["out_a"]),
-            TaskStep(step_id="s2", depends_on=["s1"], preferred_resource_id="B", agent_name="B"),
+            TaskStep(step_id="s1", preferred_resource_id="A",
+                     agent_name="A", expected_outputs=["out_a"]),
+            TaskStep(step_id="s2", depends_on=[
+                     "s1"], preferred_resource_id="B", agent_name="B"),
         ],
     )
     return {"workflow_id": "wf1", "user_id": "u1", "task_graph": graph, "messages": []}
@@ -52,10 +63,11 @@ def test_runtime_emits_workflow_and_agent_events_in_order():
 
     assert events[0]["event"] == "start_of_workflow"
     assert events[-1]["event"] == "end_of_workflow"
-    assert events[-1]["data"]["status"] == "completed"
+    assert events[-1]["data"]["status"] == "SUCCEEDED"
 
     # start/end per step, serialized (s1 fully before s2)
-    kinds = [(e["event"], e["data"].get("sub_agent_name")) for e in events if e["event"].endswith("_of_agent")]
+    kinds = [(e["event"], e["data"].get("sub_agent_name"))
+             for e in events if e["event"].endswith("_of_agent")]
     assert kinds == [
         ("start_of_agent", "A"),
         ("end_of_agent", "A"),
@@ -93,7 +105,8 @@ def test_runtime_reports_failure_status():
     events = asyncio.run(_run())
     end = events[-1]
     assert end["event"] == "end_of_workflow"
-    assert end["data"]["status"] == "failed"
+    # s1 succeeded, s2 failed -> partial failure at the workflow level.
+    assert end["data"]["status"] == "PARTIAL_FAILED"
     assert "s2" in end["data"]["failed_steps"]
     assert state["completed_steps"] == ["s1"]
 
@@ -138,12 +151,44 @@ def test_runtime_emits_end_of_workflow_when_scheduler_crashes():
 
     assert events[0]["event"] == "start_of_workflow"
     assert events[-1]["event"] == "end_of_workflow"
-    assert events[-1]["data"]["status"] == "error"
+    assert events[-1]["data"]["status"] == "FAILED"
     assert "scheduler exploded" in events[-1]["data"]["error"]
 
 
+def test_runtime_checkpoint_failure_does_not_report_success():
+    """P1-3: a checkpoint save failure is CRITICAL -- the step must not be
+    reported SUCCEEDED and must not be marked completed."""
+
+    class _FailingCheckpoints:
+        def save_checkpoint(self, **kwargs):
+            raise IOError("checkpoint disk full")
+
+    state = _two_step_state()
+
+    async def _run():
+        events = []
+        async for ev in run_scheduler_workflow(
+            state,
+            task_id="task-1",
+            checkpoint_manager=_FailingCheckpoints(),
+            execute_step=_fake_execute,
+            routing_provider=StubRoutingProvider(),
+        ):
+            events.append(ev)
+        return events
+
+    events = asyncio.run(_run())
+    end = events[-1]
+    assert end["event"] == "end_of_workflow"
+    assert end["data"]["status"] != "SUCCEEDED"
+    # s1's persistence failed -> not completed; s2 is blocked by the failed dep.
+    assert not state.get("completed_steps")  # never marked complete
+    assert "s1" in end["data"]["failed_steps"]
+
+
 def test_has_task_graph_gating():
-    assert has_task_graph({"task_graph": {"spec": {"task_id": "t"}, "steps": []}}) is True
+    assert has_task_graph(
+        {"task_graph": {"spec": {"task_id": "t"}, "steps": []}}) is True
     assert has_task_graph({"planning_steps": [{"agent_name": "A"}]}) is False
     assert has_task_graph({}) is False
 
