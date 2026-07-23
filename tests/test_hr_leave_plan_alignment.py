@@ -82,3 +82,96 @@ def test_office_agent_registry_exposes_leave_query_tool_and_output() -> None:
 
     assert "query_leave_record" in tools
     assert "employee.leave_records" in office["metadata"]["produces"]
+
+
+def test_risk_report_and_send_plan_matches_profile() -> None:
+    profile = {
+        "subtasks": [
+            {"id": "subtask_1", "intent": "risk_analysis", "depends_on": []},
+            {
+                "id": "subtask_2",
+                "intent": "report_generation",
+                "depends_on": ["subtask_1"],
+            },
+            {
+                "id": "subtask_3",
+                "intent": "message_or_email_send",
+                "depends_on": ["subtask_2"],
+            },
+        ]
+    }
+    steps = [
+        {
+            "agent_name": "RemoteBusinessRiskAgent",
+            "title": "查询客户授信风险",
+            "description": "查询授信与信用风险数据",
+        },
+        {
+            "agent_name": "RemoteReportAgent",
+            "title": "生成风险分析报告",
+            "description": "基于风险数据生成报告",
+        },
+        {
+            "agent_name": "RemoteEmailDispatchAgent",
+            "title": "发送风险分析报告",
+            "description": "将报告发送给合规负责人",
+        },
+    ]
+
+    assert _validate_plan_against_task_profile(
+        steps, {"task_profile": profile}
+    ) == []
+
+
+def test_public_information_research_and_report_plan_matches_profile() -> None:
+    profile = {
+        "subtasks": [
+            {"id": "subtask_1", "intent": "information_research", "depends_on": []},
+            {
+                "id": "subtask_2",
+                "intent": "report_generation",
+                "depends_on": ["subtask_1"],
+            },
+        ]
+    }
+    steps = [
+        {
+            "agent_name": "researcher",
+            "title": "搜索李娜公开信息",
+            "description": "检索并核验公开资料",
+        },
+        {
+            "agent_name": "RemoteReportAgent",
+            "title": "生成简短报告",
+            "description": "整理公开资料生成报告",
+        },
+    ]
+
+    assert _validate_plan_against_task_profile(
+        steps, {"task_profile": profile}
+    ) == []
+
+
+def test_weather_and_travel_agents_cover_their_profile_intents() -> None:
+    profile = {
+        "subtasks": [
+            {"id": "subtask_1", "intent": "weather_query", "depends_on": []},
+            {"id": "subtask_2", "intent": "travel_service", "depends_on": []},
+        ]
+    }
+    steps = [
+        {
+            "agent_name": "RemoteWeatherAgent",
+            "title": "查询北京明天天气",
+            "description": "查询天气状况、气温和温度范围",
+        },
+        {
+            "agent_name": "RemoteOfficeAssistantAgent",
+            "title": "查询员工出差行程",
+            "description": "查询出差申请和差旅行程",
+        },
+    ]
+
+    assert _validate_plan_against_task_profile(
+        steps, {"task_profile": profile}
+    ) == []

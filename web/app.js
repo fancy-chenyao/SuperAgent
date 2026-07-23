@@ -697,7 +697,15 @@ const parseClarification = (content) => {
 const buildRoutingClarification = (eventData) => {
   const profile = eventData?.task_profile || {};
   const route = eventData?.routing_decision || {};
-  if ((route.decision || "").toUpperCase() === "DISPATCH") return "";
+  const decision = (route.decision || "").toUpperCase();
+  if (decision === "DISPATCH") return "";
+  if (decision === "REJECT") {
+    return "当前没有找到能够执行该任务的 Agent，请查看主 Agent 决策依据。";
+  }
+  const questions = Array.isArray(profile.clarification_questions)
+    ? profile.clarification_questions.map(String).filter(Boolean)
+    : [];
+  if (questions.length) return questions.join("\n");
   const missing = Array.isArray(profile.missing_fields) ? profile.missing_fields.map(String) : [];
   const normalized = missing.join(" ").toLowerCase();
   if (/employee|person|name|员工|姓名/.test(normalized)) {
@@ -708,7 +716,7 @@ const buildRoutingClarification = (eventData) => {
     return "请问您希望处理员工的哪类事务？";
   }
   if (missing.length) return `请补充以下信息：${missing.join("、")}。`;
-  return "请补充任务目标、处理对象和期望结果。";
+  return "当前任务需要确认，但系统没有生成具体缺失字段，请查看主 Agent 决策依据。";
 };
 
 const appendActiveConversationMessage = (role, content, metadata = {}) => {
@@ -941,6 +949,11 @@ const renderLoadedConversation = (messages) => {
     } else if (message.role === "assistant" && answerOutput) {
       renderLoadedAssistantMessage(message);
     }
+  });
+  // 历史记录不是正在运行的任务。旧版本只持久化了用户消息时，
+  // showCurrentChatTurn 会留下“正在处理...”占位符，造成重新执行的错觉。
+  chatConversation.querySelectorAll(".answer-output.is-empty").forEach((element) => {
+    element.dataset.emptyText = "该轮对话没有保存最终回复。";
   });
   scrollChatToLatest();
 };
@@ -2911,7 +2924,11 @@ const runWorkflow = async () => {
       setStatus("Plan ready", true);
       setChatPlanActionsDisabled(false);
     } else if (!clarificationPending && !coordinatorResponseHandled) {
-      setEmptyAnswerMessage("规划未生成可执行结果，请查看规划日志。");
+      const statusMessage = currentRunHasError
+        ? "规划失败，请查看规划日志。"
+        : "规划未生成可执行结果，请查看规划日志。";
+      showAssistantText(statusMessage);
+      appendActiveConversationMessage("assistant", statusMessage);
     }
     if (clarificationPending) document.getElementById("chatMessage")?.focus();
     updateConfirmExecuteState();
@@ -3007,7 +3024,11 @@ const runExecution = async () => {
       setEmptyAnswerMessage("执行失败，请查看执行日志。");
     }
   } finally {
-    if (executionStreamCompleted && !currentRunHasError) captureAssistantConversationContext();
+    if (executionStreamCompleted && !currentRunHasError) {
+      captureAssistantConversationContext();
+    } else if (currentRunHasError) {
+      appendActiveConversationMessage("assistant", "执行失败，请查看执行日志。");
+    }
     currentRunContext = null;
     executionInProgress = false;
     runBtn.disabled = false;

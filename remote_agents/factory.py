@@ -13,6 +13,12 @@ from .email_dispatch_agent import RemoteEmailDispatchAgent
 from .unicorn_selector_agent import RemoteUnicornSelectorAgent
 from .meeting_manager_agent import RemoteMeetingManagerAgent
 from .communication_agent import RemoteCommunicationAgent
+from .utility_agents import (
+    RemoteHRCalendarAgent,
+    RemoteScheduleAgent,
+    RemoteTodoAgent,
+    RemoteWeatherAgent,
+)
 
 
 class AgentFactory:
@@ -35,6 +41,8 @@ class AgentFactory:
     @classmethod
     def initialize_all(cls):
         """Initialize and register all agents."""
+        cls._agents.clear()
+        cls.register_agent(RemoteWeatherAgent())
         cls.register_agent(RemoteHRAssistantAgent())
         cls.register_agent(RemoteKnowledgeAgent())
         cls.register_agent(RemoteDocumentGeneratorAgent())
@@ -45,6 +53,9 @@ class AgentFactory:
         cls.register_agent(RemoteUnicornSelectorAgent())
         cls.register_agent(RemoteMeetingManagerAgent())
         cls.register_agent(RemoteCommunicationAgent())
+        cls.register_agent(RemoteScheduleAgent())
+        cls.register_agent(RemoteTodoAgent())
+        cls.register_agent(RemoteHRCalendarAgent())
 
 
 # Initialize all agents on module import

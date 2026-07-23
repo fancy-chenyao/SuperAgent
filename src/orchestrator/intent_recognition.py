@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import re
 from typing import Any, Literal, Protocol
@@ -56,13 +57,27 @@ class IntentRecognitionResult(BaseModel):
         return [item for item in self.intents if not item.negated]
 
 
+class SemanticEntities(BaseModel):
+    """语义模型可输出的统一实体槽位；未知字段不会进入执行契约。"""
+
+    people: list[str] = Field(default_factory=list)
+    employee_name: str | None = None
+    employee_id: str | None = None
+    recipient: str | None = None
+    location: str | None = None
+    time: str | None = None
+    count: str | int | None = None
+    document_type: str | None = None
+    business_object: str | None = None
+
+
 class SemanticIntentPayload(BaseModel):
     primary_intent: str = Field(
         default="general_assistance",
         json_schema_extra={"enum": sorted(SUPPORTED_INTENTS | {"general_assistance"})},
     )
     intents: list[IntentCandidate] = Field(default_factory=list)
-    entities: dict[str, Any] = Field(default_factory=dict)
+    entities: SemanticEntities = Field(default_factory=SemanticEntities)
     ambiguities: list[str] = Field(default_factory=list)
     needs_clarification: bool = False
     clarification_questions: list[str] = Field(default_factory=list)
@@ -114,6 +129,10 @@ class LLMSemanticIntentProvider:
 
         from src.llm.llm import get_llm_by_type
 
+        schema_text = json.dumps(
+            SemanticIntentPayload.model_json_schema(),
+            ensure_ascii=False,
+        )
         system_prompt = f"""你是任务理解组件，不负责执行任务。请从用户输入中识别用户最终目标、显式要求的动作、隐含前置动作、实体、否定关系、条件关系和缺失信息。
 
 只能从系统提供的意图标签集合中选择 intent name，不得自行创造标签。
@@ -131,18 +150,45 @@ class LLMSemanticIntentProvider:
 
 每个意图必须包含独立 confidence、source=semantic、provenance、evidence 和尽可能准确的 text_span。隐含前置动作的 text_span 可以为空。输出必须符合给定 JSON Schema，不要输出解释性文本。
 
+实体判断规则：
+1. 由你根据完整语境判断实体类型，不得仅因词语出现在“查询”后面就把它当人员；
+2. 地名写入 location，员工或参会人写入 people/employee_name，两者不得混用；
+3. 用户没有说明员工时，不得猜测 employee_name 或 employee_id；
+4. “给出提醒/建议/提示”表示期望的回答形式，不等于创建或查询日程提醒；
+5. 只有“设置提醒、创建提醒、查询日程、查看待办”等明确表达才使用 schedule_management。
+
 允许的 intent name（必须逐字使用其中之一）：
 {', '.join(sorted(SUPPORTED_INTENTS))}
 
 标签说明：
-{intent_prompt_catalog()}"""
-        llm = get_llm_by_type("basic").with_structured_output(SemanticIntentPayload)
+{intent_prompt_catalog()}
+
+输出 JSON Schema：
+{schema_text}"""
+        llm = get_llm_by_type("basic")
         messages = [("system", system_prompt), ("human", user_query)]
         try:
             response = await asyncio.wait_for(
                 llm.ainvoke(messages), timeout=self.timeout_seconds
             )
-            return SemanticIntentPayload.model_validate(response)
+            content = getattr(response, "content", response)
+            if isinstance(content, list):
+                text_parts = [
+                    str(item.get("text") or "")
+                    for item in content
+                    if isinstance(item, dict)
+                ]
+                content = "".join(text_parts)
+            if isinstance(content, str):
+                normalized = content.strip()
+                normalized = re.sub(r"^```(?:json)?\s*", "", normalized, flags=re.IGNORECASE)
+                normalized = re.sub(r"\s*```$", "", normalized)
+                content = json.loads(normalized)
+            # 部分兼容 OpenAI 的服务会错误地在根节点外包一层单元素数组；
+            # 这里只做传输结构归一化，随后仍由 Pydantic 严格校验业务 Schema。
+            if isinstance(content, list) and len(content) == 1 and isinstance(content[0], dict):
+                content = content[0]
+            return SemanticIntentPayload.model_validate(content)
         except asyncio.TimeoutError as exc:
             raise SemanticProviderError("semantic_provider_timeout") from exc
         except (ValidationError, ValueError, TypeError) as exc:
@@ -226,13 +272,30 @@ def segment_query(text: str) -> list[dict[str, Any]]:
 
 _PERSON_STOP_WORDS = {
     "员工", "人员", "人事", "基本", "个人", "相关", "这个", "那个", "公司", "部门",
-    "收入", "在职", "请假", "分析", "明天", "今天", "后天", "本月", "下月",
+    "收入", "在职", "请假", "分析", "明天", "今天", "后天", "本周", "下周", "本月", "下月",
+    "一次", "一场", "一个", "会议", "参会人", "收件人",
 }
+
+
+def is_person_candidate(value: Any) -> bool:
+    candidate = str(value or "").strip()
+    return 2 <= len(candidate) <= 8 and candidate not in _PERSON_STOP_WORDS
 
 
 def extract_entities(text: str) -> dict[str, Any]:
     raw = str(text or "")
     entities: dict[str, Any] = {}
+
+    # 规则实体只处理可由句法稳定定位的槽位，作为语义模型不可用时的降级结果。
+    # 地点不依赖城市词表：提取“查询 + 地点 + 时间 + 天气”的结构。
+    location_match = re.search(
+        r"(?:查询|查一下|查看|看看)\s*"
+        r"([\u4e00-\u9fff]{2,8}?)"
+        r"(?=(?:今天|明天|后天|本周|下周|未来\d+天)(?:的)?天气)",
+        raw,
+    )
+    if location_match:
+        entities["location"] = location_match.group(1)
 
     recipient_match = re.search(
         r"(?:发给|发送给|寄给|转给|抄送给?|交给|通知)([\w.@\-\u4e00-\u9fff]{2,30}?)(?=$|[，,。；;]|然后|并且|并发|再)",
@@ -246,7 +309,7 @@ def extract_entities(text: str) -> dict[str, Any]:
     people: list[str] = []
     # 从动作与属格上下文中抽取姓名，不依赖固定人名表。
     patterns = (
-        r"(?:查询|查一下|查看|看看|帮|为|把|取消|生成)(?:员工)?([\u4e00-\u9fff]{2,4}?)(?=的|生成|写|开|明天|后天|本月|下月|在职|收入|请假|休假)",
+        r"(?:查询|查一下|查看|看看|帮|为|把|取消|生成)(?:员工)?([\u4e00-\u9fff]{2,4}?)(?=的|生成|写|开|明天|后天|本周|下周|本月|下月|日程|在职|收入|请假|休假)",
         r"(?:安排|预约)([\u4e00-\u9fff]{2,3})(?:和|与)([\u4e00-\u9fff]{2,3})(?=明天|后天|开会|的?会议)",
         r"(?:安排)?与([\u4e00-\u9fff]{2,3})(?=的?会议)",
     )
@@ -256,7 +319,11 @@ def extract_entities(text: str) -> dict[str, Any]:
                 if not group:
                     continue
                 candidate = group.removeprefix("员工").removeprefix("与").removeprefix("和").removesuffix("的")
-                if candidate not in _PERSON_STOP_WORDS and candidate not in people:
+                if (
+                    is_person_candidate(candidate)
+                    and candidate != entities.get("location")
+                    and candidate not in people
+                ):
                     people.append(candidate)
     if entities.get("recipient") and str(entities["recipient"]).endswith(("经理", "秘书")):
         recipient_person = str(entities["recipient"])
@@ -264,8 +331,9 @@ def extract_entities(text: str) -> dict[str, Any]:
             people.append(recipient_person)
     if people:
         entities["people"] = people
+        recipient = str(entities.get("recipient") or "")
         employee_candidates = [
-            item for item in people if not item.endswith(("经理", "主管", "秘书", "负责人"))
+            item for item in people if item != recipient
         ]
         if employee_candidates:
             entities["employee_name"] = employee_candidates[0]
@@ -280,6 +348,8 @@ def extract_entities(text: str) -> dict[str, Any]:
         entities["document_type"] = "income_proof"
     elif "在职证明" in raw:
         entities["document_type"] = "employment_certificate"
+    elif re.search(r"说明(?:文档|文件)|Word\s*文档", raw, flags=re.IGNORECASE):
+        entities["document_type"] = "explanation_document"
     elif "分析报告" in raw:
         entities["document_type"] = "analysis_report"
     elif "报告" in raw:
@@ -319,6 +389,21 @@ def _is_consultation(text: str) -> bool:
     return bool(
         re.search(r"(?:只|仅)?(?:想)?了解|需要哪些权限|需要什么权限|如何(?:发送|生成|办理)|怎么(?:发送|生成|办理)", text)
     )
+
+
+def _explicit_document_span(text: str) -> tuple[int, str] | None:
+    """识别“生成一份说明文档”这类动词和文档名之间存在修饰语的表达。"""
+    match = re.search(
+        r"(?:生成|制作|输出|编写|撰写|写|起草)"
+        r"(?:一|两|二|三|\d+)?\s*份?"
+        r"[^，,。；;]{0,16}?"
+        r"(?:说明文档|说明文件|Word\s*文档|文档|文件)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return None
+    return match.start(), match.group(0)
 
 
 class RuleIntentRecognizer:
@@ -369,6 +454,29 @@ class RuleIntentRecognizer:
                         text_span=first_keyword,
                         evidence=evidence,
                         negated=negated,
+                    ),
+                )
+            )
+        # 目录关键词只能匹配连续短语，无法覆盖“生成一份说明文档”这种中间带
+        # 数量词和文档类型修饰语的显式动作。这里补充结构模式，但仍输出标准
+        # document_generation 候选，后续继续走统一融合、校验和子任务构建。
+        document_span = _explicit_document_span(text)
+        has_document_candidate = any(
+            item.name == "document_generation" for _, item in candidates
+        )
+        if document_span and not has_document_candidate and not consultation:
+            position, span = document_span
+            candidates.append(
+                (
+                    position,
+                    IntentCandidate(
+                        name="document_generation",
+                        confidence=self.strong_threshold,
+                        source="rule",
+                        provenance="explicit",
+                        text_span=span,
+                        evidence=[span, "显式文档生成结构"],
+                        negated=_is_negated(text, position, span),
                     ),
                 )
             )
@@ -423,7 +531,7 @@ class SemanticIntentRecognizer:
         return IntentRecognitionResult(
             primary_intent=primary,
             intents=payload.intents,
-            entities=payload.entities,
+            entities=payload.entities.model_dump(exclude_none=True, exclude_defaults=True),
             ambiguities=payload.ambiguities,
             needs_clarification=payload.needs_clarification,
             clarification_questions=payload.clarification_questions,
@@ -445,6 +553,42 @@ class IntentFusion:
         self.agreement_bonus = agreement_bonus
         self.conflict_threshold = conflict_threshold
 
+    @staticmethod
+    def _fuse_entities(
+        rule_entities: dict[str, Any],
+        semantic_entities: dict[str, Any],
+    ) -> dict[str, Any]:
+        """语义实体为主，规则只补确定性较高的格式化槽位。"""
+        safe_rule_keys = {"recipient", "time", "count", "document_type"}
+        result = {
+            key: value
+            for key, value in rule_entities.items()
+            if key in safe_rule_keys and value not in (None, "", [])
+        }
+        result.update(
+            {
+                key: value
+                for key, value in semantic_entities.items()
+                if value not in (None, "", [])
+            }
+        )
+
+        # 这是实体 Schema 的互斥约束，不依赖城市或人名词表。
+        location = str(result.get("location") or "").strip()
+        if location:
+            if str(result.get("employee_name") or "").strip() == location:
+                result.pop("employee_name", None)
+            people = [
+                str(item)
+                for item in result.get("people") or []
+                if str(item).strip() and str(item).strip() != location
+            ]
+            if people:
+                result["people"] = people
+            else:
+                result.pop("people", None)
+        return result
+
     def fuse(
         self,
         rule: IntentRecognitionResult,
@@ -453,9 +597,43 @@ class IntentFusion:
         semantic_by_name = {item.name: item for item in semantic.intents}
         combined: list[IntentCandidate] = []
         consumed: set[str] = set()
-        ambiguities = list(dict.fromkeys(rule.ambiguities + semantic.ambiguities))
-        questions = list(dict.fromkeys(rule.clarification_questions + semantic.clarification_questions))
-        needs_clarification = rule.needs_clarification or semantic.needs_clarification
+        rule_executable = [item for item in rule.intents if not item.negated]
+        concrete_entity_keys = {
+            "employee_name",
+            "people",
+            "recipient",
+            "business_object",
+            "time",
+        }
+        # 语义模型经常会把“可补充的偏好”（报告格式、篇幅、公开人物的
+        # 唯一身份等）也标记成 needs_clarification。若规则侧已经识别出
+        # 多步骤结构，或单步骤同时具备明确业务实体，则这些问题只能作为
+        # 非阻塞歧义保留，不能阻止一个本身可执行的任务进入 Planner。
+        rule_has_actionable_structure = len(rule_executable) > 1 or bool(
+            concrete_entity_keys & set(rule.entities)
+        )
+        semantic_clarification_is_blocking = (
+            semantic.needs_clarification and not rule_has_actionable_structure
+        )
+        ambiguities = list(
+            dict.fromkeys(
+                rule.ambiguities
+                + (semantic.ambiguities if semantic_clarification_is_blocking else [])
+            )
+        )
+        questions = list(
+            dict.fromkeys(
+                rule.clarification_questions
+                + (
+                    semantic.clarification_questions
+                    if semantic_clarification_is_blocking
+                    else []
+                )
+            )
+        )
+        needs_clarification = (
+            rule.needs_clarification or semantic_clarification_is_blocking
+        )
 
         for rule_item in rule.intents:
             semantic_item = semantic_by_name.get(rule_item.name)
@@ -503,10 +681,45 @@ class IntentFusion:
                 )
                 needs_clarification = True
 
+        # information_consultation 表示“只咨询、不执行”。如果同一输入已经明确要求
+        # 生成报告、文档或发送结果，它就不能作为额外可执行意图加入任务链。
+        combined_names = {item.name for item in combined if not item.negated}
+        has_explicit_output = bool(
+            combined_names
+            & {
+                "document_generation",
+                "report_generation",
+                "message_or_email_send",
+                "meeting_arrangement",
+            }
+        )
+        if (
+            has_explicit_output
+            and "knowledge_lookup" in combined_names
+            and "information_consultation" in combined_names
+        ):
+            combined = [
+                item for item in combined if item.name != "information_consultation"
+            ]
+            combined_names.discard("information_consultation")
+
+        rule_intent_names = {item.name for item in rule.intents if not item.negated}
+        semantic_intent_names = {
+            item.name for item in semantic.intents if not item.negated
+        }
+        # 复合任务中，两路识别可能只是对“哪个意图最主要”的排序不同。
+        # 只要双方都识别到了这两个主意图，就属于排序差异，不是任务理解冲突。
+        shared_composite_ranking = (
+            rule.primary_intent in semantic_intent_names
+            and semantic.primary_intent in rule_intent_names
+        )
         if (
             rule.primary_intent != "general_assistance"
             and semantic.primary_intent != "general_assistance"
             and rule.primary_intent != semantic.primary_intent
+            and not shared_composite_ranking
+            and rule.primary_intent in combined_names
+            and semantic.primary_intent in combined_names
         ):
             rule_primary = next((x for x in rule.intents if x.name == rule.primary_intent), None)
             semantic_primary = next((x for x in semantic.intents if x.name == semantic.primary_intent), None)
@@ -533,7 +746,7 @@ class IntentFusion:
         return IntentRecognitionResult(
             primary_intent=primary,
             intents=combined,
-            entities={**rule.entities, **semantic.entities},
+            entities=self._fuse_entities(rule.entities, semantic.entities),
             ambiguities=list(dict.fromkeys(ambiguities)),
             needs_clarification=needs_clarification,
             clarification_questions=questions,

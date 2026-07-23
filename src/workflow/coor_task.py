@@ -278,11 +278,16 @@ _PROFILE_INTENT_AGENT_PREFERENCES = {
     "employee_information_query": ("RemoteHRAssistantAgent",),
     "salary_query": ("RemoteHRAssistantAgent",),
     "leave_record_query": ("RemoteOfficeAssistantAgent",),
+    "information_research": ("researcher", "browser", "RemoteUnicornSelectorAgent"),
+    "knowledge_lookup": ("RemoteKnowledgeAgent", "researcher"),
+    "risk_analysis": ("RemoteBusinessRiskAgent",),
     "document_generation": ("RemoteDocumentGeneratorAgent",),
     "report_generation": ("RemoteReportAgent", "RemoteDocumentGeneratorAgent"),
     "message_or_email_send": ("RemoteEmailDispatchAgent", "RemoteCommunicationAgent"),
     "meeting_arrangement": ("RemoteMeetingManagerAgent",),
     "schedule_management": ("RemoteScheduleAgent", "RemoteHRCalendarAgent"),
+    "weather_query": ("RemoteWeatherAgent",),
+    "travel_service": ("RemoteOfficeAssistantAgent",),
 }
 
 
@@ -318,6 +323,18 @@ def _infer_step_intents(step: dict) -> set[str]:
         token in text for token in ("请假记录", "休假记录", "请假申请记录", "考勤记录", "leave record")
     ):
         intents.add("leave_record_query")
+    if "information_research" in compatible and any(
+        token in text for token in ("搜索", "检索", "公开信息", "调研", "研究", "资料", "research")
+    ):
+        intents.add("information_research")
+    if "knowledge_lookup" in compatible and any(
+        token in text for token in ("知识", "政策", "规定", "制度", "资料", "knowledge")
+    ):
+        intents.add("knowledge_lookup")
+    if "risk_analysis" in compatible and any(
+        token in text for token in ("风险", "授信", "信用", "合规", "风控", "risk", "credit")
+    ):
+        intents.add("risk_analysis")
     if "document_generation" in compatible and any(
         token in text for token in ("文档", "证明", "申请书", "请假书", "请假条", "docx", "word")
     ):
@@ -330,6 +347,14 @@ def _infer_step_intents(step: dict) -> set[str]:
         intents.add("meeting_arrangement")
     if "schedule_management" in compatible and any(token in text for token in ("日程", "待办", "提醒", "有空")):
         intents.add("schedule_management")
+    if "weather_query" in compatible and any(
+        token in text for token in ("天气", "气温", "温度", "weather")
+    ):
+        intents.add("weather_query")
+    if "travel_service" in compatible and any(
+        token in text for token in ("出差", "差旅", "行程", "travel", "trip")
+    ):
+        intents.add("travel_service")
 
     # 只有该 Agent 在映射中只承担一种意图时，才允许用 Agent 身份补足无关键词标题。
     if not intents and len(compatible) == 1:

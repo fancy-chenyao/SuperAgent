@@ -91,7 +91,10 @@ INTENT_CATALOG: dict[str, dict[str, Any]] = {
         "label": "处理日程或待办",
         "description": "查询或修改日程、待办和提醒",
         "task_type": "OFFICE",
-        "keywords": ("日程", "待办", "提醒", "安排", "有没有时间", "有空", "calendar", "schedule", "todo"),
+        "keywords": (
+            "日程", "待办", "设置提醒", "创建提醒", "添加提醒", "提醒我",
+            "安排", "有没有时间", "有空", "calendar", "schedule", "todo",
+        ),
         "examples": ("看看明天有没有时间", "查询个人日程"),
         "counter_examples": (),
         "capabilities": ("Office",),
