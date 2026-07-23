@@ -2,7 +2,7 @@ import logging
 import json
 import time
 from copy import deepcopy
-from typing import Literal
+from typing import Any, Dict, Literal, Optional
 
 try:
     from langgraph.types import Command
@@ -25,6 +25,7 @@ from src.utils.content_process import clean_response_tags
 from src.manager.executor.base import ExecutionContext
 from src.manager.executor.factory import execute_agent
 from src.security.enforcement import enforce_agent_dispatch
+from config.global_variables import artifact_capture_enabled
 
 try:
     from src.llm.llm import get_llm_by_type
@@ -110,7 +111,8 @@ def _search_before_planning(state: State) -> list[dict]:
     """Run optional planning search without turning an unavailable provider into a task failure."""
     if not is_search_available():
         status = get_search_status()
-        logger.warning("Search before planning skipped: %s", status.get("reason"))
+        logger.warning("Search before planning skipped: %s",
+                       status.get("reason"))
         return []
 
     user_messages = [
@@ -120,7 +122,8 @@ def _search_before_planning(state: State) -> list[dict]:
     ]
     query = next((item for item in user_messages if item.strip()), "")
     if not query:
-        logger.warning("Search before planning skipped: no user query was found")
+        logger.warning(
+            "Search before planning skipped: no user query was found")
         return []
 
     try:
@@ -129,11 +132,13 @@ def _search_before_planning(state: State) -> list[dict]:
             config={"configurable": {"user_id": state.get("user_id")}},
         )
     except Exception as exc:
-        logger.warning("Search before planning failed and was skipped: %s", exc)
+        logger.warning(
+            "Search before planning failed and was skipped: %s", exc)
         return []
 
     if not isinstance(result, list):
-        logger.warning("Search before planning returned an unexpected result type: %s", type(result).__name__)
+        logger.warning(
+            "Search before planning returned an unexpected result type: %s", type(result).__name__)
         return []
     return [item for item in result if isinstance(item, dict)]
 
@@ -200,6 +205,7 @@ def _ensure_scenario_prompt_defaults(prompt_state: dict) -> dict:
 
     return prompt_state
 
+
 def _extract_plan_steps(content: str) -> list | None:
     if not content:
         return None
@@ -216,12 +222,12 @@ def _extract_plan_steps(content: str) -> list | None:
     first_obj = text.find("{")
     last_obj = text.rfind("}")
     if first_obj >= 0 and last_obj > first_obj:
-        candidates.append(text[first_obj : last_obj + 1])
+        candidates.append(text[first_obj: last_obj + 1])
 
     first_arr = text.find("[")
     last_arr = text.rfind("]")
     if first_arr >= 0 and last_arr > first_arr:
-        candidates.append(text[first_arr : last_arr + 1])
+        candidates.append(text[first_arr: last_arr + 1])
 
     for candidate in candidates:
         parsed = _try_parse(candidate)
@@ -362,7 +368,8 @@ def _validate_plan_against_task_profile(steps: list, state: State) -> list[str]:
             continue
         intent = str(subtask.get("intent") or "")
         if intent and not _plan_has_intent(steps, intent):
-            expected_agents = "、".join(_PROFILE_INTENT_AGENT_PREFERENCES.get(intent, ())) or "匹配该意图的 Agent"
+            expected_agents = "、".join(
+                _PROFILE_INTENT_AGENT_PREFERENCES.get(intent, ())) or "匹配该意图的 Agent"
             errors.append(f"缺少意图 {intent} 的独立步骤，应由 {expected_agents} 执行")
             continue
         current_index = _first_step_index_for_intent(steps, intent)
@@ -371,7 +378,8 @@ def _validate_plan_against_task_profile(steps: list, state: State) -> list[str]:
             dependency_intent = str((dependency or {}).get("intent") or "")
             if not dependency_intent:
                 continue
-            dependency_index = _first_step_index_for_intent(steps, dependency_intent)
+            dependency_index = _first_step_index_for_intent(
+                steps, dependency_intent)
             if dependency_index >= current_index:
                 errors.append(
                     f"意图 {dependency_intent} 必须在 {intent} 之前完成，不能合并或后置"
@@ -412,10 +420,9 @@ async def _validate_plan_data_flow(steps: list, user_id: str) -> tuple[bool, lis
 
         metadata = agent_metadata.get(agent_name)
         if not metadata:
-            errors.append(
-                f"Step {step_idx + 1}: Agent '{agent_name}' is not available "
-                "in the current user registry"
-            )
+            # Agent not found in registry, skip validation
+            logger.warning(
+                f"Step {step_idx + 1}: Agent '{agent_name}' not found in registry")
             continue
 
         required_params = metadata["requires"]
@@ -488,11 +495,14 @@ async def publisher_node(
     state: State,
 ) -> Command[Literal["agent_proxy", "__end__"]]:
     """Publisher node."""
-    logger.info("publisher evaluating next action in %s mode ", state["workflow_mode"])
+    logger.info("publisher evaluating next action in %s mode ",
+                state["workflow_mode"])
 
     if state["workflow_mode"] == "launch":
-        cache.restore_system_node(state["workflow_id"], PUBLISHER, state["user_id"])
-        messages = _sanitize_messages(apply_prompt_template("publisher", state))
+        cache.restore_system_node(
+            state["workflow_id"], PUBLISHER, state["user_id"])
+        messages = _sanitize_messages(
+            apply_prompt_template("publisher", state))
         response = await (
             get_llm_by_type(AGENT_LLM_MAP["publisher"])
             .with_structured_output(Router)
@@ -503,14 +513,17 @@ async def publisher_node(
             agent = response["next"]
         except Exception as e:
             try:
-                preview = response.model_dump() if hasattr(response, "model_dump") else response
+                preview = response.model_dump() if hasattr(
+                    response, "model_dump") else response
                 try:
                     preview_str = json.dumps(preview, ensure_ascii=False)
                 except Exception:
                     preview_str = str(preview)
-                logger.error(f"publisher response parse error: {e}; response={preview_str}")
+                logger.error(
+                    f"publisher response parse error: {e}; response={preview_str}")
             except Exception as inner:
-                logger.error(f"publisher response parse error and printing failed: {inner}")
+                logger.error(
+                    f"publisher response parse error and printing failed: {inner}")
             raise
 
         if agent == "FINISH":
@@ -521,7 +534,8 @@ async def publisher_node(
             )
             return Command(goto=goto, update={"next": goto})
 
-        cache.restore_system_node(state["workflow_id"], agent, state["user_id"])
+        cache.restore_system_node(
+            state["workflow_id"], agent, state["user_id"])
         goto = "agent_proxy"
 
         logger.info("publisher delegating to: %s ", agent)
@@ -652,6 +666,45 @@ async def agent_proxy_node(state: State) -> Command[Literal["publisher", "__end_
     else:
         structured_result["result"] = raw_payload
 
+    # Execution-engine (Phase 2): optionally capture this step's output as a typed
+    # Artifact. Gated OFF by default and wrapped so capture never breaks the legacy
+    # flow; the messages/return below are unchanged.
+    if artifact_capture_enabled:
+        try:
+            from src.manager.executor.artifact_adapter import to_artifact
+            from src.interface.artifact import StepResult, StepStatus
+
+            artifact = to_artifact(
+                execute_result,
+                step=None,  # legacy publisher/while path has no TaskStep
+                context=context,
+                logical_name=f"{state['next']}_result",
+            )
+            artifacts = state.get("artifacts")
+            if not isinstance(artifacts, dict):
+                artifacts = {}
+            artifacts[artifact.artifact_id] = artifact.model_dump()
+            state["artifacts"] = artifacts
+
+            step_results = state.get("step_results")
+            if not isinstance(step_results, dict):
+                step_results = {}
+            step_key = f"{state.get('current_step')}:{_agent.agent_name}"
+            step_results[step_key] = StepResult(
+                step_id=step_key,
+                status=StepStatus.SUCCEEDED,
+                outputs={artifact.logical_name: artifact.ref()},
+            ).model_dump()
+            state["step_results"] = step_results
+            logger.info(
+                "artifact captured: %s (%s) for agent %s",
+                artifact.artifact_id,
+                artifact.logical_name,
+                _agent.agent_name,
+            )
+        except Exception as exc:  # pragma: no cover - defensive; never break flow
+            logger.warning("artifact capture skipped: %s", exc)
+
     if state["workflow_mode"] == "launch":
         cache.restore_node(
             state["workflow_id"], _agent, state["initialized"], state["user_id"]
@@ -666,8 +719,7 @@ async def agent_proxy_node(state: State) -> Command[Literal["publisher", "__end_
                     "content": response_content,
                     "tool": state["next"],
                     "role": "assistant",
-                }
-                ,
+                },
                 {
                     # LangChain 消息 content 只接受字符串或内容块列表，不能直接放 dict。
                     # 序列化后仍可在 Publisher 上下文中保留完整结构化结果。
@@ -762,7 +814,8 @@ async def planner_node(state: State) -> Command[Literal["publisher", "__end__"]]
     routing_decision = state.get("routing_decision") or {}
     if state["workflow_mode"] == "launch" and routing_decision.get("decision") != "DISPATCH":
         decision = routing_decision.get("decision", "CLARIFY")
-        reason_codes = routing_decision.get("reason_codes") or ["NO_CAPABLE_AGENT"]
+        reason_codes = routing_decision.get("reason_codes") or [
+            "NO_CAPABLE_AGENT"]
         task_profile = state.get("task_profile") or {}
         missing_fields = task_profile.get("missing_fields") or []
         thought = (
@@ -773,8 +826,10 @@ async def planner_node(state: State) -> Command[Literal["publisher", "__end__"]]
             {"thought": thought, "steps": [], "new_agents_needed": []},
             ensure_ascii=False,
         )
-        cache.restore_planning_steps(state["workflow_id"], [], state["user_id"])
-        cache.restore_system_node(state["workflow_id"], "__end__", state["user_id"])
+        cache.restore_planning_steps(
+            state["workflow_id"], [], state["user_id"])
+        cache.restore_system_node(
+            state["workflow_id"], "__end__", state["user_id"])
         if callable(runtime_event_handler):
             await runtime_event_handler(
                 {
@@ -804,7 +859,8 @@ async def planner_node(state: State) -> Command[Literal["publisher", "__end__"]]
         if not isinstance(history, list):
             history = [str(history)]
         if history:
-            history_text = "\n".join(f"{idx + 1}. {item}" for idx, item in enumerate(history))
+            history_text = "\n".join(
+                f"{idx + 1}. {item}" for idx, item in enumerate(history))
         else:
             history_text = "None"
 
@@ -824,7 +880,8 @@ async def planner_node(state: State) -> Command[Literal["publisher", "__end__"]]
 
         prompt_state["INSTRUCTION_HISTORY_TEXT"] = history_text
         prompt_state["CURRENT_PLAN_TEXT"] = current_plan_text
-        messages = _sanitize_messages(apply_prompt_template("planner", prompt_state))
+        messages = _sanitize_messages(
+            apply_prompt_template("planner", prompt_state))
         llm = get_llm_by_type(AGENT_LLM_MAP["planner"])
         if state.get("deep_thinking_mode"):
             llm = get_llm_by_type("reasoning")
@@ -841,11 +898,13 @@ async def planner_node(state: State) -> Command[Literal["publisher", "__end__"]]
             logger.info("[PERF] Web search: %.2fs", search_time)
             messages = _append_search_context(messages, searched_content)
 
-        cache.restore_system_node(state["workflow_id"], PLANNER, state["user_id"])
+        cache.restore_system_node(
+            state["workflow_id"], PLANNER, state["user_id"])
 
         # Log LLM call start
         llm_start = time.time()
-        model_type = "reasoning" if state.get("deep_thinking_mode") else AGENT_LLM_MAP["planner"]
+        model_type = "reasoning" if state.get(
+            "deep_thinking_mode") else AGENT_LLM_MAP["planner"]
         logger.info("[PERF] Starting LLM call (model: %s)...", model_type)
 
         # Use async streaming with real-time display
@@ -900,16 +959,19 @@ async def planner_node(state: State) -> Command[Literal["publisher", "__end__"]]
 
     elif state["workflow_mode"] == "polish" and state.get("polish_target") == "planner":
         polish_start = time.time()
-        state["historical_plan"] = cache.get_planning_steps(state["workflow_id"])
+        state["historical_plan"] = cache.get_planning_steps(
+            state["workflow_id"])
         state["adjustment_instruction"] = state.get("polish_instruction")
 
-        messages = _sanitize_messages(apply_prompt_template("planner_polishment", state))
+        messages = _sanitize_messages(
+            apply_prompt_template("planner_polishment", state))
         llm = get_llm_by_type(AGENT_LLM_MAP["planner"])
         if state.get("deep_thinking_mode"):
             llm = get_llm_by_type("reasoning")
 
         prep_time = time.time()
-        logger.info("[PERF] Polish prompt preparation: %.2fs", prep_time - polish_start)
+        logger.info("[PERF] Polish prompt preparation: %.2fs",
+                    prep_time - polish_start)
 
         if state.get("search_before_planning"):
             search_start = time.time()
@@ -919,8 +981,10 @@ async def planner_node(state: State) -> Command[Literal["publisher", "__end__"]]
             messages = _append_search_context(messages, searched_content)
 
         llm_start = time.time()
-        model_type = "reasoning" if state.get("deep_thinking_mode") else AGENT_LLM_MAP["planner"]
-        logger.info("[PERF] Polish starting LLM call (model: %s)...", model_type)
+        model_type = "reasoning" if state.get(
+            "deep_thinking_mode") else AGENT_LLM_MAP["planner"]
+        logger.info(
+            "[PERF] Polish starting LLM call (model: %s)...", model_type)
 
         # Use async streaming with real-time display for polish mode
         response = llm.astream(messages)
@@ -988,7 +1052,8 @@ async def planner_node(state: State) -> Command[Literal["publisher", "__end__"]]
                 retry_payload = deepcopy(retry_messages)
                 retry_payload.append({"role": "user", "content": retry_note})
                 retry_response = await retry_llm.ainvoke(retry_payload)
-                retry_content = clean_response_tags(getattr(retry_response, "content", ""))
+                retry_content = clean_response_tags(
+                    getattr(retry_response, "content", ""))
 
                 retry_time = time.time() - retry_start
                 logger.info("[PERF] Retry LLM call: %.2fs", retry_time)
@@ -999,7 +1064,8 @@ async def planner_node(state: State) -> Command[Literal["publisher", "__end__"]]
                         raw_content = retry_content
                         logger.info("[PERF] Retry succeeded")
                     else:
-                        logger.warning("[PERF] Retry failed: still cannot parse JSON")
+                        logger.warning(
+                            "[PERF] Retry failed: still cannot parse JSON")
             except Exception as exc:
                 logger.warning("[PERF] Retry exception: %s", exc)
 
@@ -1025,9 +1091,11 @@ async def planner_node(state: State) -> Command[Literal["publisher", "__end__"]]
                 if retry_messages and retry_llm:
                     try:
                         fix_start = time.time()
-                        logger.info("[PERF] Attempting to fix plan validation errors...")
+                        logger.info(
+                            "[PERF] Attempting to fix plan validation errors...")
 
-                        error_summary = "\n".join(f"- {err}" for err in validation_errors)
+                        error_summary = "\n".join(
+                            f"- {err}" for err in validation_errors)
                         fix_note = (
                             f"你生成的计划与任务画像或数据流不一致，请修正：\n\n{error_summary}\n\n"
                             "修正要求：\n"
@@ -1041,14 +1109,18 @@ async def planner_node(state: State) -> Command[Literal["publisher", "__end__"]]
                         )
 
                         fix_payload = deepcopy(retry_messages)
-                        fix_payload.append({"role": "assistant", "content": raw_content})
-                        fix_payload.append({"role": "user", "content": fix_note})
+                        fix_payload.append(
+                            {"role": "assistant", "content": raw_content})
+                        fix_payload.append(
+                            {"role": "user", "content": fix_note})
 
                         fix_response = await retry_llm.ainvoke(fix_payload)
-                        fix_content = clean_response_tags(getattr(fix_response, "content", ""))
+                        fix_content = clean_response_tags(
+                            getattr(fix_response, "content", ""))
 
                         fix_time = time.time() - fix_start
-                        logger.info("[PERF] Plan fix LLM call: %.2fs", fix_time)
+                        logger.info(
+                            "[PERF] Plan fix LLM call: %.2fs", fix_time)
 
                         if fix_content:
                             fixed_steps = _extract_plan_steps(fix_content)
@@ -1060,7 +1132,8 @@ async def planner_node(state: State) -> Command[Literal["publisher", "__end__"]]
                                 fixed_profile_errors = _validate_plan_against_task_profile(
                                     fixed_steps, state
                                 )
-                                fixed_errors = list(fixed_errors) + fixed_profile_errors
+                                fixed_errors = list(
+                                    fixed_errors) + fixed_profile_errors
                                 is_fixed_valid = is_fixed_valid and not fixed_profile_errors
                                 if is_fixed_valid:
                                     steps = fixed_steps
@@ -1074,7 +1147,8 @@ async def planner_node(state: State) -> Command[Literal["publisher", "__end__"]]
                                     for error in fixed_errors:
                                         logger.warning(f"  - {error}")
                             else:
-                                logger.warning("[PERF] Plan fix failed: cannot parse JSON")
+                                logger.warning(
+                                    "[PERF] Plan fix failed: cannot parse JSON")
                     except Exception as exc:
                         logger.warning(f"[PERF] Plan fix exception: {exc}")
 
@@ -1096,11 +1170,14 @@ async def planner_node(state: State) -> Command[Literal["publisher", "__end__"]]
             if fallback_steps:
                 steps = fallback_steps
                 raw_content = json.dumps({"steps": steps}, ensure_ascii=False)
-                logger.info("[PERF] Applied fallback planner steps for obvious single-agent task")
+                logger.info(
+                    "[PERF] Applied fallback planner steps for obvious single-agent task")
 
         if steps is not None:
-            cache.restore_planning_steps(state["workflow_id"], steps, state["user_id"])
-            message_content = json.dumps({"steps": steps}, indent=2, ensure_ascii=False)
+            cache.restore_planning_steps(
+                state["workflow_id"], steps, state["user_id"])
+            message_content = json.dumps(
+                {"steps": steps}, indent=2, ensure_ascii=False)
             if state.get("stop_after_planner") and state["workflow_mode"] == "launch":
                 goto = "__end__"
         else:
@@ -1110,8 +1187,64 @@ async def planner_node(state: State) -> Command[Literal["publisher", "__end__"]]
 
     total_time = time.time() - start_time
     logger.info("=" * 60)
-    logger.info("[PERF] PLANNER TOTAL TIME: %.2fs (mode: %s)", total_time, state["workflow_mode"])
+    logger.info("[PERF] PLANNER TOTAL TIME: %.2fs (mode: %s)",
+                total_time, state["workflow_mode"])
     logger.info("=" * 60)
+
+    # Execution-engine wiring: when the scheduler is enabled, convert the
+    # validated plan into an explicit TaskGraph so the real web/API path can
+    # drive the DAG scheduler. Gated OFF by default and fully fail-safe: any
+    # conversion problem (or an unclassifiable side-effect step) leaves
+    # ``task_graph`` unset so the legacy publisher/while loop runs unchanged.
+    plan_update: dict = {}
+    if steps and not plan_validation_failed:
+        try:
+            from src.service.env import ORCHESTRATION_SCHEDULER_ENABLED
+
+            if ORCHESTRATION_SCHEDULER_ENABLED:
+                from src.orchestration.plan_to_task_graph import plan_to_task_graph
+                from src.orchestration.runtime import unknown_operation_modes
+
+                tg = plan_to_task_graph(
+                    steps,
+                    task_id=state.get("workflow_id") or "task",
+                    subject=state.get("user_id"),
+                    goal=state.get("original_user_query", "")
+                    or state.get("USER_QUERY", ""),
+                )
+                unknown = unknown_operation_modes(tg)
+                if unknown:
+                    logger.info(
+                        "scheduler wiring: skip task_graph (unclassified steps: %s)",
+                        unknown,
+                    )
+                else:
+                    tg_dict = tg.model_dump()
+                    plan_update["task_graph"] = tg_dict
+                    logger.info(
+                        "scheduler wiring: task_graph built (%d steps)", len(tg.steps))
+                    # Persist a validated PlanSnapshot so a later production
+                    # execution can load + verify (workflow/user/plan_hash) the
+                    # exact approved plan before entering the scheduler.
+                    try:
+                        from src.orchestration.plan_snapshot import save_plan_snapshot
+
+                        save_plan_snapshot(
+                            workflow_id=state.get("workflow_id") or "task",
+                            user_id=state.get("user_id"),
+                            planning_steps=steps,
+                            task_graph=tg_dict,
+                        )
+                        logger.info(
+                            "scheduler wiring: plan snapshot persisted")
+                    except Exception as snap_exc:  # noqa: BLE001 - never break planning
+                        logger.warning(
+                            "scheduler wiring: plan snapshot persist failed: %s", snap_exc
+                        )
+        except Exception as exc:  # noqa: BLE001 - stay on the legacy path on any error
+            logger.warning(
+                "scheduler wiring: plan_to_task_graph failed, staying on legacy: %s", exc
+            )
 
     return Command(
         update={
@@ -1119,6 +1252,7 @@ async def planner_node(state: State) -> Command[Literal["publisher", "__end__"]]
             "agent_name": "planner",
             "full_plan": raw_content,
             "planning_steps": steps if steps is not None else [],
+            **plan_update,
         },
         goto=goto,
     )
@@ -1160,13 +1294,15 @@ async def coordinator_node(state: State) -> Command[Literal["planner", "__end__"
     messages = _sanitize_messages(apply_prompt_template("coordinator", state))
     response = await get_llm_by_type(AGENT_LLM_MAP["coordinator"]).ainvoke(messages)
     if state["workflow_mode"] == "launch":
-        cache.restore_system_node(state["workflow_id"], COORDINATOR, state["user_id"])
+        cache.restore_system_node(
+            state["workflow_id"], COORDINATOR, state["user_id"])
 
     content = clean_response_tags(response.content)  # type: ignore
     if "handover_to_planner" in content:
         goto = "planner"
     if state["workflow_mode"] == "launch":
-        cache.restore_system_node(state["workflow_id"], "planner", state["user_id"])
+        cache.restore_system_node(
+            state["workflow_id"], "planner", state["user_id"])
     return Command(
         update={
             "messages": [

@@ -12,6 +12,12 @@ const searchBeforeInput = document.getElementById("searchBefore");
 const debugInput = document.getElementById("debugMode");
 const workflowIdInput = document.getElementById("workflowId");
 const messageInput = document.getElementById("message");
+let answerOutput = null;
+const chatConversation = document.getElementById("chatConversation");
+const newConversationBtn = document.getElementById("newConversationBtn");
+const conversationHistoryList = document.getElementById("conversationHistoryList");
+const conversationHistoryMeta = document.getElementById("conversationHistoryMeta");
+const clearChatHistoryBtn = document.getElementById("clearChatHistory");
 
 const runBtn = document.getElementById("runBtn");
 const stopBtn = document.getElementById("stopBtn");
@@ -80,6 +86,222 @@ const decisionTopAgentSummary = document.getElementById("decisionTopAgentSummary
 const decisionDetailTabs = document.getElementById("decisionDetailTabs");
 const decisionDetailPanel = document.getElementById("decisionDetailPanel");
 
+let chatMirrorController = null;
+
+const initializeChatPanelLayout = () => {
+  const runPanel = document.getElementById("panel-run");
+  const configSlot = document.getElementById("chatConfigSlot");
+  const historySlot = document.getElementById("chatHistorySlot");
+  const workspaceSlot = document.getElementById("chatWorkspaceSlot");
+  const configCard = runPanel?.querySelector(":scope > .panel-body > .form-card");
+  const historyCard = runPanel?.querySelector(":scope > .panel-body > .conversation-history-card");
+  const workspace = configCard?.querySelector(":scope > .chat-workspace");
+
+  if (!configCard || !historyCard || !workspace || !configSlot || !historySlot || !workspaceSlot) {
+    return null;
+  }
+
+  const configClone = configCard.cloneNode(true);
+  configClone.querySelector(".chat-workspace")?.remove();
+  configClone.classList.add("chat-config-card");
+  const configIdMap = new Map();
+  configClone.querySelectorAll("[id]").forEach((element) => {
+    const sourceId = element.id;
+    const mirrorId = `chatConfig-${sourceId}`;
+    configIdMap.set(sourceId, mirrorId);
+    element.dataset.sourceId = sourceId;
+    element.id = mirrorId;
+  });
+  configClone.querySelectorAll("label[for]").forEach((label) => {
+    const mirrorId = configIdMap.get(label.htmlFor);
+    if (mirrorId) label.htmlFor = mirrorId;
+  });
+  configSlot.appendChild(configClone);
+
+  const historyToolbar = document.createElement("div");
+  historyToolbar.className = "chat-history-toolbar";
+  const historyMeta = document.createElement("div");
+  historyMeta.className = "conversation-history-meta";
+  const historyClear = document.createElement("button");
+  historyClear.className = "ghost chat-history-clear";
+  historyClear.type = "button";
+  historyClear.textContent = "清空";
+  historyToolbar.append(historyMeta, historyClear);
+  const historyView = document.createElement("div");
+  historyView.id = "chatHistoryView";
+  historyView.className = "conversation-history-list";
+  historySlot.append(historyToolbar, historyView);
+
+  const workspaceView = document.createElement("div");
+  workspaceView.className = "chat-workspace";
+  const conversationView = document.createElement("div");
+  conversationView.id = "chatConversationView";
+  conversationView.className = "chat-conversation chat-conversation-view";
+  conversationView.setAttribute("aria-live", "polite");
+  const composer = document.createElement("div");
+  composer.className = "chat-composer chat-mirror-composer";
+  const newButton = document.createElement("button");
+  newButton.id = "chatNewConversationBtn";
+  newButton.className = "chat-new";
+  newButton.type = "button";
+  newButton.title = "New conversation";
+  newButton.setAttribute("aria-label", "Start a new conversation");
+  newButton.innerHTML = '<span aria-hidden="true">+</span>';
+  const chatMessage = document.createElement("textarea");
+  chatMessage.id = "chatMessage";
+  chatMessage.rows = 2;
+  chatMessage.placeholder = "输入消息...";
+  const chatStop = document.createElement("button");
+  chatStop.id = "chatStopBtn";
+  chatStop.className = "chat-submit chat-stop";
+  chatStop.type = "button";
+  chatStop.title = "Stop";
+  chatStop.setAttribute("aria-label", "Stop task");
+  chatStop.innerHTML = '<span aria-hidden="true">&#9632;</span>';
+  const chatRun = document.createElement("button");
+  chatRun.id = "chatRunBtn";
+  chatRun.className = "chat-submit chat-send";
+  chatRun.type = "button";
+  chatRun.title = "Send";
+  chatRun.setAttribute("aria-label", "Send message");
+  chatRun.innerHTML = '<span aria-hidden="true">&#8593;</span>';
+  composer.append(newButton, chatMessage, chatStop, chatRun);
+  workspaceView.append(conversationView, composer);
+  workspaceSlot.appendChild(workspaceView);
+
+  const stripCloneIds = (root) => {
+    if (root.removeAttribute) root.removeAttribute("id");
+    root.querySelectorAll?.("[id]").forEach((element) => element.removeAttribute("id"));
+    root.querySelectorAll?.("[aria-live]").forEach((element) => element.removeAttribute("aria-live"));
+    return root;
+  };
+
+  const resizeMirrorMessage = () => {
+    chatMessage.style.height = "auto";
+    chatMessage.style.height = `${Math.min(chatMessage.scrollHeight, 160)}px`;
+  };
+
+  const syncConfig = () => {
+    configClone.querySelectorAll("[data-source-id]").forEach((mirror) => {
+      const source = document.getElementById(mirror.dataset.sourceId);
+      if (!source) return;
+      if (mirror instanceof HTMLInputElement && mirror.type === "checkbox") {
+        mirror.checked = source.checked;
+      } else if ("value" in mirror && "value" in source) {
+        mirror.value = source.value;
+      }
+      if ("disabled" in mirror && "disabled" in source) mirror.disabled = source.disabled;
+    });
+  };
+
+  let mirrorFrame = null;
+  const sync = () => {
+    mirrorFrame = null;
+    syncConfig();
+    const conversationClones = Array.from(chatConversation.childNodes).map((node) =>
+      stripCloneIds(node.cloneNode(true))
+    );
+    conversationView.replaceChildren(...conversationClones);
+    conversationView.scrollTop = conversationView.scrollHeight;
+    const historyClones = Array.from(conversationHistoryList.childNodes).map((node) =>
+      stripCloneIds(node.cloneNode(true))
+    );
+    historyView.replaceChildren(...historyClones);
+    historyMeta.textContent = conversationHistoryMeta.textContent;
+    historyClear.disabled = clearChatHistoryBtn.disabled;
+    newButton.disabled = newConversationBtn?.disabled || false;
+    chatRun.disabled = runBtn.disabled;
+    chatStop.disabled = stopBtn.disabled;
+    chatRun.style.display = runBtn.disabled ? "none" : "";
+    chatStop.style.display = stopBtn.disabled ? "none" : "";
+  };
+  const schedule = () => {
+    if (mirrorFrame !== null) return;
+    mirrorFrame = requestAnimationFrame(sync);
+  };
+
+  configClone.querySelectorAll("[data-source-id]").forEach((mirror) => {
+    const source = document.getElementById(mirror.dataset.sourceId);
+    if (!source || !("value" in mirror)) return;
+    const forward = () => {
+      if (mirror instanceof HTMLInputElement && mirror.type === "checkbox") {
+        source.checked = mirror.checked;
+      } else {
+        source.value = mirror.value;
+      }
+      source.dispatchEvent(new Event("input", { bubbles: true }));
+      source.dispatchEvent(new Event("change", { bubbles: true }));
+      schedule();
+    };
+    mirror.addEventListener("input", forward);
+    mirror.addEventListener("change", forward);
+    source.addEventListener("input", schedule);
+    source.addEventListener("change", schedule);
+  });
+
+  chatMessage.addEventListener("input", () => {
+    messageInput.value = chatMessage.value;
+    messageInput.dispatchEvent(new Event("input", { bubbles: true }));
+    resizeMirrorMessage();
+  });
+  chatMessage.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      chatRun.click();
+    }
+  });
+  chatRun.addEventListener("click", () => {
+    messageInput.value = chatMessage.value;
+    messageInput.dispatchEvent(new Event("input", { bubbles: true }));
+    runBtn.click();
+    chatMessage.value = "";
+    resizeMirrorMessage();
+    schedule();
+  });
+  chatStop.addEventListener("click", () => stopBtn.click());
+  newButton.addEventListener("click", () => {
+    newConversationBtn?.click();
+    chatMessage.value = "";
+    resizeMirrorMessage();
+    schedule();
+  });
+  historyClear.addEventListener("click", () => clearChatHistoryBtn.click());
+  historyView.addEventListener("click", (event) => {
+    const item = event.target.closest(".conversation-history-item");
+    if (!item) return;
+    const index = Array.from(historyView.querySelectorAll(".conversation-history-item")).indexOf(item);
+    conversationHistoryList.querySelectorAll(".conversation-history-item")[index]?.click();
+    chatMessage.value = messageInput.value;
+    resizeMirrorMessage();
+    chatMessage.focus();
+  });
+  conversationView.addEventListener("input", (event) => {
+    if (!event.target.matches(".chat-plan-revision textarea")) return;
+    const sourceInput = chatConversation.querySelector("#answer .chat-plan-revision textarea");
+    if (sourceInput) sourceInput.value = event.target.value;
+  });
+  conversationView.addEventListener("click", (event) => {
+    const button = event.target.closest("button");
+    if (!button) return;
+    const actions = [
+      "chat-plan-confirm", "chat-plan-modify", "chat-plan-revision-apply", "chat-plan-revision-cancel",
+    ];
+    const action = actions.find((className) => button.classList.contains(className));
+    if (action) chatConversation.querySelector(`#answer .${action}`)?.click();
+    schedule();
+  });
+
+  const observerOptions = { childList: true, subtree: true, characterData: true, attributes: true };
+  new MutationObserver(schedule).observe(chatConversation, observerOptions);
+  new MutationObserver(schedule).observe(conversationHistoryList, observerOptions);
+  new MutationObserver(schedule).observe(workspace, observerOptions);
+  sync();
+  return { sync, schedule };
+};
+
+chatMirrorController = initializeChatPanelLayout();
+const scheduleChatMirror = () => chatMirrorController?.schedule();
+
 let currentAbortController = null;
 let planningOutputBlocks = new Map();
 let executionOutputBlocks = new Map();
@@ -117,14 +339,678 @@ let instructionHistory = [];
 let originalUserQuery = "";
 let currentRunContext = null;
 let executionInProgress = false;
+let currentRunHasError = false;
+let answerSyncFrame = null;
+let currentChatLifecycle = null;
+let activeConversationUserId = userIdInput.value.trim();
+let activeConversationMessages = [];
+let activeConversationTranscript = [];
+let activeConversationId = null;
+let activeConversationCreatedAt = null;
+let coordinatorBuffer = "";
+let clarificationPending = false;
+let coordinatorResponseHandled = false;
+let latestRoutingDecision = null;
 let runtimeCanRun = false;
 let workflowsPage = 1;
 let workflowsPageSize = 5;
 let workflowsTotal = 0;
 let workflowsTotalPages = 0;
 const PLANNER_ONLY_TIMEOUT_MS = 50000;
+const CHAT_HISTORY_LIMIT = 10;
+const CHAT_HISTORY_KEY_PREFIX = "cooragent.conversations.v2";
+const LEGACY_CHAT_HISTORY_KEY_PREFIX = "cooragent.chatHistory.v1";
+const ACTIVE_CONVERSATION_LIMIT = 12;
+const CONVERSATION_TRANSCRIPT_LIMIT = 100;
+const CONVERSATION_MESSAGE_CHAR_LIMIT = 12000;
 
 mermaid.initialize({ startOnLoad: false, theme: "default" });
+
+const scrollChatToLatest = () => {
+  if (!chatConversation) return;
+  requestAnimationFrame(() => {
+    chatConversation.scrollTop = chatConversation.scrollHeight;
+    requestAnimationFrame(() => {
+      chatConversation.scrollTop = chatConversation.scrollHeight;
+    });
+  });
+};
+
+const ensureChatLifecycle = () => {
+  if (!answerOutput) return null;
+  if (currentChatLifecycle?.answerElement === answerOutput) return currentChatLifecycle;
+
+  answerOutput.replaceChildren();
+  answerOutput.classList.remove("is-empty");
+  answerOutput.removeAttribute("data-empty-text");
+
+  const root = document.createElement("div");
+  root.className = "chat-task-lifecycle";
+
+  const planSection = document.createElement("section");
+  planSection.className = "chat-lifecycle-section chat-plan-card hidden";
+  const planTitle = document.createElement("h4");
+  planTitle.textContent = "计划卡片";
+  const planContent = document.createElement("div");
+  planContent.className = "chat-plan-content";
+  const planActions = document.createElement("div");
+  planActions.className = "chat-plan-actions hidden";
+  const confirmPlanButton = document.createElement("button");
+  confirmPlanButton.className = "chat-plan-confirm";
+  confirmPlanButton.type = "button";
+  confirmPlanButton.textContent = "确认执行";
+  const modifyPlanButton = document.createElement("button");
+  modifyPlanButton.className = "chat-plan-modify";
+  modifyPlanButton.type = "button";
+  modifyPlanButton.textContent = "修改计划";
+  planActions.append(confirmPlanButton, modifyPlanButton);
+
+  const revisionForm = document.createElement("div");
+  revisionForm.className = "chat-plan-revision hidden";
+  const revisionLabel = document.createElement("label");
+  revisionLabel.textContent = "请输入计划修改要求";
+  const revisionInput = document.createElement("textarea");
+  revisionInput.rows = 2;
+  revisionInput.placeholder = "例如：删除第二步，只保留请假记录查询";
+  revisionLabel.appendChild(revisionInput);
+  const revisionActions = document.createElement("div");
+  revisionActions.className = "chat-plan-revision-actions";
+  const applyRevisionButton = document.createElement("button");
+  applyRevisionButton.className = "chat-plan-revision-apply";
+  applyRevisionButton.type = "button";
+  applyRevisionButton.textContent = "应用修改";
+  const cancelRevisionButton = document.createElement("button");
+  cancelRevisionButton.className = "chat-plan-revision-cancel";
+  cancelRevisionButton.type = "button";
+  cancelRevisionButton.textContent = "取消";
+  const revisionHint = document.createElement("div");
+  revisionHint.className = "chat-plan-revision-hint";
+  revisionActions.append(applyRevisionButton, cancelRevisionButton);
+  revisionForm.append(revisionLabel, revisionActions, revisionHint);
+  planSection.append(planTitle, planContent, planActions, revisionForm);
+
+  const progressSection = document.createElement("section");
+  progressSection.className = "chat-lifecycle-section chat-execution-progress hidden";
+  const progressHeader = document.createElement("div");
+  progressHeader.className = "chat-lifecycle-header";
+  const progressTitle = document.createElement("h4");
+  progressTitle.textContent = "执行进度";
+  const progressBadge = document.createElement("span");
+  progressBadge.className = "chat-progress-badge";
+  progressHeader.append(progressTitle, progressBadge);
+  const progressTrack = document.createElement("div");
+  progressTrack.className = "chat-progress-track";
+  const progressFill = document.createElement("span");
+  progressTrack.appendChild(progressFill);
+  const progressDetail = document.createElement("div");
+  progressDetail.className = "chat-progress-detail";
+  progressSection.append(progressHeader, progressTrack, progressDetail);
+
+  const resultSection = document.createElement("section");
+  resultSection.className = "chat-lifecycle-section chat-final-result hidden";
+  const resultTitle = document.createElement("h4");
+  resultTitle.textContent = "最终结果";
+  const resultContent = document.createElement("div");
+  resultContent.className = "chat-final-result-content";
+  resultSection.append(resultTitle, resultContent);
+
+  root.append(planSection, progressSection, resultSection);
+  answerOutput.appendChild(root);
+  currentChatLifecycle = {
+    answerElement: answerOutput,
+    planSection,
+    planContent,
+    planActions,
+    confirmPlanButton,
+    modifyPlanButton,
+    revisionForm,
+    revisionInput,
+    applyRevisionButton,
+    cancelRevisionButton,
+    revisionHint,
+    progressSection,
+    progressBadge,
+    progressFill,
+    progressDetail,
+    resultSection,
+    resultTitle,
+    resultContent,
+  };
+  confirmPlanButton.addEventListener("click", confirmChatPlanExecution);
+  modifyPlanButton.addEventListener("click", () => {
+    revisionForm.classList.remove("hidden");
+    revisionHint.textContent = "";
+    revisionInput.focus();
+    scrollChatToLatest();
+  });
+  cancelRevisionButton.addEventListener("click", () => {
+    revisionForm.classList.add("hidden");
+    revisionHint.textContent = "";
+  });
+  applyRevisionButton.addEventListener("click", applyChatPlanRevision);
+  return currentChatLifecycle;
+};
+
+const renderChatPlanCard = (steps) => {
+  if (!Array.isArray(steps) || !steps.length || !answerOutput) return;
+  const lifecycle = ensureChatLifecycle();
+  if (!lifecycle) return;
+  lifecycle.planSection.classList.remove("hidden");
+  lifecycle.planActions.classList.remove("hidden");
+  lifecycle.confirmPlanButton.textContent = "确认执行";
+  const planBusy = executionInProgress || plannerOnlyMode || Boolean(currentAbortController);
+  lifecycle.confirmPlanButton.disabled = planBusy;
+  lifecycle.modifyPlanButton.disabled = planBusy;
+  lifecycle.planContent.replaceChildren();
+  const list = document.createElement("ol");
+  list.className = "chat-plan-list";
+  steps.forEach((step) => {
+    const item = document.createElement("li");
+    const title = document.createElement("div");
+    title.className = "chat-plan-step-title";
+    title.textContent = step?.title || step?.agent_name || "未命名步骤";
+    const description = document.createElement("div");
+    description.className = "chat-plan-step-description";
+    description.textContent = step?.description || "";
+    item.append(title, description);
+    list.appendChild(item);
+  });
+  lifecycle.planContent.appendChild(list);
+  scrollChatToLatest();
+};
+
+const setChatPlanActionsDisabled = (disabled) => {
+  if (!currentChatLifecycle) return;
+  currentChatLifecycle.confirmPlanButton.disabled = disabled;
+  currentChatLifecycle.modifyPlanButton.disabled = disabled;
+  currentChatLifecycle.applyRevisionButton.disabled = disabled;
+  currentChatLifecycle.cancelRevisionButton.disabled = disabled;
+};
+
+async function confirmChatPlanExecution() {
+  if (executionInProgress || currentAbortController || !planSteps.length) return;
+  const lifecycle = currentChatLifecycle;
+  if (lifecycle) {
+    lifecycle.revisionForm.classList.add("hidden");
+    lifecycle.confirmPlanButton.textContent = "执行中...";
+  }
+  setChatPlanActionsDisabled(true);
+  await runExecution();
+  if (!lifecycle) return;
+  if (currentRunHasError) {
+    lifecycle.confirmPlanButton.textContent = "重新执行";
+    setChatPlanActionsDisabled(false);
+  } else {
+    lifecycle.confirmPlanButton.textContent = "已执行";
+    lifecycle.confirmPlanButton.disabled = true;
+    lifecycle.modifyPlanButton.disabled = true;
+  }
+}
+
+async function applyChatPlanRevision() {
+  const lifecycle = currentChatLifecycle;
+  if (!lifecycle || executionInProgress || currentAbortController) return;
+  const instruction = lifecycle.revisionInput.value.trim();
+  if (!instruction) {
+    lifecycle.revisionHint.textContent = "请输入修改要求。";
+    lifecycle.revisionInput.focus();
+    return;
+  }
+  lifecycle.revisionHint.textContent = "正在重新生成计划...";
+  setChatPlanActionsDisabled(true);
+  runBtn.disabled = true;
+  userIdInput.disabled = true;
+  if (newConversationBtn) newConversationBtn.disabled = true;
+  await runPlannerUpdate(instruction, true);
+  runBtn.disabled = false;
+  userIdInput.disabled = false;
+  if (newConversationBtn) newConversationBtn.disabled = false;
+  if (plannerOnlyStepsUpdated) {
+    lifecycle.revisionInput.value = "";
+    lifecycle.revisionHint.textContent = "计划已更新，请确认执行。";
+    lifecycle.revisionForm.classList.add("hidden");
+    renderChatPlanCard(planSteps);
+    setStatus("Plan ready", true);
+  } else {
+    lifecycle.revisionHint.textContent = "计划修改失败，请调整修改要求后重试。";
+  }
+  setChatPlanActionsDisabled(false);
+  scrollChatToLatest();
+}
+
+const updateChatExecutionProgress = (status, detail = "") => {
+  if (!answerOutput) return;
+  const lifecycle = ensureChatLifecycle();
+  if (!lifecycle) return;
+  const total = Math.max(planSteps.length, executionStepCards.length, 1);
+  const completed = executionStepCards.filter((card) => card.status === "done").length;
+  const hasError = executionStepCards.some((card) => card.status === "error");
+  const current = status === "completed" ? total : Math.min(completed + (currentStepCard ? 1 : 0), total);
+  const percentage = status === "completed" ? 100 : Math.round((completed / total) * 100);
+  lifecycle.progressSection.classList.remove("hidden", "running", "completed", "error");
+  lifecycle.progressSection.classList.add(hasError || status === "error" ? "error" : status);
+  lifecycle.progressBadge.textContent = status === "completed"
+    ? "已完成"
+    : (hasError || status === "error" ? "执行失败" : "执行中");
+  lifecycle.progressFill.style.width = `${Math.max(0, Math.min(100, percentage))}%`;
+  lifecycle.progressDetail.textContent = detail || (
+    status === "completed" ? `已完成 ${total} 个步骤` : `正在执行第 ${Math.max(current, 1)}/${total} 个步骤`
+  );
+  scrollChatToLatest();
+};
+
+const syncAnswerFromExecutionLog = () => {
+  if (!answerOutput || !executionOutput || answerSyncFrame !== null) return;
+  answerSyncFrame = requestAnimationFrame(() => {
+    const lifecycle = ensureChatLifecycle();
+    if (!lifecycle || !executionOutput.childNodes.length) {
+      answerSyncFrame = null;
+      return;
+    }
+    const clonedNodes = Array.from(executionOutput.childNodes).map((node) => node.cloneNode(true));
+    lifecycle.resultSection.classList.remove("hidden");
+    lifecycle.resultTitle.textContent = executionInProgress ? "执行输出" : "最终结果";
+    lifecycle.resultContent.replaceChildren(...clonedNodes);
+    scrollChatToLatest();
+    answerSyncFrame = null;
+  });
+};
+
+if (executionOutput) {
+  new MutationObserver(syncAnswerFromExecutionLog).observe(executionOutput, {
+    childList: true,
+    subtree: true,
+    characterData: true,
+    attributes: true,
+    attributeFilter: ["class", "hidden", "style"],
+  });
+}
+
+const resizeMessageInput = () => {
+  if (!messageInput) return;
+  messageInput.style.height = "auto";
+  messageInput.style.height = `${Math.min(messageInput.scrollHeight, 160)}px`;
+};
+
+const showCurrentChatTurn = (message) => {
+  if (!chatConversation) return;
+  setChatPlanActionsDisabled(true);
+  if (answerOutput) {
+    answerOutput.removeAttribute("id");
+    answerOutput.removeAttribute("aria-live");
+  }
+  const userTurn = document.createElement("div");
+  userTurn.className = "chat-turn chat-turn-user";
+  const userBubble = document.createElement("div");
+  userBubble.className = "chat-user-bubble";
+  userBubble.textContent = message;
+  userTurn.appendChild(userBubble);
+  const assistantTurn = document.createElement("div");
+  assistantTurn.className = "chat-turn chat-turn-assistant";
+  const avatar = document.createElement("div");
+  avatar.className = "chat-assistant-avatar";
+  avatar.setAttribute("aria-hidden", "true");
+  avatar.textContent = "CA";
+  const assistantContent = document.createElement("div");
+  assistantContent.className = "chat-assistant-content";
+  const assistantName = document.createElement("div");
+  assistantName.className = "chat-assistant-name";
+  assistantName.textContent = "Assistant";
+  answerOutput = document.createElement("div");
+  currentChatLifecycle = null;
+  answerOutput.id = "answer";
+  answerOutput.className = "answer-output is-empty";
+  answerOutput.setAttribute("role", "region");
+  answerOutput.setAttribute("aria-label", "Assistant answer");
+  answerOutput.setAttribute("aria-live", "polite");
+  answerOutput.dataset.emptyText = "正在处理...";
+  answerOutput.tabIndex = 0;
+  assistantContent.append(assistantName, answerOutput);
+  assistantTurn.append(avatar, assistantContent);
+  chatConversation.append(userTurn, assistantTurn);
+  scrollChatToLatest();
+};
+
+const setEmptyAnswerMessage = (message) => {
+  if (answerOutput?.classList.contains("is-empty")) answerOutput.dataset.emptyText = message;
+};
+
+const showAssistantText = (message) => {
+  const normalized = String(message || "").trim();
+  if (!answerOutput || !normalized) return;
+  answerOutput.replaceChildren();
+  answerOutput.classList.remove("is-empty");
+  answerOutput.removeAttribute("data-empty-text");
+  const text = document.createElement("div");
+  text.className = "assistant-text-answer";
+  text.textContent = normalized;
+  answerOutput.appendChild(text);
+  currentChatLifecycle = null;
+  scrollChatToLatest();
+};
+
+const parseClarification = (content) => {
+  const match = String(content || "").match(/^\s*(?:\[?CLARIFY\]?)\s*[:：]\s*([\s\S]+)$/i);
+  return match ? match[1].trim() : "";
+};
+
+const buildRoutingClarification = (eventData) => {
+  const profile = eventData?.task_profile || {};
+  const route = eventData?.routing_decision || {};
+  if ((route.decision || "").toUpperCase() === "DISPATCH") return "";
+  const missing = Array.isArray(profile.missing_fields) ? profile.missing_fields.map(String) : [];
+  const normalized = missing.join(" ").toLowerCase();
+  if (/employee|person|name|员工|姓名/.test(normalized)) {
+    const taskText = `${profile.intent || ""} ${profile.task_type || ""} ${profile.action || ""}`.toLowerCase();
+    return /query|search|read|查询|检索/.test(taskText) ? "请问需要查询哪位员工？" : "请问需要处理哪位员工？";
+  }
+  if (/action|operation|事务|类型|意图/.test(normalized) || !profile.intent) {
+    return "请问您希望处理员工的哪类事务？";
+  }
+  if (missing.length) return `请补充以下信息：${missing.join("、")}。`;
+  return "请补充任务目标、处理对象和期望结果。";
+};
+
+const appendActiveConversationMessage = (role, content, metadata = {}) => {
+  const normalized = String(content || "").trim();
+  if (!normalized) return;
+  const message = { role, content: normalized.slice(0, CONVERSATION_MESSAGE_CHAR_LIMIT) };
+  activeConversationMessages.push(message);
+  activeConversationMessages = activeConversationMessages.slice(-ACTIVE_CONVERSATION_LIMIT);
+  const transcriptMessage = { ...message };
+  if (Array.isArray(metadata.results) && metadata.results.length) {
+    transcriptMessage.results = metadata.results.map((result) => ({
+      agentName: String(result.agentName || "assistant"),
+      content: String(result.content || "").slice(0, CONVERSATION_MESSAGE_CHAR_LIMIT),
+    }));
+  }
+  activeConversationTranscript.push(transcriptMessage);
+  activeConversationTranscript = activeConversationTranscript.slice(-CONVERSATION_TRANSCRIPT_LIMIT);
+  saveActiveConversation();
+};
+
+const captureAssistantConversationContext = () => {
+  const structuredResults = executionStepCards
+    .map((card) => {
+      const content = String(card.content || "").trim();
+      return content ? { agentName: card.agentName || "assistant", content } : null;
+    })
+    .filter(Boolean);
+  const cardResults = structuredResults.map((result) => `[${result.agentName}]\n${result.content}`);
+  const fallback = executionOutput ? executionOutput.innerText.trim() : "";
+  appendActiveConversationMessage(
+    "assistant",
+    cardResults.join("\n\n") || fallback,
+    { results: structuredResults }
+  );
+};
+
+const getChatHistoryKey = (userId) => `${CHAT_HISTORY_KEY_PREFIX}:${encodeURIComponent(userId)}`;
+const getLegacyChatHistoryKey = (userId) => `${LEGACY_CHAT_HISTORY_KEY_PREFIX}:${encodeURIComponent(userId)}`;
+
+const normalizeStoredConversation = (conversation) => {
+  if (!conversation || typeof conversation !== "object") return null;
+  const messages = Array.isArray(conversation.messages)
+    ? conversation.messages
+      .filter((message) => message && ["user", "assistant"].includes(message.role) && String(message.content || "").trim())
+      .map((message) => {
+        const normalizedMessage = {
+          role: message.role,
+          content: String(message.content).slice(0, CONVERSATION_MESSAGE_CHAR_LIMIT),
+        };
+        if (Array.isArray(message.results)) {
+          normalizedMessage.results = message.results
+            .filter((result) => result && String(result.content || "").trim())
+            .map((result) => ({
+              agentName: String(result.agentName || "assistant"),
+              content: String(result.content).slice(0, CONVERSATION_MESSAGE_CHAR_LIMIT),
+            }));
+        }
+        return normalizedMessage;
+      })
+      .slice(-CONVERSATION_TRANSCRIPT_LIMIT)
+    : [];
+  if (!messages.length) return null;
+  const firstUserMessage = messages.find((message) => message.role === "user")?.content || "新对话";
+  return {
+    id: String(conversation.id || `${Date.now()}-${Math.random().toString(16).slice(2)}`),
+    title: String(conversation.title || firstUserMessage).trim().slice(0, 48),
+    createdAt: conversation.createdAt || new Date().toISOString(),
+    updatedAt: conversation.updatedAt || conversation.createdAt || new Date().toISOString(),
+    workflowId: String(conversation.workflowId || ""),
+    messages,
+  };
+};
+
+const persistChatHistory = (userId, conversations) => {
+  if (!userId) return false;
+  try {
+    localStorage.setItem(getChatHistoryKey(userId), JSON.stringify(conversations.slice(0, CHAT_HISTORY_LIMIT)));
+    return true;
+  } catch (err) {
+    console.warn("Failed to save conversations:", err);
+    return false;
+  }
+};
+
+const loadChatHistory = (userId) => {
+  if (!userId) return [];
+  try {
+    const stored = JSON.parse(localStorage.getItem(getChatHistoryKey(userId)) || "[]");
+    const conversations = Array.isArray(stored)
+      ? stored.map(normalizeStoredConversation).filter(Boolean).slice(0, CHAT_HISTORY_LIMIT)
+      : [];
+    if (conversations.length) return conversations;
+    const legacy = JSON.parse(localStorage.getItem(getLegacyChatHistoryKey(userId)) || "[]");
+    if (!Array.isArray(legacy) || !legacy.length) return [];
+    const migrated = legacy
+      .filter((entry) => entry && String(entry.content || "").trim())
+      .slice(0, CHAT_HISTORY_LIMIT)
+      .map((entry) => normalizeStoredConversation({
+        id: entry.id,
+        title: entry.content,
+        createdAt: entry.createdAt,
+        updatedAt: entry.createdAt,
+        messages: [{ role: "user", content: entry.content }],
+      }))
+      .filter(Boolean);
+    persistChatHistory(userId, migrated);
+    return migrated;
+  } catch (err) {
+    console.warn("Failed to load conversations:", err);
+    return [];
+  }
+};
+
+const saveActiveConversation = () => {
+  const userId = activeConversationUserId || userIdInput.value.trim();
+  const firstUserMessage = activeConversationTranscript.find((message) => message.role === "user")?.content;
+  if (!userId || !firstUserMessage || !activeConversationTranscript.length) return;
+  const now = new Date().toISOString();
+  if (!activeConversationId) {
+    activeConversationId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    activeConversationCreatedAt = now;
+  }
+  const conversations = loadChatHistory(userId).filter((item) => item.id !== activeConversationId);
+  conversations.unshift({
+    id: activeConversationId,
+    title: firstUserMessage.trim().slice(0, 48),
+    createdAt: activeConversationCreatedAt,
+    updatedAt: now,
+    workflowId: workflowIdInput?.value.trim() || "",
+    messages: activeConversationTranscript.map((message) => ({ ...message })),
+  });
+  persistChatHistory(userId, conversations);
+  renderChatHistory();
+};
+
+const formatConversationTime = (value) => {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return new Intl.DateTimeFormat("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }).format(date);
+};
+
+const renderChatHistory = () => {
+  if (!conversationHistoryList || !conversationHistoryMeta || !clearChatHistoryBtn) return;
+  const userId = userIdInput.value.trim();
+  conversationHistoryList.textContent = "";
+  if (!userId) {
+    conversationHistoryMeta.textContent = "输入 User ID 后显示对应记录";
+    clearChatHistoryBtn.disabled = true;
+    scheduleChatMirror();
+    return;
+  }
+  const conversations = loadChatHistory(userId);
+  conversationHistoryMeta.textContent = `${userId} · ${conversations.length}/${CHAT_HISTORY_LIMIT} 个会话`;
+  clearChatHistoryBtn.disabled = conversations.length === 0;
+  if (!conversations.length) {
+    const empty = document.createElement("div");
+    empty.className = "conversation-history-empty";
+    empty.textContent = "暂无对话";
+    conversationHistoryList.appendChild(empty);
+    scheduleChatMirror();
+    return;
+  }
+  conversations.forEach((conversation) => {
+    const item = document.createElement("button");
+    item.type = "button";
+    item.className = "conversation-history-item";
+    if (conversation.id === activeConversationId) item.classList.add("active");
+    const content = document.createElement("span");
+    content.className = "conversation-history-content";
+    content.textContent = conversation.title;
+    const timestamp = document.createElement("time");
+    timestamp.dateTime = conversation.updatedAt;
+    timestamp.textContent = formatConversationTime(conversation.updatedAt);
+    item.append(content, timestamp);
+    item.addEventListener("click", () => loadConversation(conversation));
+    conversationHistoryList.appendChild(item);
+  });
+  scheduleChatMirror();
+};
+
+const parseHistoricalAgentResults = (content) => {
+  const text = String(content || "");
+  const markerPattern = /^\[([^\]\r\n{}\[\]",]+)\]\r?\n/gm;
+  const markers = Array.from(text.matchAll(markerPattern));
+  if (!markers.length) return [];
+  return markers.map((marker, index) => {
+    const contentStart = marker.index + marker[0].length;
+    const contentEnd = markers[index + 1]?.index ?? text.length;
+    return { agentName: marker[1], content: text.slice(contentStart, contentEnd).trim() };
+  }).filter((result) => result.content);
+};
+
+const renderLoadedAssistantMessage = (message) => {
+  const content = String(message?.content || "");
+  const results = Array.isArray(message?.results) && message.results.length
+    ? message.results
+    : parseHistoricalAgentResults(content);
+  if (!results.length || !answerOutput) {
+    showAssistantText(content);
+    return;
+  }
+  answerOutput.replaceChildren();
+  answerOutput.classList.remove("is-empty");
+  answerOutput.removeAttribute("data-empty-text");
+  const fragment = document.createDocumentFragment();
+  results.forEach((result, index) => {
+    renderStepCardInto({
+      id: index + 1,
+      total: results.length,
+      agentName: result.agentName,
+      displayName: result.agentName,
+      status: "done",
+      content: result.content,
+      startTime: null,
+      endTime: null,
+      summary: "历史执行结果",
+    }, fragment);
+  });
+  answerOutput.appendChild(fragment);
+  currentChatLifecycle = null;
+};
+
+const renderLoadedConversation = (messages) => {
+  chatConversation.replaceChildren();
+  answerOutput = null;
+  currentChatLifecycle = null;
+  messages.forEach((message) => {
+    if (message.role === "user") {
+      showCurrentChatTurn(message.content);
+    } else if (message.role === "assistant" && answerOutput) {
+      renderLoadedAssistantMessage(message);
+    }
+  });
+  scrollChatToLatest();
+};
+
+const loadConversation = (conversation) => {
+  if (currentAbortController || executionInProgress || !conversation) return false;
+  const normalized = normalizeStoredConversation(conversation);
+  if (!normalized) return false;
+  activeConversationUserId = userIdInput.value.trim();
+  activeConversationId = normalized.id;
+  activeConversationCreatedAt = normalized.createdAt;
+  activeConversationTranscript = normalized.messages.map((message) => ({ ...message }));
+  activeConversationMessages = activeConversationTranscript
+    .slice(-ACTIVE_CONVERSATION_LIMIT)
+    .map((message) => ({ role: message.role, content: message.content }));
+  instructionHistory = activeConversationTranscript
+    .filter((message) => message.role === "user")
+    .map((message) => message.content)
+    .slice(-CHAT_HISTORY_LIMIT);
+  originalUserQuery = instructionHistory[0] || "";
+  workflowIdInput.value = normalized.workflowId || "";
+  messageInput.value = "";
+  resizeMessageInput();
+  clearOutput();
+  resetSummary();
+  resetPlan();
+  renderLoadedConversation(activeConversationTranscript);
+  setStatus("Conversation loaded", true);
+  renderChatHistory();
+  return true;
+};
+
+const clearChatHistory = () => {
+  const userId = userIdInput.value.trim();
+  if (!userId || !loadChatHistory(userId).length) return;
+  if (!window.confirm(`确定清空用户 ${userId} 的最近对话吗？`)) return;
+  localStorage.removeItem(getChatHistoryKey(userId));
+  localStorage.removeItem(getLegacyChatHistoryKey(userId));
+  resetActiveConversation(userId);
+  renderChatHistory();
+};
+
+const resetActiveConversation = (userId = userIdInput.value.trim()) => {
+  if (currentAbortController || executionInProgress) return false;
+  activeConversationUserId = userId;
+  activeConversationMessages = [];
+  activeConversationTranscript = [];
+  activeConversationId = null;
+  activeConversationCreatedAt = null;
+  instructionHistory = [];
+  originalUserQuery = "";
+  coordinatorBuffer = "";
+  clarificationPending = false;
+  coordinatorResponseHandled = false;
+  latestRoutingDecision = null;
+  answerOutput = null;
+  currentChatLifecycle = null;
+  chatConversation?.replaceChildren();
+  if (workflowIdInput) workflowIdInput.value = "";
+  if (messageInput) {
+    messageInput.value = "";
+    resizeMessageInput();
+  }
+  clearOutput();
+  resetSummary();
+  resetPlan();
+  setStatus("Ready", true);
+  renderChatHistory();
+  return true;
+};
 
 const updateWorkflowsPagination = () => {
   if (!workflowsPageInfo || !workflowsPrevPageBtn || !workflowsNextPageBtn) return;
@@ -489,6 +1375,7 @@ const renderPlanSummary = (steps) => {
 
   planSummary.appendChild(frag);
   showPlanHint(`Plan loaded: ${steps.length} step(s).`);
+  renderChatPlanCard(steps);
   updateConfirmExecuteState();
 };
 
@@ -693,6 +1580,7 @@ const runPlannerUpdate = async (instruction, appendHistory = true) => {
 const switchTab = (tabId) => {
   tabs.forEach((tab) => tab.classList.toggle("active", tab.dataset.tab === tabId));
   panels.forEach((panel) => panel.classList.toggle("active", panel.id === `panel-${tabId}`));
+  if (tabId === "chat") scheduleChatMirror();
 };
 
 tabs.forEach((tab) => {
@@ -722,6 +1610,7 @@ const createStepCard = (displayName, subAgentName) => {
   executionStepCards.push(card);
   currentStepCard = card;
   renderAllStepCards();
+  updateChatExecutionProgress("running", `正在执行第 ${card.id}/${Math.max(planSteps.length, card.id)} 个步骤：${card.agentName}`);
   if (autoScrollEnabled && executionOutput) {
     executionOutput.scrollTop = executionOutput.scrollHeight;
   }
@@ -750,6 +1639,7 @@ const finalizeStepCard = () => {
   currentStepCard.summary = generateStepSummary(currentStepCard);
   currentStepCard = null;
   renderAllStepCards();
+  updateChatExecutionProgress("running");
 };
 
 const errorStepCard = (errMsg) => {
@@ -763,6 +1653,7 @@ const errorStepCard = (errMsg) => {
     currentStepCard = null;
   }
   renderAllStepCards();
+  updateChatExecutionProgress("error", "执行过程中发生错误，请查看结果详情。");
 };
 
 const generateStepSummary = (card) => {
@@ -830,7 +1721,12 @@ const renderAllStepCards = () => {
 };
 
 const renderStepCardInto = (card, parent) => {
-  const total = planSteps.length > 0 ? planSteps.length : executionStepCards.length;
+  const total = Math.max(
+    Number(card.total) || 0,
+    planSteps.length,
+    executionStepCards.length,
+    Number(card.id) || 1
+  );
   const duration = card.endTime
     ? `${Math.round((card.endTime - card.startTime) / 1000)}s`
     : (card.status === "running" ? "..." : "");
@@ -1601,6 +2497,10 @@ const handleEvent = (eventName, payload) => {
   if (eventName === "messages") {
     const agentName = payload.agent_name || payload.data?.agent_name || payload.data?.tool || "assistant";
     const content = payload.data?.delta?.content || payload.data?.message || payload.raw || "";
+    if (typeof agentName === "string" && agentName.toLowerCase().includes("coordinator")) {
+      if (currentRunContext !== "executing") coordinatorBuffer += content;
+      return;
+    }
     if (typeof agentName === "string" && agentName.toLowerCase().includes("planner")) {
       refreshPlannerTimeout();
       plannerFinalMessageBuffer += content;
@@ -1649,6 +2549,7 @@ const handleEvent = (eventName, payload) => {
     return;
   }
   if (eventName === "routing_decision") {
+    latestRoutingDecision = payload.data || {};
     renderRoutingDecision(payload.data || {});
     return;
   }
@@ -1663,6 +2564,9 @@ const handleEvent = (eventName, payload) => {
       plannerBuffer = "";
       plannerFinalMessageBuffer = "";
       showPlanHint("Collecting plan output...");
+    }
+    if (typeof agentName === "string" && agentName.toLowerCase().includes("coordinator")) {
+      coordinatorBuffer = "";
     }
     if (!plannerOnlyMode) {
       const isExecAgent = currentRunContext === "executing" && agentName.includes("agent_proxy");
@@ -1688,6 +2592,22 @@ const handleEvent = (eventName, payload) => {
       }
       applyPlannerStepsFromBuffer(plannerBuffer, { finalize: true });
     }
+    if (typeof agentName === "string" && agentName.toLowerCase().includes("coordinator")) {
+      const response = coordinatorBuffer.trim();
+      const question = parseClarification(response);
+      if (question) {
+        clarificationPending = true;
+        coordinatorResponseHandled = true;
+        showAssistantText(question);
+        appendActiveConversationMessage("assistant", question);
+        setStatus("Waiting for reply", true);
+      } else if (response && !response.includes("handover_to_planner")) {
+        coordinatorResponseHandled = true;
+        showAssistantText(response);
+        appendActiveConversationMessage("assistant", response);
+        setStatus("Completed", true);
+      }
+    }
     if (!plannerOnlyMode) {
       const isExecAgent = currentRunContext === "executing" && agentName.includes("agent_proxy");
       if (isExecAgent) {
@@ -1699,6 +2619,7 @@ const handleEvent = (eventName, payload) => {
     return;
   }
   if (eventName === "permission_denied") {
+    currentRunHasError = true;
     const d = payload.data || {};
     const policyResult = d.policy_result || {};
     const scenarioFit = d.scenario_fit_result || {};
@@ -1743,6 +2664,7 @@ const handleEvent = (eventName, payload) => {
     return;
   }
   if (eventName === "workflow_error") {
+    currentRunHasError = true;
     const d = payload.data || {};
     const friendlyReason = d.reason || d.error || "Workflow could not continue.";
     const detail = d.error || friendlyReason;
@@ -1773,17 +2695,77 @@ const handleEvent = (eventName, payload) => {
     return;
   }
   if (eventName === "end_of_workflow") {
-    if (!plannerOnlyMode) {
-      showSummaryHint("Workflow completed.");
-      if (currentRunContext === "executing") {
-        finalizeStepCard();
+    const rawStatus = (payload.data && payload.data.status) || "";
+    const status = String(rawStatus).toUpperCase();
+    if (plannerOnlyMode) {
+      if (!plannerOnlyStepsUpdated) {
+        showPlanNlHint("Planner completed, but no executable steps were generated. Please refine the instruction and try again.", true);
+      }
+      return;
+    }
+    if (currentRunContext !== "executing" && !planSteps.length && !coordinatorResponseHandled) {
+      const question = buildRoutingClarification(latestRoutingDecision);
+      if (question) {
+        clarificationPending = true;
+        showAssistantText(question);
+        appendActiveConversationMessage("assistant", question);
+        showSummaryHint("Waiting for your reply.");
+        showPlanHint("More information is required before planning.");
+        setStatus("Waiting for reply", true);
+        return;
+      }
+    }
+    if (currentRunContext === "executing") {
+      finalizeStepCard();
+    }
+    switch (status) {
+      case "SUCCEEDED":
+        showSummaryHint("Workflow completed.");
+        if (currentRunContext === "executing") {
+          updateChatExecutionProgress("completed");
+          if (currentChatLifecycle) currentChatLifecycle.resultTitle.textContent = "最终结果";
+          setStatus("Completed", true);
+        }
         showPlanValidationHint("Execution completed. You can review the execution log.");
         showPlanHint("Plan execution completed.");
-      } else {
-        appendOutput("system", "\n[workflow] completed\n");
+        break;
+      case "PARTIAL_FAILED":
+        showSummaryHint("Workflow partially failed.", true);
+        showPlanValidationHint("Some steps failed. Review the execution log; you can recover from Task History.", true);
+        break;
+      case "FAILED":
+        showSummaryHint("Workflow failed.", true);
+        showPlanValidationHint("Execution failed. You can recover from Task History.", true);
+        if (payload.data && payload.data.error) {
+          appendOutput("system", `\n[workflow failed] ${payload.data.error}\n`);
+        }
+        break;
+      case "CLARIFY_REQUIRED": {
+        const qs = (payload.data && payload.data.clarifications || []).join("; ");
+        showSummaryHint("Clarification required.", true);
+        showPlanNlHint(qs ? `Clarification required: ${qs}` : "Clarification required before execution.", true);
+        break;
       }
-    } else if (!plannerOnlyStepsUpdated) {
-      showPlanNlHint("Planner completed, but no executable steps were generated. Please refine the instruction and try again.", true);
+      case "REJECTED":
+        showSummaryHint("Request rejected.", true);
+        showPlanValidationHint("The request was rejected by routing (no capable/authorized agent).", true);
+        break;
+      case "NEEDS_RECONCILIATION":
+        showSummaryHint("Needs reconciliation.", true);
+        showPlanValidationHint("A side effect may have completed but could not be confirmed. Manual reconciliation required; automatic retry is disabled.", true);
+        break;
+      default:
+        // Legacy publisher/while path emits no status -> treat as completed.
+        showSummaryHint("Workflow completed.");
+        if (currentRunContext === "executing") {
+          updateChatExecutionProgress("completed");
+          if (currentChatLifecycle) currentChatLifecycle.resultTitle.textContent = "最终结果";
+          setStatus("Completed", true);
+          showPlanValidationHint("Execution completed. You can review the execution log.");
+          showPlanHint("Plan execution completed.");
+        } else {
+          appendOutput("system", "\n[workflow] completed\n");
+        }
     }
     return;
   }
@@ -1794,6 +2776,7 @@ const handleEvent = (eventName, payload) => {
     return;
   }
   if (eventName === "error") {
+    currentRunHasError = true;
     if (!plannerOnlyMode) {
       showSummaryHint("Workflow error.", true);
       if (currentRunContext === "executing") {
@@ -1818,6 +2801,7 @@ const runWorkflow = async () => {
     readinessBanner?.scrollIntoView({ behavior: "smooth", block: "center" });
     return;
   }
+  if (runBtn.disabled || executionInProgress || currentAbortController) return;
   const userId = userIdInput.value.trim();
   if (!userId) {
     setStatus("User ID required", false);
@@ -1829,19 +2813,33 @@ const runWorkflow = async () => {
     return;
   }
 
+  if (activeConversationUserId !== userId) resetActiveConversation(userId);
+  activeConversationUserId = userId;
+  appendActiveConversationMessage("user", message);
+  showCurrentChatTurn(message);
+  messageInput.value = "";
+  resizeMessageInput();
+
   setStatus("Running", true);
   clearOutputPhase("planning");
   clearOutputPhase("executing");
   resetSummary();
   resetPlan();
-  instructionHistory = [message];
-  originalUserQuery = message;
+  coordinatorBuffer = "";
+  clarificationPending = false;
+  coordinatorResponseHandled = false;
+  latestRoutingDecision = null;
+  instructionHistory = [...instructionHistory, message].slice(-CHAT_HISTORY_LIMIT);
+  originalUserQuery = originalUserQuery || message;
   currentRunContext = "planning";
+  currentRunHasError = false;
   if (workflowIdInput) {
     workflowIdInput.value = "";
   }
   runBtn.disabled = true;
   stopBtn.disabled = false;
+  userIdInput.disabled = true;
+  if (newConversationBtn) newConversationBtn.disabled = true;
   if (confirmExecuteBtn) confirmExecuteBtn.disabled = true;
 
   const payload = {
@@ -1852,15 +2850,18 @@ const runWorkflow = async () => {
     instruction: message,
     instruction_history: instructionHistory,
     original_user_query: originalUserQuery,
-    messages: [{ role: "user", content: message }],
+    messages: activeConversationMessages.map((item) => ({ ...item })),
     debug: debugInput.checked,
     deep_thinking_mode: deepThinkingInput.checked,
     search_before_planning: searchBeforeInput.checked,
     coor_agents: selectedCoorAgents.size ? Array.from(selectedCoorAgents) : null,
     workflow_id: null,
+    session_id: activeConversationId,
+    memory_session_id: activeConversationId,
   };
 
   currentAbortController = new AbortController();
+  let planningStreamCompleted = false;
   try {
     const response = await fetch("/api/workflows/run", {
       method: "POST",
@@ -1883,15 +2884,36 @@ const runWorkflow = async () => {
       buffer += decoder.decode(value, { stream: true });
       buffer = parseSse(buffer, handleEvent);
     }
+    planningStreamCompleted = true;
   } catch (err) {
-    appendOutput("system", `\n[error] ${err.message || err}\n`);
-    setStatus("Error", false);
-    showSummaryHint("Workflow error.", true);
+    if (err.name !== "AbortError") {
+      currentRunHasError = true;
+      appendOutput("system", `\n[error] ${err.message || err}\n`);
+      setStatus("Error", false);
+      showSummaryHint("Workflow error.", true);
+    }
   } finally {
+    const planReady = planningStreamCompleted
+      && !currentRunHasError
+      && !clarificationPending
+      && !coordinatorResponseHandled
+      && planSteps.length > 0
+      && Boolean(workflowIdInput?.value.trim());
     currentRunContext = null;
-    runBtn.disabled = false;
     stopBtn.disabled = true;
     currentAbortController = null;
+    runBtn.disabled = false;
+    userIdInput.disabled = false;
+    if (newConversationBtn) newConversationBtn.disabled = false;
+    if (planReady) {
+      showPlanHint("Planning completed. Waiting for confirmation.");
+      showPlanValidationHint("Plan ready. Choose Confirm execution or Modify plan.");
+      setStatus("Plan ready", true);
+      setChatPlanActionsDisabled(false);
+    } else if (!clarificationPending && !coordinatorResponseHandled) {
+      setEmptyAnswerMessage("规划未生成可执行结果，请查看规划日志。");
+    }
+    if (clarificationPending) document.getElementById("chatMessage")?.focus();
     updateConfirmExecuteState();
   }
 };
@@ -1900,6 +2922,7 @@ const runExecution = async () => {
   const userId = userIdInput.value.trim();
   if (!userId) {
     setStatus("User ID required", false);
+    userIdInput.disabled = false;
     return;
   }
   const workflowId = workflowIdInput.value.trim();
@@ -1917,11 +2940,16 @@ const runExecution = async () => {
   resetSummary();
   currentRunContext = "executing";
   executionInProgress = true;
+  currentRunHasError = false;
+  setChatPlanActionsDisabled(true);
+  updateChatExecutionProgress("running", `准备执行 ${planSteps.length} 个计划步骤`);
   showPlanValidationHint("Execution is in progress. Please do not click repeatedly.");
   showPlanHint("Plan execution is in progress. Check the execution log for updates.");
   updateConfirmExecuteState();
   runBtn.disabled = true;
   stopBtn.disabled = false;
+  userIdInput.disabled = true;
+  if (newConversationBtn) newConversationBtn.disabled = true;
 
   const payload = {
     user_id: userId,
@@ -1931,15 +2959,21 @@ const runExecution = async () => {
     instruction: null,
     instruction_history: instructionHistory,
     original_user_query: originalUserQuery || instructionHistory[0] || "",
-    messages: [{ role: "user", content: "Confirm execution and proceed with the current plan." }],
+    messages: [
+      ...activeConversationMessages.map((item) => ({ ...item })),
+      { role: "user", content: "Execute the confirmed plan." },
+    ],
     debug: debugInput.checked,
     deep_thinking_mode: deepThinkingInput.checked,
     search_before_planning: searchBeforeInput.checked,
     coor_agents: selectedCoorAgents.size ? Array.from(selectedCoorAgents) : null,
     workflow_id: workflowId,
+    session_id: activeConversationId,
+    memory_session_id: activeConversationId,
   };
 
   currentAbortController = new AbortController();
+  let executionStreamCompleted = false;
   try {
     const response = await fetch("/api/workflows/run", {
       method: "POST",
@@ -1962,16 +2996,24 @@ const runExecution = async () => {
       buffer += decoder.decode(value, { stream: true });
       buffer = parseSse(buffer, handleEvent);
     }
+    executionStreamCompleted = true;
   } catch (err) {
-    appendOutput("system", `\n[error] ${err.message || err}\n`);
-    setStatus("Error", false);
-    showSummaryHint("Workflow error.", true);
-    showPlanValidationHint("Execution failed. Check the execution log and try again.", true);
+    if (err.name !== "AbortError") {
+      currentRunHasError = true;
+      appendOutput("system", `\n[error] ${err.message || err}\n`);
+      setStatus("Error", false);
+      showSummaryHint("Workflow error.", true);
+      showPlanValidationHint("Execution failed. Check the execution log and try again.", true);
+      setEmptyAnswerMessage("执行失败，请查看执行日志。");
+    }
   } finally {
+    if (executionStreamCompleted && !currentRunHasError) captureAssistantConversationContext();
     currentRunContext = null;
     executionInProgress = false;
     runBtn.disabled = false;
     stopBtn.disabled = true;
+    userIdInput.disabled = false;
+    if (newConversationBtn) newConversationBtn.disabled = false;
     currentAbortController = null;
     updateConfirmExecuteState();
   }
@@ -2032,10 +3074,18 @@ if (validatePlanBtn) {
 const stopWorkflow = () => {
   if (currentAbortController) {
     currentAbortController.abort();
+    currentAbortController = null;
     executionInProgress = false;
+    runBtn.disabled = false;
+    stopBtn.disabled = true;
+    currentRunHasError = true;
     setStatus("Stopped", false);
     showSummaryHint("Workflow stopped.");
     showPlanValidationHint("Execution stopped. You can run it again.", true);
+    setEmptyAnswerMessage("任务已停止。");
+    userIdInput.disabled = false;
+    if (newConversationBtn) newConversationBtn.disabled = false;
+    setChatPlanActionsDisabled(false);
     updateConfirmExecuteState();
   }
 };
@@ -2586,7 +3636,7 @@ const applyToolsFilters = (tools) => {
   return filtered;
 };
 
-const renderTools = () => {
+let renderTools = () => {
   if (!toolsList) return;
   if (!latestTools.length) {
     setListState(toolsList, "No tools found.", "empty");
@@ -2712,7 +3762,7 @@ const applyAgentFilter = (agents) => {
   return filtered;
 };
 
-const renderAgents = (agents) => {
+let renderAgents = (agents) => {
   const filtered = applyAgentFilter(agents);
   if (!filtered.length) {
     const emptyMsg = agentSearchQuery
@@ -3170,6 +4220,20 @@ const runSelectedHealthCheck = async () => {
 
 runBtn.addEventListener("click", runWorkflow);
 stopBtn.addEventListener("click", stopWorkflow);
+if (newConversationBtn) newConversationBtn.addEventListener("click", () => resetActiveConversation());
+messageInput.addEventListener("input", resizeMessageInput);
+messageInput.addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && !event.shiftKey) {
+    event.preventDefault();
+    runWorkflow();
+  }
+});
+userIdInput.addEventListener("input", () => {
+  const nextUserId = userIdInput.value.trim();
+  if (nextUserId !== activeConversationUserId) resetActiveConversation(nextUserId);
+  renderChatHistory();
+});
+if (clearChatHistoryBtn) clearChatHistoryBtn.addEventListener("click", clearChatHistory);
 clearOutputBtn.addEventListener("click", clearOutput);
 autoScrollBtn.addEventListener("click", toggleAutoScroll);
 exportTxtBtn.addEventListener("click", exportOutputTxt);
@@ -3306,6 +4370,8 @@ if (healthCheckSelectedBtn) {
 updateAutoScrollBtn();
 setStatus("Ready", true);
 loadReadiness();
+resizeMessageInput();
+renderChatHistory();
 updateCoorCount();
 setAgentDetailEmpty("Select an agent to view details.");
 

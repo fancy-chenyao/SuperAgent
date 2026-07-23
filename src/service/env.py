@@ -29,6 +29,7 @@ CODE_API_KEY = os.getenv("CODE_API_KEY")
 CODE_BASE_URL = os.getenv("CODE_BASE_URL")
 CODE_MODEL = os.getenv("CODE_MODEL")
 
+
 def _parse_bool(name: str, default: bool) -> bool:
     raw = os.getenv(name)
     if raw is None:
@@ -103,11 +104,32 @@ MAX_STEPS = _parse_int("MAX_STEPS", 25)
 AUTO_RECOVERY_ENABLED = _parse_bool("AUTO_RECOVERY_ENABLED", False)
 S_ABAC_ENABLED = _parse_bool("S_ABAC_ENABLED", False)
 
+# Execution-engine feature flags.
+# ARTIFACT_CAPTURE_ENABLED        -> Phase 2: capture each executed step's
+#                                    output as a typed Artifact. Kept OFF until
+#                                    sensitive-artifact redaction/audit lands.
+# ORCHESTRATION_SCHEDULER_ENABLED -> Phase 3: drive the workflow through the
+#                                    TaskGraph scheduler when the plan yields a
+#                                    fully-classified task graph. Default OFF
+#                                    (safe baseline): only turn it on for a
+#                                    gated rollout via an explicit env var. When
+#                                    ON, the runtime enters the scheduler for a
+#                                    scheduler-ready graph, stays on the legacy
+#                                    publisher/while loop during the planning
+#                                    phase, and FAILS CLOSED (never falls back)
+#                                    for an invalid/unclassified graph or a
+#                                    missing graph in the production execution
+#                                    phase.
+ARTIFACT_CAPTURE_ENABLED = _parse_bool("ARTIFACT_CAPTURE_ENABLED", False)
+ORCHESTRATION_SCHEDULER_ENABLED = _parse_bool(
+    "ORCHESTRATION_SCHEDULER_ENABLED", False)
+
 # 意图识别：默认混合模式；Basic LLM 未配置或调用异常时由识别层自动降级为 rule。
 INTENT_RECOGNITION_MODE = _parse_choice(
     "INTENT_RECOGNITION_MODE", "hybrid", {"rule", "hybrid", "semantic"}
 )
-INTENT_RULE_STRONG_THRESHOLD = _parse_float("INTENT_RULE_STRONG_THRESHOLD", 0.82)
+INTENT_RULE_STRONG_THRESHOLD = _parse_float(
+    "INTENT_RULE_STRONG_THRESHOLD", 0.82)
 INTENT_SEMANTIC_ACCEPT_THRESHOLD = _parse_float(
     "INTENT_SEMANTIC_ACCEPT_THRESHOLD", 0.72
 )
@@ -128,20 +150,23 @@ MEMORY_AUTO_COMPACT_ENABLED = _parse_bool(
     "MEMORY_AUTO_COMPACT_ENABLED", _parse_bool("MEMORY_AUTO_COMPACT", True)
 )
 MEMORY_COMPACTION_LLM_ENABLED = _parse_bool(
-    "MEMORY_COMPACTION_LLM_ENABLED", _parse_bool("MEMORY_LLM_COMPACTION", False)
+    "MEMORY_COMPACTION_LLM_ENABLED", _parse_bool(
+        "MEMORY_LLM_COMPACTION", False)
 )
 MEMORY_MAX_CONTEXT_TOKENS = _parse_int(
     "MEMORY_MAX_CONTEXT_TOKENS",
     _parse_int("MEMORY_CONTEXT_TOKEN_BUDGET", 32768),
 )
-MEMORY_RESERVED_OUTPUT_TOKENS = _parse_int("MEMORY_RESERVED_OUTPUT_TOKENS", 4096)
+MEMORY_RESERVED_OUTPUT_TOKENS = _parse_int(
+    "MEMORY_RESERVED_OUTPUT_TOKENS", 4096)
 MEMORY_COMPACTION_TRIGGER_RATIO = _parse_float(
     "MEMORY_COMPACTION_TRIGGER_RATIO", 0.75
 )
 MEMORY_LONG_TERM_TOP_K = _parse_int("MEMORY_LONG_TERM_TOP_K", 5)
 MEMORY_MAX_RECORD_CHARS = _parse_int("MEMORY_MAX_RECORD_CHARS", 8000)
 MEMORY_STORE_DIR = os.getenv("MEMORY_STORE_DIR")
-MEMORY_ALLOW_REMOTE_LONG_TERM = _parse_bool("MEMORY_ALLOW_REMOTE_LONG_TERM", False)
+MEMORY_ALLOW_REMOTE_LONG_TERM = _parse_bool(
+    "MEMORY_ALLOW_REMOTE_LONG_TERM", False)
 
 # Compatibility aliases for early memory prototypes.
 MEMORY_AUTO_COMPACT = MEMORY_AUTO_COMPACT_ENABLED

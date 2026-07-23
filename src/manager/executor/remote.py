@@ -81,6 +81,8 @@ from src.service.env import MEMORY_ALLOW_REMOTE_LONG_TERM
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.WARNING)
 
+_READ_ONLY_OPERATION_MODES = frozenset({"read"})
+
 
 @dataclass
 class RemoteAgentRequest:
@@ -184,8 +186,24 @@ class RemoteExecutor(AgentExecutor):
             await self.initialize()
             request_data = self._build_request(agent, messages, context)
             headers = await self._build_headers(agent)
+            # The scheduler owns retries for side-effecting steps. Retrying the
+            # HTTP request here could duplicate an operation after the remote
+            # side committed but its response was lost. Only a trusted,
+            # explicitly read-only operation may use the configured transport
+            # retries; missing/unknown modes fail safe to one attempt.
+            operation_mode = str(
+                (context.metadata or {}).get("operation_mode", "unknown")
+            ).strip().lower()
+            request_attempts = (
+                None if operation_mode in _READ_ONLY_OPERATION_MODES else 1
+            )
             async with self._request_semaphore:
-                response_data = await self._send_request(endpoint, request_data, headers)
+                response_data = await self._send_request(
+                    endpoint,
+                    request_data,
+                    headers,
+                    retries=request_attempts,
+                )
 
             duration = time.time() - start_time
             remote_response = RemoteAgentResponse(
@@ -292,12 +310,15 @@ class RemoteExecutor(AgentExecutor):
                 })
             else:
                 # Fallback: convert to string, but this should be avoided
-                logger.warning(f"Message type {type(msg)} is not standard, converting to string")
+                logger.warning(
+                    f"Message type {type(msg)} is not standard, converting to string")
                 serialized_messages.append({
                     "type": "unknown",
                     "role": "user",
                     "content": str(msg)
                 })
+
+        idempotency_key = (context.metadata or {}).get("idempotency_key")
 
         request = {
             "agent_name": agent.agent_name,
@@ -308,6 +329,9 @@ class RemoteExecutor(AgentExecutor):
                 "workflow_mode": context.workflow_mode,
                 "deep_thinking_mode": context.deep_thinking_mode,
                 "debug": context.debug,
+                # Surfaced so an idempotency-aware remote agent/tool can dedupe
+                # a side effect (e.g. reuse a message id) instead of re-sending.
+                "idempotency_key": idempotency_key,
             },
         }
 
@@ -332,6 +356,7 @@ class RemoteExecutor(AgentExecutor):
             "workflow_mode": context.workflow_mode,
             "task_id": (context.metadata or {}).get("task_id"),
             "current_step": (context.metadata or {}).get("current_step"),
+            "idempotency_key": idempotency_key,
         }
 
         return request
@@ -366,9 +391,11 @@ class RemoteExecutor(AgentExecutor):
                         if response.status == 200:
                             return await response.json()
                         if response.status == 401:
-                            raise Exception("Authentication failed: invalid API key")
+                            raise Exception(
+                                "Authentication failed: invalid API key")
                         if response.status == 403:
-                            raise Exception("Authorization failed: insufficient permissions")
+                            raise Exception(
+                                "Authorization failed: insufficient permissions")
                         if response.status == 404:
                             raise Exception(f"Agent not found: {endpoint}")
                         if response.status >= 500:
@@ -378,7 +405,8 @@ class RemoteExecutor(AgentExecutor):
                                 continue
                         else:
                             text = await response.text()
-                            raise Exception(f"Request failed with status {response.status}: {text}")
+                            raise Exception(
+                                f"Request failed with status {response.status}: {text}")
             except TimeoutError as e:
                 last_error = f"timeout: {e}"
                 if attempt < retries - 1:
