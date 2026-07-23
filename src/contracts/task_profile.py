@@ -34,6 +34,7 @@ class TaskProfile(BaseModel):
     ambiguities: list[str] = Field(default_factory=list)
     needs_clarification: bool = False
     clarification_questions: list[str] = Field(default_factory=list)
+    clarification_reasons: list[dict[str, Any]] = Field(default_factory=list)
     recognition_mode: str = "rule"
     recognition_degraded: bool = False
     recognition: dict[str, Any] = Field(default_factory=dict)

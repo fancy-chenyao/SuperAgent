@@ -3,6 +3,7 @@ from pydantic import BaseModel
 from typing import Any, Dict, List, Optional, Tuple
 from pathlib import Path
 import concurrent.futures
+import datetime
 import json
 import logging
 import re
@@ -384,6 +385,45 @@ def _load_contacts() -> Dict[str, Any]:
         return _CONTACT_CACHE
     _CONTACT_CACHE = _read_json(path)
     return _CONTACT_CACHE
+
+
+def _contact_matches_name(contact: Dict[str, Any], query: str) -> bool:
+    query = str(query or "").strip()
+    actual_name = str(contact.get("name") or "").strip()
+    position = str(contact.get("position") or "").strip()
+    if not query:
+        return True
+    if query == actual_name or query in actual_name:
+        return True
+    for title in ("负责人", "经理", "主管", "秘书", "行长"):
+        if query.endswith(title):
+            name_prefix = query[: -len(title)]
+            return bool(name_prefix) and actual_name.startswith(name_prefix) and title in position
+    return False
+
+
+def _internal_contact_directory() -> List[Dict[str, Any]]:
+    contacts = list(_load_contacts().get("contacts", []))
+    for person in _load_sample().get("personInfoList", []):
+        email = str(person.get("internalMaiBox") or "").strip()
+        name = str(person.get("adtEmpeNm") or "").strip()
+        if not name or not email:
+            continue
+        contacts.append(
+            {
+                "name": name,
+                "position": person.get("tcoPostNm"),
+                "department": person.get("holdposInstNm") or person.get("boFullnm"),
+                "email": email,
+                "phone": person.get("officePhone"),
+            }
+        )
+    unique: Dict[str, Dict[str, Any]] = {}
+    for contact in contacts:
+        key = str(contact.get("email") or contact.get("name") or "").strip()
+        if key:
+            unique[key] = contact
+    return list(unique.values())
 
 
 def _knowledge_path() -> Path:
@@ -1073,6 +1113,11 @@ async def tool(req: ToolRequest, authorization: Optional[str] = Header(default=N
             to_value = req.arguments.get("to")
             body_value = req.arguments.get("body", "")
 
+            if not str(to_value or "").strip():
+                raise ValueError("to is required")
+            if not str(body_value or "").strip():
+                raise ValueError("body is required")
+
             print(f"[TOOL] Extracted 'to': {to_value}")
             print(f"[TOOL] Extracted 'body' length: {len(str(body_value))}")
 
@@ -1214,8 +1259,9 @@ async def tool(req: ToolRequest, authorization: Optional[str] = Header(default=N
             result = {"status": "error", "error": str(exc)}
     elif req.tool == "remote_meeting_scheduling_tool":
         try:
-            data = _load_meetings()
-            meetings = data.get("meetings", [])
+            meetings = _load_meetings()
+            if not isinstance(meetings, list):
+                raise ValueError("meetings data must be an array")
             action = req.arguments.get("action", "create")
 
             if action == "create":
@@ -1242,12 +1288,11 @@ async def tool(req: ToolRequest, authorization: Optional[str] = Header(default=N
                     "participants": participants,
                     "agenda": agenda,
                     "status": "scheduled",
-                    "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    "created_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 }
                 
                 meetings.append(new_meeting)
-                data["meetings"] = meetings
-                _save_meetings(data)
+                _save_meetings(meetings)
                 
                 result = {
                     "status": "success",
@@ -1279,13 +1324,19 @@ async def tool(req: ToolRequest, authorization: Optional[str] = Header(default=N
             result = {"status": "error", "error": str(exc)}
     elif req.tool == "remote_contact_query_tool":
         try:
-            data = _load_contacts()
-            contacts = data.get("contacts", [])
+            contacts = _internal_contact_directory()
             
             # 提取查询参数
             position = req.arguments.get("position")
             department = req.arguments.get("department")
             name = req.arguments.get("name")
+            names = [
+                str(item).strip()
+                for item in req.arguments.get("names") or []
+                if str(item).strip()
+            ]
+            if name and not names:
+                names = [str(name).strip()]
             
             filtered = []
             for contact in contacts:
@@ -1293,14 +1344,21 @@ async def tool(req: ToolRequest, authorization: Optional[str] = Header(default=N
                     continue
                 if department and contact.get("department") != department:
                     continue
-                if name and name not in contact.get("name", ""):
+                if names and not any(_contact_matches_name(contact, item) for item in names):
                     continue
                 filtered.append(contact)
+
+            unresolved_names = [
+                item
+                for item in names
+                if not any(_contact_matches_name(contact, item) for contact in filtered)
+            ]
             
             result = {
                 "status": "success",
                 "matched_count": len(filtered),
-                "contacts": filtered
+                "contacts": filtered,
+                "unresolved_names": unresolved_names,
             }
         except Exception as exc:
             import traceback
@@ -1389,7 +1447,6 @@ async def tool(req: ToolRequest, authorization: Optional[str] = Header(default=N
             result = {"status": "error", "error": str(exc)}
     elif req.tool == "remote_docx_generator_tool":
         try:
-            import datetime
             from docx import Document
             from docx.shared import Pt, Inches
             from docx.enum.text import WD_PARAGRAPH_ALIGNMENT
@@ -1642,8 +1699,6 @@ async def tool(req: ToolRequest, authorization: Optional[str] = Header(default=N
             }
     elif req.tool == "save_leave_record":
         try:
-            import datetime
-
             employee_id = req.arguments.get("employee_id")
             employee_name = req.arguments.get("employee_name")
             leave_data = req.arguments.get("leave_data", {})
@@ -1732,8 +1787,6 @@ async def tool(req: ToolRequest, authorization: Optional[str] = Header(default=N
             }
     elif req.tool == "save_travel_record":
         try:
-            import datetime
-
             employee_id = req.arguments.get("employee_id")
             employee_name = req.arguments.get("employee_name")
             travel_data = req.arguments.get("travel_data", {})

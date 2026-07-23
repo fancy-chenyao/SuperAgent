@@ -37,8 +37,12 @@ Your task is to analyze user requirements and organize a team of agents to compl
 When `Task Scenario Profile.subtasks` is present:
 
 - Treat each `subtasks[].intent`, `goal`, `action`, `expected_capabilities`, and `depends_on` as the structured decomposition produced by the main Agent.
-- Do not blindly copy the number of subtasks, but do not drop a subtask that is required by another subtask's `depends_on`.
+- Every executable `subtasks[]` entry MUST be represented by an independent plan step assigned to an Agent that supports that intent. Do not merge different intents into one step and do not omit a leaf subtask merely because no later task depends on it.
+- Preserve every `depends_on` edge as execution order: each dependency step must appear before the consuming step.
+- Before outputting JSON, compare the set of planned business intents with all `subtasks[].intent` values. If any intent is missing, revise the plan before returning it.
 - If a document generation subtask depends on `employee_information_query`, first plan an HR information query step, then plan the document generation step.
+- `information_research` must use `researcher`, `browser`, or `RemoteUnicornSelectorAgent`; `risk_analysis` must use `RemoteBusinessRiskAgent`; `report_generation` must use `RemoteReportAgent` or another listed report-capable Agent.
+- A read/query `schedule_management` step must use `RemoteHRCalendarAgent`; a `meeting_arrangement` step must use `RemoteMeetingManagerAgent`. Do not use the schedule-creation-only Agent to query calendar availability.
 - Different query intents must not be merged merely because their text appears in the same clause. For example, employee basic profile and leave records come from different tools and require separate steps.
 - `employee_information_query` must use `RemoteHRAssistantAgent`; `leave_record_query` must use `RemoteOfficeAssistantAgent` and its `query_leave_record` tool. A description mentioning both does not mean both tasks were executed.
 - Example: "帮李娜生成一份请假申请书" should be planned as:

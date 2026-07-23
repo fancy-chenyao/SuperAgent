@@ -220,12 +220,14 @@ Special Extraction Rules for {tool_name}:
 - For document generation tools (remote_docx_generator_tool):
   * Extract employee data from previous agent results in the conversation history
   * Look for employee information in JSON format from RemoteHRAssistantAgent
-  * The "data" parameter should contain: name, id_number, position, join_date, monthly_salary, annual_salary, document_type
+  * The "data" parameter should contain the fields required by the selected template
   * Extract these fields from the employee record in previous messages
   * If generating income_proof, use template_name="income_proof"
   * If generating employment_certificate, use template_name="employment_certificate"
   * If the user asks for "请假申请书", "请假申请", "请假条", or task_profile.entities.document_type is "leave_application", use template_name="leave_application"
   * For leave_application, set output_filename to "leave_application_<员工姓名>_<YYYYMMDD>" and include leave_start_date, leave_end_date, leave_days, leave_reason in data. If dates/reason are not provided, use "待补充" for those fields.
+  * If task_profile.entities.document_type is "explanation_document", use template_name="explanation_document"
+  * For explanation_document, copy the upstream report/summary into data.content and provide a concise data.title. Do not select a recommendation-letter template.
 
 Examples:
 User: "查询二级分支行80后行长"
@@ -491,13 +493,36 @@ async def agent(req: RemoteRequest, authorization: Optional[str] = Header(defaul
         agent = AgentFactory.get_agent(req.agent_name)
         logger.info(f"Using agent: {agent.__class__.__name__}")
 
+        # 注册表中的 prompt 才是当前 Agent 的配置来源；同时在远程端解析日期占位符。
+        execution_context = dict(req.context)
+        execution_context["agent_prompt"] = _render_agent_prompt(
+            req.prompt or agent.prompt
+        )
+
         # 执行Agent
         result = await agent.execute(
             tools=req.tools,
             messages=req.messages,
-            context=req.context,
+            context=execution_context,
             parameter_extractor=parameter_extractor
         )
+
+        if isinstance(result, dict) and str(result.get("status") or "").lower() in {
+            "error",
+            "failed",
+        }:
+            return {
+                "status": "failed",
+                "error": result.get("error") or result.get("message") or "Agent execution failed",
+                "result": result,
+                "metadata": {
+                    "agent_name": req.agent_name,
+                    "agent_class": agent.__class__.__name__,
+                    "tools_count": len(req.tools),
+                    "has_auth": bool(authorization),
+                    "message_count": len(req.messages),
+                },
+            }
 
         # 返回结果
         return {

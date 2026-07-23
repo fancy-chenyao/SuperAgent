@@ -177,6 +177,35 @@
           "align": "right"
         }
       ]
+    },
+    "explanation_document": {
+      "title": "说明文档",
+      "content": [
+        {
+          "type": "heading",
+          "text": "{{title}}",
+          "level": 1,
+          "align": "center"
+        },
+        {
+          "type": "paragraph",
+          "text": ""
+        },
+        {
+          "type": "paragraph",
+          "text": "{{content}}",
+          "indent": 2
+        },
+        {
+          "type": "paragraph",
+          "text": ""
+        },
+        {
+          "type": "paragraph",
+          "text": "{{current_date}}",
+          "align": "right"
+        }
+      ]
     }
   }
 }

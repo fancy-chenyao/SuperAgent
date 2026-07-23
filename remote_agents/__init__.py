@@ -5,6 +5,12 @@ from .hr_assistant_agent import RemoteHRAssistantAgent
 from .knowledge_agent import RemoteKnowledgeAgent
 from .document_generator_agent import RemoteDocumentGeneratorAgent
 from .report_agent import RemoteReportAgent
+from .utility_agents import (
+    RemoteHRCalendarAgent,
+    RemoteScheduleAgent,
+    RemoteTodoAgent,
+    RemoteWeatherAgent,
+)
 from .factory import AgentFactory
 
 __all__ = [
@@ -13,5 +19,9 @@ __all__ = [
     "RemoteKnowledgeAgent",
     "RemoteDocumentGeneratorAgent",
     "RemoteReportAgent",
+    "RemoteWeatherAgent",
+    "RemoteScheduleAgent",
+    "RemoteTodoAgent",
+    "RemoteHRCalendarAgent",
     "AgentFactory",
 ]

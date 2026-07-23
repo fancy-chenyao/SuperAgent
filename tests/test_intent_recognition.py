@@ -8,6 +8,7 @@ from src.orchestrator.intent_recognition import (
     IntentFusion,
     RuleIntentRecognizer,
     SemanticProviderError,
+    extract_entities,
 )
 from src.orchestrator.task_profiler import profile_task
 
@@ -143,6 +144,116 @@ def test_high_confidence_semantic_only_candidate_is_accepted() -> None:
     assert result.needs_clarification is False
 
 
+def test_optional_semantic_questions_do_not_block_concrete_compound_task() -> None:
+    provider = FakeSemanticProvider(
+        _payload(
+            "information_research",
+            [
+                _candidate("information_research", 0.95, text_span="搜索李娜的公开信息"),
+                _candidate("report_generation", 0.92, text_span="整理成简短报告"),
+            ],
+            needs_clarification=True,
+            questions=["请确认李娜的具体身份和报告格式。"],
+        )
+    )
+
+    result = _run(
+        HybridIntentRecognizer(mode="hybrid", semantic_provider=provider).recognize(
+            "搜索李娜的公开信息，整理成一份简短报告"
+        )
+    )
+
+    assert result.needs_clarification is False
+    assert result.clarification_questions == []
+    assert {item.name for item in result.executable_intents} == {
+        "information_research",
+        "report_generation",
+    }
+
+
+def test_semantic_questions_still_block_generic_single_intent_task() -> None:
+    provider = FakeSemanticProvider(
+        _payload(
+            "report_generation",
+            [_candidate("report_generation", 0.93, text_span="生成报告")],
+            needs_clarification=True,
+            questions=["报告需要基于哪些内容？"],
+        )
+    )
+
+    result = _run(
+        HybridIntentRecognizer(mode="hybrid", semantic_provider=provider).recognize(
+            "生成报告"
+        )
+    )
+
+    assert result.needs_clarification is True
+    assert result.clarification_questions == ["报告需要基于哪些内容？"]
+
+
+def test_compound_task_primary_ranking_difference_does_not_trigger_clarification() -> None:
+    provider = FakeSemanticProvider(
+        {
+            **_payload(
+                "meeting_arrangement",
+                [
+                    _candidate(
+                        "schedule_management",
+                        0.91,
+                        text_span="查询王经理下周的日程",
+                    ),
+                    _candidate(
+                        "meeting_arrangement",
+                        0.96,
+                        text_span="安排一次和李娜的会议",
+                    ),
+                    _candidate(
+                        "message_or_email_send",
+                        0.90,
+                        text_span="通知参会人",
+                    ),
+                ],
+                entities={
+                    "people": ["王经理", "李娜"],
+                    "time": "下周",
+                    "recipient": "参会人",
+                },
+                needs_clarification=True,
+                questions=["请提供会议的具体时间和主题。"],
+            ),
+            "ambiguities": ["会议具体时间未指定", "会议主题未明确"],
+        }
+    )
+
+    result = _run(
+        HybridIntentRecognizer(mode="hybrid", semantic_provider=provider).recognize(
+            "查询王经理下周的日程，安排一次和李娜的会议，并通知参会人"
+        )
+    )
+
+    assert result.needs_clarification is False
+    assert result.clarification_questions == []
+    assert result.ambiguities == []
+    assert result.primary_intent == "meeting_arrangement"
+    assert {item.name for item in result.executable_intents} == {
+        "schedule_management",
+        "meeting_arrangement",
+        "message_or_email_send",
+    }
+
+
+def test_schedule_meeting_entities_do_not_treat_quantifier_as_person() -> None:
+    query = "查询王经理下周的日程，安排一次和李娜的会议，并通知参会人"
+
+    entities = extract_entities(query)
+
+    assert entities["people"] == ["王经理", "李娜"]
+    assert entities["employee_name"] == "王经理"
+    assert entities["time"] == "下周"
+    assert entities["recipient"] == "参会人"
+    assert "一次" not in entities["people"]
+
+
 def test_synonym_expression_and_inferred_salary_are_distinguished() -> None:
     provider = FakeSemanticProvider(
         _payload(
@@ -189,6 +300,81 @@ def test_weak_keyword_schedule_expression() -> None:
     profile = _run(profile_task("看看王强明天有没有时间", task_id="schedule", recognition_mode="hybrid", semantic_provider=provider))
     assert profile.intent == "schedule_management"
     assert profile.entities["time"] == "明天"
+
+
+def test_weather_travel_advice_has_two_tasks_and_asks_for_employee() -> None:
+    provider = FakeSemanticProvider(
+        _payload(
+            "weather_query",
+            [
+                _candidate("weather_query", 0.95, text_span="查询北京明天天气"),
+                _candidate("travel_service", 0.90, text_span="结合出差行程给出提醒"),
+            ],
+            entities={"location": "北京", "time": "明天"},
+        )
+    )
+
+    profile = _run(
+        profile_task(
+            "查询北京明天天气，结合出差行程给出提醒",
+            task_id="weather-travel-advice",
+            recognition_mode="hybrid",
+            semantic_provider=provider,
+        )
+    )
+
+    assert profile.sub_intents == ["weather_query", "travel_service"]
+    assert [item["intent"] for item in profile.subtasks] == [
+        "weather_query",
+        "travel_service",
+    ]
+    assert profile.entities["location"] == "北京"
+    assert "employee_name" not in profile.entities
+    assert "schedule_management" not in profile.sub_intents
+    assert profile.needs_clarification is True
+    assert profile.missing_fields == ["employee_or_criteria"]
+    assert profile.clarification_questions == [
+        "请问要结合哪位员工的出差行程？请提供员工姓名或工号。"
+    ]
+
+
+def test_rule_fallback_does_not_treat_weather_location_as_employee() -> None:
+    profile = _run(
+        profile_task(
+            "查询北京明天天气，结合出差行程给出提醒",
+            task_id="weather-travel-rule",
+            recognition_mode="rule",
+        )
+    )
+
+    assert profile.sub_intents == ["weather_query", "travel_service"]
+    assert profile.entities["location"] == "北京"
+    assert "employee_name" not in profile.entities
+    assert "people" not in profile.entities
+    assert profile.needs_clarification is True
+
+
+def test_named_travel_query_infers_employee_id_lookup() -> None:
+    provider = FakeSemanticProvider(
+        _payload(
+            "travel_service",
+            [_candidate("travel_service", 0.94, text_span="查询王强明天的出差行程")],
+            entities={"people": ["王强"], "employee_name": "王强", "time": "明天"},
+        )
+    )
+    profile = _run(
+        profile_task(
+            "查询王强明天的出差行程",
+            task_id="named-travel",
+            recognition_mode="hybrid",
+            semantic_provider=provider,
+        )
+    )
+
+    assert profile.sub_intents == ["employee_information_query", "travel_service"]
+    assert profile.intent_nodes[0]["provenance"] == "inferred"
+    assert profile.subtasks[1]["depends_on"] == ["subtask_1"]
+    assert profile.needs_clarification is False
 
 
 def test_negated_send_is_visible_but_not_executable() -> None:
@@ -284,6 +470,40 @@ def test_original_rule_instruction_does_not_regress() -> None:
     profile = _run(profile_task("查询李娜的基本信息", task_id="regression", recognition_mode="rule"))
     assert profile.intent == "employee_information_query"
     assert profile.entities["employee_name"] == "李娜"
+
+
+def test_policy_summary_and_explanation_document_are_three_distinct_tasks() -> None:
+    provider = FakeSemanticProvider(
+        _payload(
+            "knowledge_lookup",
+            [
+                _candidate("knowledge_lookup", 0.93, text_span="查询公司年假制度"),
+                _candidate("report_generation", 0.91, text_span="整理成摘要"),
+            ],
+            entities={},
+        )
+    )
+
+    profile = _run(
+        profile_task(
+            "查询公司年假制度，整理成摘要，并生成一份说明文档",
+            task_id="policy-summary-document",
+            recognition_mode="hybrid",
+            semantic_provider=provider,
+        )
+    )
+
+    assert profile.sub_intents == [
+        "knowledge_lookup",
+        "report_generation",
+        "document_generation",
+    ]
+    assert profile.entities["document_type"] == "explanation_document"
+    assert [item["intent"] for item in profile.subtasks] == profile.sub_intents
+    assert profile.subtasks[1]["depends_on"] == ["subtask_1"]
+    assert profile.subtasks[2]["depends_on"] == ["subtask_2"]
+    assert profile.subtasks[2]["segment_id"] == "segment_3"
+    assert profile.subtasks[2]["goal"] == "生成一份说明文档"
 
 
 def test_employee_profile_leave_records_and_summary_are_three_distinct_tasks() -> None:

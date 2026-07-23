@@ -4,6 +4,7 @@ import re
 from typing import Any
 
 from src.contracts import TaskProfile
+from src.orchestrator.clarification import ClarificationAnalyzer
 from src.orchestrator.intent_catalog import INTENT_CATALOG, INTENT_LABELS
 from src.orchestrator.intent_recognition import (
     HybridIntentRecognizer,
@@ -11,6 +12,7 @@ from src.orchestrator.intent_recognition import (
     IntentRecognitionResult,
     SemanticIntentProvider,
     extract_entities,
+    is_person_candidate,
     segment_query,
 )
 
@@ -45,12 +47,24 @@ def _merge_entities(rule_entities: dict[str, Any], semantic_entities: dict[str, 
         "employee": "employee_name",
         "recipient_name": "recipient",
     }
-    allowed = {"people", "employee_name", "recipient", "time", "count", "document_type", "business_object"}
+    allowed = {
+        "people",
+        "employee_name",
+        "employee_id",
+        "recipient",
+        "location",
+        "time",
+        "count",
+        "document_type",
+        "business_object",
+    }
     document_aliases = {
         "收入证明": "income_proof",
         "在职证明": "employment_certificate",
         "请假申请书": "leave_application",
         "请假书": "leave_application",
+        "说明文档": "explanation_document",
+        "说明文件": "explanation_document",
         "分析报告": "analysis_report",
         "报告": "report",
     }
@@ -61,7 +75,10 @@ def _merge_entities(rule_entities: dict[str, Any], semantic_entities: dict[str, 
         if value in (None, "", []):
             continue
         if key == "people" and isinstance(value, list):
-            result[key] = _unique(list(result.get(key) or []) + [str(item) for item in value])
+            semantic_people = [str(item) for item in value if is_person_candidate(item)]
+            result[key] = _unique(list(result.get(key) or []) + semantic_people)
+        elif key == "employee_name" and not is_person_candidate(value):
+            continue
         elif key == "document_type":
             result[key] = result.get(key) or document_aliases.get(str(value), value)
         elif key in result:
@@ -138,6 +155,20 @@ def _enrich_inferred_dependencies(
                 "salary_query",
                 provenance="inferred",
                 evidence="生成收入证明需要薪资数据",
+            ),
+        )
+    if (
+        "travel_service" in executable_names
+        and employee_name
+        and not entities.get("employee_id")
+    ):
+        _insert_before(
+            candidates,
+            {"travel_service"},
+            _candidate(
+                "employee_information_query",
+                provenance="inferred",
+                evidence="差旅行程工具需要先用员工姓名解析员工工号",
             ),
         )
 
@@ -242,8 +273,25 @@ def _dependency_names(intent: str, prior_names: list[str]) -> list[str]:
     prior = set(prior_names)
     if intent in {"salary_query", "leave_record_query"}:
         return [name for name in ("employee_information_query",) if name in prior]
+    if intent == "travel_service":
+        return [name for name in ("employee_information_query",) if name in prior]
     if intent == "document_generation":
-        return [name for name in ("employee_information_query", "salary_query") if name in prior]
+        # “查询/整理/生成文档”是一条传递依赖链。报告已经吸收前面的查询结果时，
+        # 文档只直接依赖报告，避免同时建立冗余的跨级依赖。
+        if "report_generation" in prior:
+            return ["report_generation"]
+        return [
+            name
+            for name in (
+                "employee_information_query",
+                "salary_query",
+                "leave_record_query",
+                "information_research",
+                "risk_analysis",
+                "knowledge_lookup",
+            )
+            if name in prior
+        ]
     if intent == "report_generation":
         upstream = [
             name
@@ -291,6 +339,8 @@ def _goal_for_intent(
         }
         if document_type in labels:
             return f"生成{employee}{labels[document_type]}"
+    if intent == "document_generation" and explicit_text:
+        return re.sub(r"^(?:并|再|然后)\s*", "", explicit_text)
     return INTENT_LABELS.get(intent, intent)
 
 
@@ -462,7 +512,11 @@ async def profile_task(
         semantic_provider=semantic_provider,
     )
     recognition = await recognizer.recognize(user_query)
-    entities = _merge_entities(extract_entities(user_query), recognition.entities)
+    if recognition.mode in {"hybrid", "semantic"} and not recognition.degraded:
+        # 语义模型负责开放语境中的实体分类；不要在这里再次把规则误判覆盖回来。
+        entities = _merge_entities({}, recognition.entities)
+    else:
+        entities = _merge_entities(extract_entities(user_query), recognition.entities)
     recognition.entities = entities
     recognition = _enrich_inferred_dependencies(recognition, entities)
     recognition = _annotate_rule_conditions(user_query, recognition)
@@ -487,14 +541,15 @@ async def profile_task(
         scopes.extend(definition.get("scope") or [])
 
     action, irreversible = _overall_action(executable, user_query)
-    missing_fields: list[str] = []
-    if any(item.name == "message_or_email_send" for item in executable) and not entities.get("recipient"):
-        missing_fields.append("recipient")
-    clarification_questions = list(recognition.clarification_questions)
-    if "recipient" in missing_fields:
-        clarification_questions.append("请提供发送任务的收件人。")
-    clarification_questions = _unique(clarification_questions)
-    needs_clarification = recognition.needs_clarification or bool(missing_fields)
+    clarification = ClarificationAnalyzer().analyze(
+        user_query=user_query,
+        recognition=recognition,
+        entities=entities,
+        subtasks=subtasks,
+    )
+    missing_fields = clarification.missing_fields
+    clarification_questions = clarification.questions
+    needs_clarification = clarification.needs_clarification
 
     risk_level = "HIGH" if irreversible else "MEDIUM" if action in {"write", "generate"} else "LOW"
     confidence = _calculate_confidence(
@@ -510,6 +565,7 @@ async def profile_task(
     recognition_payload = recognition.model_dump()
     recognition_payload["needs_clarification"] = needs_clarification
     recognition_payload["clarification_questions"] = clarification_questions
+    recognition_payload["clarification_analysis"] = clarification.model_dump()
 
     return TaskProfile(
         task_id=task_id,
@@ -543,6 +599,7 @@ async def profile_task(
         ambiguities=recognition.ambiguities,
         needs_clarification=needs_clarification,
         clarification_questions=clarification_questions,
+        clarification_reasons=[item.model_dump() for item in clarification.requirements],
         recognition_mode=recognition.mode,
         recognition_degraded=recognition.degraded,
         recognition=recognition_payload,

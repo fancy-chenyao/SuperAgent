@@ -44,6 +44,8 @@ KNOWN_ACTIONS = {
     "RemoteMeetingManagerAgent": ["read", "write", "delete"],
     "RemoteScheduleAgent": ["read", "write", "delete"],
     "RemoteTodoAgent": ["read", "write", "delete"],
+    "RemoteHRCalendarAgent": ["read", "query", "write"],
+    "RemoteWeatherAgent": ["read", "query"],
     "RemoteOfficeAssistantAgent": ["read", "query", "write"],
 }
 
@@ -324,8 +326,10 @@ def route_task(
         decision = "DISPATCH"
         reason_codes = ["HIGH_CONFIDENCE_ROUTE"]
     elif top_score >= 0.55:
-        decision = "CLARIFY"
-        reason_codes = ["MEDIUM_CONFIDENCE_ROUTE"]
+        # Agent 匹配分数不是用户缺失信息，不能触发没有具体问题的追问。
+        # 追问只由 ClarificationAnalyzer 根据任务字段契约产生。
+        decision = "DISPATCH"
+        reason_codes = ["CAPABLE_ROUTE"]
     else:
         decision = "REJECT"
         reason_codes = ["NO_CAPABLE_AGENT"]
