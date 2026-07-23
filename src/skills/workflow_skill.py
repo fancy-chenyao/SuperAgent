@@ -37,8 +37,10 @@ _INSTANCE_IDENTIFIER_RE = re.compile(
 _RISK_LEVEL = {"LOW": 0, "MEDIUM": 1, "HIGH": 2, "CRITICAL": 3}
 _BUSINESS_OUTCOME_ACTIONS = {
     "approve",
+    "create",
     "delete",
     "execute",
+    "export",
     "send",
     "submit",
     "update",
@@ -56,6 +58,35 @@ def _json(value: Any) -> str:
 
 def _hash(value: Any) -> str:
     return hashlib.sha256(_json(value).encode("utf-8")).hexdigest()
+
+
+def _verified_business_result(summary: dict[str, Any]) -> Optional[bool]:
+    """Return a business result only when backed by structured step evidence."""
+
+    result = summary.get("business_success")
+    if result is False:
+        return False
+    if result is not True or not summary.get("evidence_schema_version"):
+        return None
+    steps = summary.get("steps")
+    if not isinstance(steps, list) or not steps:
+        return None
+    side_effects = [
+        step
+        for step in steps
+        if isinstance(step, dict)
+        and str(step.get("operation_mode") or "read").lower()
+        in _BUSINESS_OUTCOME_ACTIONS
+    ]
+    if not side_effects:
+        return True
+    if all(
+        step.get("business_success") is True
+        and str(step.get("verification_status") or "").lower() == "verified"
+        for step in side_effects
+    ):
+        return True
+    return None
 
 
 def _normalize_token(value: Any, default: str = "") -> str:
@@ -235,6 +266,11 @@ class WorkflowSkillGraphNode(BaseModel):
     inputs: list[dict[str, str]] = Field(default_factory=list)
     request_slots: list[str] = Field(default_factory=list)
     success_condition: str = "agent_execution_succeeded"
+    operation_mode: str = "read"
+    risk_level: str = "LOW"
+    expected_outputs: list[str] = Field(default_factory=list)
+    expected_schema_ref: Optional[str] = None
+    verification_contract: dict[str, Any] = Field(default_factory=dict)
     retry_policy: dict[str, Any] = Field(
         default_factory=lambda: {"max_attempts": 1, "fallback": "normal_planning"}
     )
@@ -411,9 +447,13 @@ def _parameterize_input_mapping(
 
 def _parameterize_steps(
     planning_steps: list[dict[str, Any]],
+    *,
+    default_action: str = "read",
+    default_risk: str = "LOW",
 ) -> list[dict[str, Any]]:
     parameterized: list[dict[str, Any]] = []
     prior_agents: set[str] = set()
+    total = len([step for step in planning_steps if isinstance(step, dict)])
     for index, step in enumerate(planning_steps, start=1):
         if not isinstance(step, dict):
             continue
@@ -425,6 +465,27 @@ def _parameterize_steps(
             normalized = _parameterize_input_mapping(mapping, prior_agents)
             if normalized is not None:
                 inputs.append(normalized)
+        declared_mode = _normalize_token(step.get("operation_mode"))
+        if not declared_mode:
+            declared_mode = _normalize_token(default_action) if index == total else "read"
+        operation_mode = (
+            "send"
+            if declared_mode == "send"
+            else "write"
+            if declared_mode in _BUSINESS_OUTCOME_ACTIONS or declared_mode == "generate"
+            else "read"
+        )
+        expected_outputs = [
+            str(item)
+            for item in (step.get("expected_outputs") or step.get("produces") or [])
+            if isinstance(item, str) and _DATA_PATH_RE.fullmatch(item)
+        ]
+        schema_ref = step.get("expected_schema_ref") or step.get("output_schema_ref")
+        risk_level = str(step.get("risk_level") or default_risk).upper()
+        trusted_verifier_required = (
+            risk_level in {"HIGH", "CRITICAL"}
+            or declared_mode in {"approve", "delete"}
+        )
         parameterized.append(
             {
                 "agent_name": agent_name,
@@ -438,6 +499,28 @@ def _parameterize_steps(
                 ),
                 "inputs": inputs,
                 "request_context": _PLACEHOLDER,
+                "operation_mode": operation_mode,
+                "risk_level": risk_level,
+                "expected_outputs": expected_outputs,
+                "expected_schema_ref": str(schema_ref) if schema_ref else None,
+                "retry": max(0, int(step.get("retry") or 0)) if operation_mode == "read" else 0,
+                "verification_contract": (
+                    {
+                        "required": True,
+                        "method": (
+                            "trusted_business_verifier"
+                            if trusted_verifier_required
+                            else "platform_receipt_and_business_identifier"
+                        ),
+                        "trusted_verifier_required": trusted_verifier_required,
+                        "evidence_fields": [
+                            "receipt_status",
+                            "external_operation_id",
+                        ],
+                    }
+                    if operation_mode in {"write", "send"}
+                    else {"required": False, "method": "technical_result"}
+                ),
             }
         )
         prior_agents.add(agent_name)
@@ -502,6 +585,24 @@ def _compile_graph(
             agent_binding=str(step["agent_name"]),
             inputs=list(step.get("inputs") or []),
             request_slots=slot_names,
+            success_condition=(
+                "business_outcome_verified"
+                if step.get("operation_mode") in {"write", "send"}
+                else "agent_execution_succeeded"
+            ),
+            operation_mode=str(step.get("operation_mode") or "read"),
+            risk_level=str(step.get("risk_level") or "LOW"),
+            expected_outputs=list(step.get("expected_outputs") or []),
+            expected_schema_ref=step.get("expected_schema_ref"),
+            verification_contract=dict(step.get("verification_contract") or {}),
+            retry_policy={
+                "max_attempts": int(step.get("retry") or 0) + 1,
+                "fallback": (
+                    "normal_planning"
+                    if step.get("operation_mode") == "read"
+                    else "reconciliation"
+                ),
+            },
         )
         nodes.append(node)
         agent_nodes[node.agent_binding] = node_id
@@ -592,6 +693,13 @@ def _control_flow_signature(
                         }
                         for item in node.inputs
                     ],
+                    "operation_mode": node.operation_mode,
+                    "risk_level": node.risk_level,
+                    "expected_outputs": node.expected_outputs,
+                    "expected_schema_ref": node.expected_schema_ref,
+                    "success_condition": node.success_condition,
+                    "verification_contract": node.verification_contract,
+                    "retry_policy": node.retry_policy,
                 }
                 for node in graph.nodes
             ],
@@ -1092,6 +1200,15 @@ class WorkflowSkillManager:
     ) -> WorkflowSkillCard:
         if not planning_steps:
             raise ValueError("workflow skill requires planning steps")
+        normalized_outcome = dict(outcome_summary or {"technical_success": True})
+        if normalized_outcome.get("technical_success") is not True:
+            raise ValueError(
+                "workflow skill requires a technically successful execution"
+            )
+        if normalized_outcome.get("business_success") is False:
+            raise ValueError(
+                "workflow skill cannot learn from a failed business outcome"
+            )
         profile = dict(task_profile or {})
         if (
             contains_secret(_json(planning_steps))
@@ -1102,7 +1219,11 @@ class WorkflowSkillManager:
 
         applicability = _applicability(profile)
         slots = _slots_from_profile(profile)
-        parameterized = _parameterize_steps(planning_steps)
+        parameterized = _parameterize_steps(
+            planning_steps,
+            default_action=applicability.action,
+            default_risk=applicability.max_risk,
+        )
         agents = self._agents_from_steps(parameterized)
         if not parameterized or not agents:
             raise ValueError("workflow skill requires valid Agent planning steps")
@@ -1133,9 +1254,7 @@ class WorkflowSkillManager:
             graph=graph,
             planning_steps=parameterized,
             contract_fingerprints=contracts,
-            outcome_summary=dict(
-                outcome_summary or {"technical_success": True}
-            ),
+            outcome_summary=normalized_outcome,
         )
         saved_evidence = self.store.save_evidence(evidence)
         if saved_evidence.control_flow_signature != signature:
@@ -1157,9 +1276,10 @@ class WorkflowSkillManager:
         )
         source_task_ids = list(dict.fromkeys(item.task_id for item in supporting))
         business_results = [
-            item.outcome_summary.get("business_success")
+            result
             for item in supporting
-            if isinstance(item.outcome_summary.get("business_success"), bool)
+            if (result := _verified_business_result(item.outcome_summary))
+            is not None
         ]
         quality = WorkflowSkillQuality(
             support_count=len(source_task_ids),

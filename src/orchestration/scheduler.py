@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import Mapping
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from src.interface.artifact import StepResult, StepStatus
@@ -47,6 +48,52 @@ ExecuteStep = Callable[..., Awaitable[Any]]
 StepHook = Callable[..., Awaitable[None]]
 
 _DEFAULT_WRITE_LOCK = "__write__"
+
+
+def _external_operation_id(exec_result: Any, artifact: Any) -> Optional[str]:
+    """Extract a durable provider/business id from normalized executor output."""
+
+    metadata = getattr(exec_result, "metadata", None) or {}
+    candidates: list[Any] = []
+    if isinstance(metadata, Mapping):
+        candidates.extend(
+            metadata.get(key)
+            for key in (
+                "external_op_id",
+                "external_operation_id",
+                "provider_operation_id",
+            )
+        )
+    payload = getattr(artifact, "payload", None)
+    if isinstance(payload, Mapping):
+        outcome = payload.get("business_outcome")
+        if isinstance(outcome, Mapping):
+            resource = outcome.get("resource")
+            candidates.extend(
+                outcome.get(key)
+                for key in (
+                    "external_op_id",
+                    "external_operation_id",
+                    "resource_id",
+                )
+            )
+            if isinstance(resource, Mapping):
+                candidates.append(resource.get("id"))
+        candidates.extend(
+            payload.get(key)
+            for key in (
+                "external_op_id",
+                "external_operation_id",
+                "operation_id",
+                "message_id",
+                "request_id",
+                "submission_id",
+            )
+        )
+    for value in candidates:
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    return None
 
 
 class StepPersistenceError(Exception):
@@ -517,7 +564,10 @@ class TaskScheduler:
                     status=StepStatus.SUCCEEDED,
                     outputs=prior.get("outputs") or {},
                     metrics={"idempotent_reuse": True,
-                             "selected_agent": selected_agent},
+                             "selected_agent": selected_agent,
+                             "idempotency_key": idem_key,
+                             "receipt_status": "SUCCEEDED",
+                             "external_op_id": prior.get("external_op_id")},
                 )
             if claim.status == ClaimStatus.IN_PROGRESS:
                 # Another instance already claimed/started this side effect, or a
@@ -566,6 +616,7 @@ class TaskScheduler:
                 )
             result: Optional[StepResult] = self._record_success(
                 step, exec_result, step_ctx, 1)
+            result.metrics["idempotency_key"] = idem_key
         else:
             # Read-only (or no receipt store): the original retry behavior. A
             # non-read step without a receipt store still runs at most once.
@@ -631,6 +682,7 @@ class TaskScheduler:
                         "timestamp": time.time(),
                     },
                 )
+                result.metrics["receipt_status"] = "SUCCEEDED"
             except Exception as exc:  # noqa: BLE001 - side effect done, receipt lost
                 return self._needs_reconciliation(
                     step,
@@ -690,8 +742,7 @@ class TaskScheduler:
         metrics: Dict[str, Any] = {"attempts": attempts}
         # Carry the external operation id (e.g. provider message id) so the
         # receipt records a verifiable side-effect identifier.
-        exec_meta = getattr(exec_result, "metadata", None) or {}
-        external_op_id = exec_meta.get("external_op_id")
+        external_op_id = _external_operation_id(exec_result, artifact)
         if external_op_id is not None:
             metrics["external_op_id"] = external_op_id
         return StepResult(

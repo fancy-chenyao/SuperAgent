@@ -227,8 +227,19 @@ def test_side_effect_skill_promotes_only_with_verified_business_outcomes(tmp_pat
         "task_profile": profile,
         "intent_examples": ["send incident notification"],
         "outcome_summary": {
+            "evidence_schema_version": 1,
             "technical_success": True,
             "business_success": True,
+            "business_outcome_coverage": 1.0,
+            "steps": [
+                {
+                    "step_id": "send",
+                    "operation_mode": "send",
+                    "technical_success": True,
+                    "business_success": True,
+                    "verification_status": "verified",
+                }
+            ],
         },
     }
 

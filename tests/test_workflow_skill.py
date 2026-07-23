@@ -35,6 +35,25 @@ def test_task_logger_persists_execution_plan_snapshot(tmp_path, monkeypatch):
     logger.set_agent_capability_bindings(
         {"leave_writer": ["leave_management"]}
     )
+    logger.set_skill_execution_evidence(
+        {
+            "task_id": "task-snapshot",
+            "workflow_id": "alice:wf",
+            "workflow_status": "COMPLETED",
+            "technical_success": True,
+            "business_success": True,
+            "business_outcome_coverage": 1.0,
+            "steps": [
+                {
+                    "step_id": "leave",
+                    "operation_mode": "read",
+                    "technical_success": True,
+                    "business_success": True,
+                    "verification_status": "not_required",
+                }
+            ],
+        }
+    )
     logger.log_workflow_end()
 
     restored = task_logger_module.TaskLogger.load("task-snapshot")
@@ -48,6 +67,7 @@ def test_task_logger_persists_execution_plan_snapshot(tmp_path, monkeypatch):
     assert restored.agent_capability_bindings == {
         "leave_writer": ["leave_management"]
     }
+    assert restored.skill_execution_evidence["technical_success"] is True
 
 
 def _manager(tmp_path: Path, **overrides) -> WorkflowSkillManager:

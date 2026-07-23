@@ -65,6 +65,7 @@ class TaskLogger:
         self.task_profile: Dict[str, Any] = {}
         self.agent_contract_fingerprints: Dict[str, str] = {}
         self.agent_capability_bindings: Dict[str, List[str]] = {}
+        self.skill_execution_evidence: Dict[str, Any] = {}
         self._step_counter: Dict[str, int] = {}  # track per-node step
 
         self._logs_dir = _get_task_logs_dir()
@@ -199,6 +200,12 @@ class TaskLogger:
         }
         self._flush()
 
+    def set_skill_execution_evidence(self, evidence: Dict[str, Any]) -> None:
+        """Persist payload-free evidence used by workflow-skill distillation."""
+
+        self.skill_execution_evidence = dict(evidence or {})
+        self._flush()
+
     @staticmethod
     def determine_execution_phase(workmode: str, instruction_history: List[str]) -> str:
         """
@@ -231,6 +238,7 @@ class TaskLogger:
             "task_profile": self.task_profile,
             "agent_contract_fingerprints": self.agent_contract_fingerprints,
             "agent_capability_bindings": self.agent_capability_bindings,
+            "skill_execution_evidence": self.skill_execution_evidence,
             "created_at": self.created_at,
             "finished_at": datetime.now().isoformat() if self.status != "running" else None,
             "status": self.status,
@@ -274,6 +282,9 @@ class TaskLogger:
             )
             inst.agent_capability_bindings = data.get(
                 "agent_capability_bindings", {}
+            )
+            inst.skill_execution_evidence = data.get(
+                "skill_execution_evidence", {}
             )
 
             inst._step_counter = {"__global__": len(inst.history)}

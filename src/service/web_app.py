@@ -34,6 +34,10 @@ from src.service.env import S_ABAC_ENABLED, USE_MCP_TOOLS, WORKFLOW_SKILL_ADMIN_
 from src.memory import get_memory_manager
 from src.memory.store import SecretDetectedError
 from src.skills.workflow_skill import get_workflow_skill_manager
+from src.skills.execution_evidence import (
+    SkillExecutionEvidence,
+    evaluate_distillation_evidence,
+)
 
 
 class MemoryWriteRequest(BaseModel):
@@ -978,11 +982,31 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail="未找到任务日志")
         if task.status != "completed" or task.execution_phase != "execution":
             raise HTTPException(status_code=400, detail="只能蒸馏已经完成的 Production 任务")
+        if body.workflow_id and task.workflow_id != body.workflow_id:
+            raise HTTPException(status_code=400, detail="Task/workflow identity mismatch")
+        owner_prefix = str(task.workflow_id or "").partition(":")[0]
+        if owner_prefix and owner_prefix != body.user_id:
+            raise HTTPException(status_code=403, detail="Task does not belong to this user")
         planning_steps = _normalize_workflow_steps(getattr(task, "planning_steps", []))
         task_profile = getattr(task, "task_profile", {})
         if not planning_steps:
             raise HTTPException(status_code=400, detail="任务日志中没有可蒸馏的规划步骤")
+        raw_evidence = getattr(task, "skill_execution_evidence", {})
+        if not isinstance(raw_evidence, dict) or not raw_evidence:
+            raise HTTPException(
+                status_code=400,
+                detail="Task log has no structured skill execution evidence",
+            )
         try:
+            execution_evidence = SkillExecutionEvidence.model_validate(raw_evidence)
+            if execution_evidence.task_id != body.task_id:
+                raise ValueError("Task/evidence identity mismatch")
+            decision = evaluate_distillation_evidence(execution_evidence)
+            if not decision.eligible:
+                raise ValueError(
+                    "Execution is not eligible for skill distillation: "
+                    + ", ".join(decision.reasons)
+                )
             card = get_workflow_skill_manager().distill(
                 user_id=body.user_id,
                 task_id=body.task_id,
@@ -991,6 +1015,7 @@ def create_app() -> FastAPI:
                 task_profile=task_profile if isinstance(task_profile, dict) else {},
                 agent_contracts=getattr(task, "agent_contract_fingerprints", {}),
                 agent_capabilities=getattr(task, "agent_capability_bindings", {}),
+                outcome_summary=execution_evidence.outcome_summary(),
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc

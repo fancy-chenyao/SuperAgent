@@ -18,6 +18,13 @@ from .workflow_skill import (
     get_workflow_skill_manager,
     set_workflow_skill_manager,
 )
+from .execution_evidence import (
+    DistillationDecision,
+    SkillExecutionEvidence,
+    StepExecutionEvidence,
+    VerificationStatus,
+    evaluate_distillation_evidence,
+)
 
 __all__ = [
     "Skill",
@@ -38,4 +45,9 @@ __all__ = [
     "WorkflowSkillValidation",
     "get_workflow_skill_manager",
     "set_workflow_skill_manager",
+    "DistillationDecision",
+    "SkillExecutionEvidence",
+    "StepExecutionEvidence",
+    "VerificationStatus",
+    "evaluate_distillation_evidence",
 ]

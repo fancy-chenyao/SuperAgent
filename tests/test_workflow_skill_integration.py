@@ -106,6 +106,7 @@ class _FakeTaskLogger:
         self.execution_phase = "initial_planning"
         self.planning_steps = []
         self.task_profile = {}
+        self.skill_execution_evidence = {}
 
     def set_execution_phase(self, phase):
         self.execution_phase = phase
@@ -113,6 +114,9 @@ class _FakeTaskLogger:
     def set_workflow_snapshot(self, planning_steps, task_profile=None):
         self.planning_steps = list(planning_steps)
         self.task_profile = dict(task_profile or {})
+
+    def set_skill_execution_evidence(self, evidence):
+        self.skill_execution_evidence = dict(evidence or {})
 
     def log_workflow_start(self, user_query=""):
         self.history.append({"event": "workflow_start"})
@@ -283,11 +287,16 @@ def test_reused_plan_still_passes_agentproxy_authorization(tmp_path, monkeypatch
     assert checks == [("reporter", "alice", "alice:wf")]
     assert command.goto == "publisher"
     assert command.update["workflow_execution_failed"] is False
+    step_evidence = command.update["skill_step_evidence"]["2:reporter"]
+    assert step_evidence["technical_success"] is True
+    assert step_evidence["business_success"] is True
     assert fake_cache.updated is True
 
     execution_status[0] = ExecutionStatus.FAILED
     failed_command = asyncio.run(coor_task.agent_proxy_node(state))
     assert failed_command.update["workflow_execution_failed"] is True
+    failed_evidence = failed_command.update["skill_step_evidence"]["2:reporter"]
+    assert failed_evidence["technical_success"] is False
 
 
 def test_workflow_skill_backend_api_lifecycle_and_manual_distillation(tmp_path, monkeypatch):
@@ -304,6 +313,23 @@ def test_workflow_skill_backend_api_lifecycle_and_manual_distillation(tmp_path, 
         user_query="Please submit my leave request",
         planning_steps=[{"agent_name": "reporter", "description": "Handle leave"}],
         task_profile=_leave_profile(),
+        skill_execution_evidence={
+            "task_id": "task-1",
+            "workflow_id": "alice:wf",
+            "workflow_status": "COMPLETED",
+            "technical_success": True,
+            "business_success": True,
+            "business_outcome_coverage": 1.0,
+            "steps": [
+                {
+                    "step_id": "submit",
+                    "operation_mode": "write",
+                    "technical_success": True,
+                    "business_success": True,
+                    "verification_status": "verified",
+                }
+            ],
+        },
     )
     monkeypatch.setattr(web_app.TaskLogger, "load", lambda task_id: fake_task)
 
@@ -381,7 +407,21 @@ def test_production_distills_success_and_disables_reused_skill_after_permission_
     monkeypatch.setattr(process, "get_llm_by_type", lambda _kind: SimpleNamespace())
 
     async def finish(_state):
-        return SimpleNamespace(goto="__end__", update={})
+        return SimpleNamespace(
+            goto="__end__",
+            update={
+                "skill_step_evidence": {
+                    "submit": {
+                        "step_id": "submit",
+                        "agent_name": "reporter",
+                        "operation_mode": "write",
+                        "technical_success": True,
+                        "business_success": True,
+                        "verification_status": "verified",
+                    }
+                }
+            },
+        )
 
     workflow = CompiledWorkflow(nodes={"publisher": finish}, edges={}, start_node="publisher")
     base_state = {

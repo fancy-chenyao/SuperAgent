@@ -452,6 +452,34 @@ def test_commit_failure_on_side_effect_needs_reconciliation():
     assert calls["n"] == 1  # the side effect happened exactly once
 
 
+def test_side_effect_receipt_extracts_provider_id_from_structured_result():
+    from src.orchestration.completion import ReceiptStore, validate_receipt
+
+    async def exec_step(*, step, selected_agent, inputs, context):
+        return ExecuteResult(
+            status=ExecutionStatus.SUCCESS,
+            result={"status": "sent", "message_id": "msg-42"},
+        )
+
+    receipts = ReceiptStore()
+    step = _step("email", mode="send", preferred_resource_id="EmailAgent")
+    scheduler = TaskScheduler(
+        execute_step=exec_step,
+        routing_provider=StubRoutingProvider(),
+        receipt_store=receipts,
+    )
+    results = asyncio.run(
+        scheduler.run(_graph(step), context={"task_id": "receipt-task"})
+    )
+    result = results["email"]
+    receipt = receipts.get(result.metrics["idempotency_key"])
+
+    assert result.is_success
+    assert result.metrics["external_op_id"] == "msg-42"
+    assert receipt["external_op_id"] == "msg-42"
+    assert validate_receipt(receipt, key=result.metrics["idempotency_key"])
+
+
 # --------------------------------------------------------------------------- #
 # Artifact governance closed loop: produce (owner-tag) -> guard -> consume
 # --------------------------------------------------------------------------- #

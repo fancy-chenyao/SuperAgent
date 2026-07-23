@@ -420,9 +420,11 @@ async def _validate_plan_data_flow(steps: list, user_id: str) -> tuple[bool, lis
 
         metadata = agent_metadata.get(agent_name)
         if not metadata:
-            # Agent not found in registry, skip validation
             logger.warning(
                 f"Step {step_idx + 1}: Agent '{agent_name}' not found in registry")
+            errors.append(
+                f"Step {step_idx + 1}: Agent '{agent_name}' is not available for this user"
+            )
             continue
 
         required_params = metadata["requires"]
@@ -617,6 +619,23 @@ async def agent_proxy_node(state: State) -> Command[Literal["publisher", "__end_
         for step in current_plan
         if isinstance(step, dict) and step.get("agent_name") == state["next"]
     ]
+    declared_modes = [
+        str(step.get("operation_mode") or "").strip().lower()
+        for step in assigned_steps
+        if isinstance(step, dict) and step.get("operation_mode")
+    ]
+    mode_rank = {"read": 0, "write": 1, "send": 2}
+    normalized_modes = [
+        "send" if mode == "send" else "read" if mode in {
+            "read", "query", "lookup", "search"
+        } else "write"
+        for mode in declared_modes
+    ]
+    step_operation_mode = max(
+        normalized_modes or [str(state.get("operation_mode") or "read").lower()],
+        key=lambda mode: mode_rank.get(mode, 1),
+    )
+    context.metadata["operation_mode"] = step_operation_mode
     execution_brief = {
         "original_user_query": state.get("original_user_query")
         or state.get("USER_QUERY")
@@ -669,12 +688,14 @@ async def agent_proxy_node(state: State) -> Command[Literal["publisher", "__end_
     # Execution-engine (Phase 2): optionally capture this step's output as a typed
     # Artifact. Gated OFF by default and wrapped so capture never breaks the legacy
     # flow; the messages/return below are unchanged.
+    captured_artifact = None
+    step_key = f"{state.get('current_step')}:{_agent.agent_name}"
     if artifact_capture_enabled:
         try:
             from src.manager.executor.artifact_adapter import to_artifact
             from src.interface.artifact import StepResult, StepStatus
 
-            artifact = to_artifact(
+            captured_artifact = to_artifact(
                 execute_result,
                 step=None,  # legacy publisher/while path has no TaskStep
                 context=context,
@@ -683,27 +704,52 @@ async def agent_proxy_node(state: State) -> Command[Literal["publisher", "__end_
             artifacts = state.get("artifacts")
             if not isinstance(artifacts, dict):
                 artifacts = {}
-            artifacts[artifact.artifact_id] = artifact.model_dump()
+            artifacts[captured_artifact.artifact_id] = captured_artifact.model_dump()
             state["artifacts"] = artifacts
 
             step_results = state.get("step_results")
             if not isinstance(step_results, dict):
                 step_results = {}
-            step_key = f"{state.get('current_step')}:{_agent.agent_name}"
+            captured_status = (
+                StepStatus.SUCCEEDED
+                if execute_result.is_success
+                else StepStatus.FAILED
+            )
             step_results[step_key] = StepResult(
                 step_id=step_key,
-                status=StepStatus.SUCCEEDED,
-                outputs={artifact.logical_name: artifact.ref()},
+                status=captured_status,
+                outputs=(
+                    {captured_artifact.logical_name: captured_artifact.ref()}
+                    if execute_result.is_success
+                    else {}
+                ),
+                error=None if execute_result.is_success else execute_result.error,
             ).model_dump()
             state["step_results"] = step_results
             logger.info(
                 "artifact captured: %s (%s) for agent %s",
-                artifact.artifact_id,
-                artifact.logical_name,
+                captured_artifact.artifact_id,
+                captured_artifact.logical_name,
                 _agent.agent_name,
             )
         except Exception as exc:  # pragma: no cover - defensive; never break flow
             logger.warning("artifact capture skipped: %s", exc)
+
+    skill_step_evidence = dict(state.get("skill_step_evidence") or {})
+    try:
+        from src.skills.execution_evidence import build_step_evidence
+
+        evidence = build_step_evidence(
+            step_id=step_key,
+            agent_name=_agent.agent_name,
+            operation_mode=step_operation_mode,
+            risk_level=str(state.get("risk_profile") or "LOW"),
+            execute_result=execute_result,
+            artifact=captured_artifact,
+        )
+        skill_step_evidence[step_key] = evidence.model_dump(mode="json")
+    except Exception as exc:  # pragma: no cover - evidence must not break execution
+        logger.warning("skill execution evidence capture skipped: %s", exc)
 
     if state["workflow_mode"] == "launch":
         cache.restore_node(
@@ -732,6 +778,7 @@ async def agent_proxy_node(state: State) -> Command[Literal["publisher", "__end_
             "agent_name": _agent.agent_name,
             "workflow_execution_failed": bool(state.get("workflow_execution_failed"))
             or not execute_result.is_success,
+            "skill_step_evidence": skill_step_evidence,
         },
         goto="publisher",
     )

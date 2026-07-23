@@ -196,6 +196,9 @@ class State(MessagesState):
     reused_skill_owner_id: str
     workflow_skill_match: dict[str, Any]
     workflow_execution_failed: bool
+    skill_step_evidence: dict[str, Any]
+    skill_execution_evidence: dict[str, Any]
+    business_success: Optional[bool]
     # Execution-engine (Plan §7): captured artifacts and per-step results.
     artifacts: dict
     step_results: dict

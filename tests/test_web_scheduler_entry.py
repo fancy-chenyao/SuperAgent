@@ -14,6 +14,11 @@ import src.orchestration.runtime as runtime_mod
 import src.workflow.process as proc
 from src.orchestration.plan_snapshot import save_plan_snapshot
 from src.orchestration.plan_to_task_graph import plan_to_task_graph
+from src.skills.workflow_skill import (
+    WorkflowSkillManager,
+    WorkflowSkillSettings,
+    WorkflowSkillStore,
+)
 
 _STEPS = [{"agent_name": "RemoteHRAssistantAgent", "title": "查询王强信息"}]
 
@@ -90,6 +95,81 @@ def test_t12_production_enters_scheduler_via_snapshot(monkeypatch):
     assert entered["v"] is True  # real path entered run_scheduler_workflow
     assert events[-1]["event"] == "end_of_workflow"
     assert events[-1]["data"]["status"] == "SUCCEEDED"
+
+
+def test_scheduler_distills_before_terminal_event(tmp_path, monkeypatch):
+    task_id = "task-scheduler-distill"
+    graph = plan_to_task_graph(
+        _STEPS,
+        task_id="wf-t12",
+        subject="u1",
+        goal=_production_state()["original_user_query"],
+    ).model_dump()
+    save_plan_snapshot(
+        workflow_id="wf-t12",
+        user_id="u1",
+        planning_steps=_STEPS,
+        task_graph=graph,
+    )
+    settings = WorkflowSkillSettings(
+        store_path=tmp_path / "workflow-skills.sqlite3",
+        promotion_success_threshold=2,
+    )
+    manager = WorkflowSkillManager(
+        settings=settings,
+        store=WorkflowSkillStore(settings.store_path),
+    )
+    monkeypatch.setattr(proc, "get_workflow_skill_manager", lambda: manager)
+    monkeypatch.setattr(proc, "orchestration_scheduler_enabled", True, raising=False)
+    monkeypatch.setattr(proc.cache, "get_planning_steps", lambda _wf: _STEPS)
+
+    async def fake_scheduler(state, *, task_id, **_kwargs):
+        evidence = {
+            "task_id": task_id,
+            "workflow_id": state["workflow_id"],
+            "execution_mode": "scheduler",
+            "workflow_status": "SUCCEEDED",
+            "technical_success": True,
+            "business_success": True,
+            "business_outcome_coverage": 1.0,
+            "planning_steps": _STEPS,
+            "steps": [
+                {
+                    "step_id": "step_1",
+                    "agent_name": "RemoteHRAssistantAgent",
+                    "operation_mode": "read",
+                    "technical_success": True,
+                    "business_success": True,
+                    "verification_status": "not_required",
+                }
+            ],
+        }
+        state["skill_execution_evidence"] = evidence
+        yield {
+            "event": "end_of_workflow",
+            "data": {
+                "workflow_id": state["workflow_id"],
+                "task_id": task_id,
+                "mode": "scheduler",
+                "status": "SUCCEEDED",
+                "skill_execution_evidence": evidence,
+            },
+        }
+
+    monkeypatch.setattr(runtime_mod, "run_scheduler_workflow", fake_scheduler)
+    workflow = SimpleNamespace(start_node="coordinator", nodes={})
+    events = _drive(
+        workflow,
+        _production_state(),
+        task_id=task_id,
+        execution_phase="execution",
+    )
+
+    names = [event["event"] for event in events]
+    assert "skill_distilled" in names
+    assert names[-1] == "end_of_workflow"
+    assert names.index("skill_distilled") < names.index("end_of_workflow")
+    assert manager.store.list("u1", include_shared=False)[0].evidence_count == 1
 
 
 def test_prepopulated_graph_cannot_bypass_missing_snapshot(monkeypatch):
