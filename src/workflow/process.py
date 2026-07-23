@@ -1058,8 +1058,20 @@ async def _process_workflow(
 
         if state.get("workflow_mode") == "production":
             if not should_resume or not getattr(task_logger, "planning_steps", []):
+                try:
+                    planning_snapshot = _normalize_planning_steps(
+                        cache.get_planning_steps(workflow_id)
+                    )
+                except (KeyError, AttributeError):
+                    # Some callers enter production with an explicit state but
+                    # without a populated in-memory cache (for example after a
+                    # process restart). Preserve the state plan instead of
+                    # failing before the legacy/scheduler gate is evaluated.
+                    planning_snapshot = _normalize_planning_steps(
+                        state.get("planning_steps")
+                    )
                 task_logger.set_workflow_snapshot(
-                    _normalize_planning_steps(cache.get_planning_steps(workflow_id)),
+                    planning_snapshot,
                     state.get("task_profile") or {},
                 )
                 if hasattr(task_logger, "set_agent_contract_fingerprints"):
@@ -1508,22 +1520,26 @@ async def _process_workflow(
 
         cache.dump(workflow_id, initial_state["workflow_mode"])
 
+        legacy_end_data = {
+            "workflow_id": workflow_id,
+            "task_id": task_id,
+            "messages": [{
+                "role": "user",
+                "content": "workflow failed" if execution_failed else "workflow completed",
+            }],
+            "skill_execution_evidence": (
+                skill_execution_evidence.model_dump(mode="json")
+                if skill_execution_evidence is not None
+                else None
+            ),
+        }
+        # Preserve the successful legacy event shape while making failures
+        # observable to callers that need to distinguish a failed execution.
+        if execution_failed:
+            legacy_end_data["status"] = "failed"
         yield {
             "event": "end_of_workflow",
-            "data": {
-                "workflow_id": workflow_id,
-                "task_id": task_id,
-                "status": "failed" if execution_failed else "completed",
-                "messages": [{
-                    "role": "user",
-                    "content": "workflow failed" if execution_failed else "workflow completed",
-                }],
-                "skill_execution_evidence": (
-                    skill_execution_evidence.model_dump(mode="json")
-                    if skill_execution_evidence is not None
-                    else None
-                ),
-            },
+            "data": legacy_end_data,
         }
 
     except PermissionDeniedError as e:
