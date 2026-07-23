@@ -63,6 +63,8 @@ class TaskLogger:
         self.execution_phase: str = "initial_planning"  # 新增: 执行阶段
         self.planning_steps: List[Dict[str, Any]] = []
         self.task_profile: Dict[str, Any] = {}
+        self.agent_contract_fingerprints: Dict[str, str] = {}
+        self.agent_capability_bindings: Dict[str, List[str]] = {}
         self._step_counter: Dict[str, int] = {}  # track per-node step
 
         self._logs_dir = _get_task_logs_dir()
@@ -175,6 +177,28 @@ class TaskLogger:
         self.task_profile = dict(task_profile or {})
         self._flush()
 
+    def set_agent_contract_fingerprints(self, fingerprints: Dict[str, str]) -> None:
+        """Persist versioned Agent contracts used by the approved plan."""
+
+        self.agent_contract_fingerprints = {
+            str(name): str(value)
+            for name, value in fingerprints.items()
+            if name and value
+        }
+        self._flush()
+
+    def set_agent_capability_bindings(
+        self, bindings: Dict[str, List[str]]
+    ) -> None:
+        """Persist non-sensitive Agent capability declarations for compilation."""
+
+        self.agent_capability_bindings = {
+            str(name): [str(item) for item in capabilities if str(item)]
+            for name, capabilities in bindings.items()
+            if name
+        }
+        self._flush()
+
     @staticmethod
     def determine_execution_phase(workmode: str, instruction_history: List[str]) -> str:
         """
@@ -205,6 +229,8 @@ class TaskLogger:
             "execution_phase": self.execution_phase,  # 新增
             "planning_steps": self.planning_steps,
             "task_profile": self.task_profile,
+            "agent_contract_fingerprints": self.agent_contract_fingerprints,
+            "agent_capability_bindings": self.agent_capability_bindings,
             "created_at": self.created_at,
             "finished_at": datetime.now().isoformat() if self.status != "running" else None,
             "status": self.status,
@@ -243,6 +269,12 @@ class TaskLogger:
             inst.execution_phase = data.get("execution_phase", "initial_planning")
             inst.planning_steps = data.get("planning_steps", [])
             inst.task_profile = data.get("task_profile", {})
+            inst.agent_contract_fingerprints = data.get(
+                "agent_contract_fingerprints", {}
+            )
+            inst.agent_capability_bindings = data.get(
+                "agent_capability_bindings", {}
+            )
 
             inst._step_counter = {"__global__": len(inst.history)}
             inst._logs_dir = logs_dir

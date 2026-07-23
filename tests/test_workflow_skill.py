@@ -31,6 +31,10 @@ def test_task_logger_persists_execution_plan_snapshot(tmp_path, monkeypatch):
         [{"agent_name": "leave_writer", "description": "执行请假"}],
         {"task_type": "HR", "scenario_tags": ["leave_request"]},
     )
+    logger.set_agent_contract_fingerprints({"leave_writer": "contract-v1"})
+    logger.set_agent_capability_bindings(
+        {"leave_writer": ["leave_management"]}
+    )
     logger.log_workflow_end()
 
     restored = task_logger_module.TaskLogger.load("task-snapshot")
@@ -38,6 +42,12 @@ def test_task_logger_persists_execution_plan_snapshot(tmp_path, monkeypatch):
     assert restored is not None
     assert restored.planning_steps[0]["agent_name"] == "leave_writer"
     assert restored.task_profile["task_type"] == "HR"
+    assert restored.agent_contract_fingerprints == {
+        "leave_writer": "contract-v1"
+    }
+    assert restored.agent_capability_bindings == {
+        "leave_writer": ["leave_management"]
+    }
 
 
 def _manager(tmp_path: Path, **overrides) -> WorkflowSkillManager:
@@ -62,6 +72,40 @@ def _profile():
         "expected_capabilities": ["leave management"],
         "risk_profile": "MEDIUM",
     }
+
+
+def _leave_skill_fixture(
+    manager,
+    user_id="alice",
+    lookup_agent_name="RemoteHRAssistantAgent",
+    action_agent_name="RemoteOfficeAssistantAgent",
+):
+    return manager.distill(
+        user_id=user_id,
+        task_id=f"fixture-leave-{user_id}-{lookup_agent_name}-{action_agent_name}",
+        user_query="leave request fixture",
+        planning_steps=[
+            {
+                "agent_name": lookup_agent_name,
+                "capability": "employee_identity_lookup",
+                "description": "Resolve the employee identity",
+            },
+            {
+                "agent_name": action_agent_name,
+                "capability": "leave_management",
+                "description": "Submit the current leave request",
+                "inputs": [
+                    {
+                        "parameter_name": "employee.id",
+                        "source_step": lookup_agent_name,
+                        "source_output": "employee.id",
+                    }
+                ],
+            },
+        ],
+        task_profile=_profile(),
+        intent_examples=["leave request", "request time off", "请假", "申请年假"],
+    )
 
 
 def test_distill_rejects_secrets_and_parameterizes_request(tmp_path):
@@ -154,7 +198,7 @@ def test_distillation_removes_split_task_values_and_preserves_data_flow(tmp_path
         "parameter_name": "employee.id",
         "source_step": "hr_lookup",
         "source_output": "employee.id",
-        "description": "将 hr_lookup.employee.id 映射到 employee.id",
+        "description": "Map hr_lookup.employee.id to employee.id",
     }
 
     manager.store.activate("alice", card.skill_id)
@@ -194,7 +238,7 @@ def test_repeated_success_promotes_and_is_user_scoped(tmp_path):
     assert manager.store.list("bob", include_shared=False) == []
 
 
-def test_first_evidence_activates_when_promotion_threshold_is_one(tmp_path):
+def test_first_evidence_stays_candidate_when_promotion_threshold_is_one(tmp_path):
     manager = _manager(tmp_path, promotion_success_threshold=1)
 
     card = manager.distill(
@@ -205,7 +249,7 @@ def test_first_evidence_activates_when_promotion_threshold_is_one(tmp_path):
         task_profile=_profile(),
     )
 
-    assert card.status == WorkflowSkillStatus.ACTIVE
+    assert card.status == WorkflowSkillStatus.CANDIDATE
 
 
 def test_concurrent_store_instances_preserve_all_evidence(tmp_path):
@@ -236,7 +280,7 @@ def test_concurrent_store_instances_preserve_all_evidence(tmp_path):
 def test_concurrent_outcomes_do_not_lose_failure_counts(tmp_path):
     worker_count = 8
     manager = _manager(tmp_path)
-    card = manager.bootstrap_leave_request("alice")
+    card = _leave_skill_fixture(manager)
     manager.store.activate("alice", card.skill_id)
     stores = [WorkflowSkillStore(manager.settings.store_path) for _ in range(worker_count)]
 
@@ -308,19 +352,15 @@ def test_new_procedure_creates_next_version_and_activation_retires_previous(tmp_
     assert manager.store.get("alice", second.skill_id).status == WorkflowSkillStatus.ACTIVE
 
 
-def test_builtin_leave_skill_matches_chinese_request_at_default_threshold(tmp_path):
+def test_distilled_leave_fixture_matches_chinese_request_at_default_threshold(tmp_path):
     manager = _manager(tmp_path, match_threshold=0.62)
-    card = manager.bootstrap_leave_request("alice")
+    card = _leave_skill_fixture(manager)
     manager.store.activate("alice", card.skill_id)
 
     match = manager.match(
         user_id="alice",
         query="我想申请年假，下周三请一天",
-        task_profile={
-            "task_type": "HR",
-            "scenario_tags": [],
-            "expected_capabilities": ["HR"],
-        },
+        task_profile=_profile(),
         available_agents=["RemoteHRAssistantAgent", "RemoteOfficeAssistantAgent"],
     )
 
@@ -330,7 +370,7 @@ def test_builtin_leave_skill_matches_chinese_request_at_default_threshold(tmp_pa
 
 def test_leave_skill_matches_current_request_and_failure_disables(tmp_path):
     manager = _manager(tmp_path)
-    card = manager.bootstrap_leave_request("alice")
+    card = _leave_skill_fixture(manager)
     manager.store.activate("alice", card.skill_id)
 
     match = manager.match(
@@ -357,7 +397,7 @@ def test_leave_skill_matches_current_request_and_failure_disables(tmp_path):
 
 def test_broad_hr_terms_do_not_match_leave_skill(tmp_path):
     manager = _manager(tmp_path, match_threshold=0.62)
-    card = manager.bootstrap_leave_request("alice")
+    card = _leave_skill_fixture(manager)
     manager.store.activate("alice", card.skill_id)
 
     match = manager.match(
@@ -376,8 +416,8 @@ def test_broad_hr_terms_do_not_match_leave_skill(tmp_path):
 
 def test_missing_agent_and_ambiguous_match_fall_back(tmp_path):
     manager = _manager(tmp_path)
-    card = manager.bootstrap_leave_request(
-        "alice",
+    card = _leave_skill_fixture(
+        manager,
         lookup_agent_name="hr_lookup",
         action_agent_name="leave_writer",
     )
@@ -392,7 +432,7 @@ def test_missing_agent_and_ambiguous_match_fall_back(tmp_path):
 
 def test_shared_skill_is_not_automatically_matched_for_user(tmp_path):
     manager = _manager(tmp_path)
-    card = manager.bootstrap_leave_request("share")
+    card = _leave_skill_fixture(manager, user_id="share")
     manager.store.activate("share", card.skill_id)
 
     match = manager.match(
@@ -437,7 +477,7 @@ def test_ambiguous_skills_fall_back_instead_of_guessing(tmp_path):
 
 def test_configuration_can_disable_skill_matching(tmp_path):
     manager = _manager(tmp_path, reuse_enabled=False)
-    card = manager.bootstrap_leave_request("alice")
+    card = _leave_skill_fixture(manager)
     manager.store.activate("alice", card.skill_id)
 
     assert manager.match(

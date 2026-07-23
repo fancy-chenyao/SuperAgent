@@ -44,6 +44,35 @@ def _leave_profile():
     }
 
 
+def _leave_skill_fixture(manager, user_id="alice"):
+    return manager.distill(
+        user_id=user_id,
+        task_id=f"fixture-leave-{user_id}",
+        user_query="leave request fixture",
+        planning_steps=[
+            {
+                "agent_name": "RemoteHRAssistantAgent",
+                "capability": "employee_identity_lookup",
+                "description": "Resolve the employee identity",
+            },
+            {
+                "agent_name": "RemoteOfficeAssistantAgent",
+                "capability": "leave_management",
+                "description": "Submit the current leave request",
+                "inputs": [
+                    {
+                        "parameter_name": "employee.id",
+                        "source_step": "RemoteHRAssistantAgent",
+                        "source_output": "employee.id",
+                    }
+                ],
+            },
+        ],
+        task_profile=_leave_profile(),
+        intent_examples=["leave request", "request time off"],
+    )
+
+
 class _FakeCache:
     def __init__(self, workflow_id="alice:wf"):
         self.steps = []
@@ -116,7 +145,7 @@ def test_leave_launch_reuses_plan_without_coordinator_or_planner_llm(tmp_path, m
     import src.workflow.process as process
 
     manager = _manager(tmp_path)
-    card = manager.bootstrap_leave_request("alice")
+    card = _leave_skill_fixture(manager)
     manager.store.activate("alice", card.skill_id)
     fake_cache = _FakeCache()
     llm_calls = []
@@ -137,6 +166,19 @@ def test_leave_launch_reuses_plan_without_coordinator_or_planner_llm(tmp_path, m
     monkeypatch.setattr(process, "AUTO_RECOVERY_ENABLED", False)
     monkeypatch.setattr(process, "get_llm_by_type", lambda _kind: SimpleNamespace())
     monkeypatch.setattr(coor_task, "get_llm_by_type", forbidden_llm)
+
+    validation_calls = []
+
+    async def validate_data_flow(steps, user_id):
+        validation_calls.append((len(steps), user_id))
+        return True, []
+
+    monkeypatch.setattr(coor_task, "_validate_plan_data_flow", validate_data_flow)
+    monkeypatch.setattr(
+        coor_task,
+        "_validate_plan_against_task_profile",
+        lambda _steps, _state: [],
+    )
 
     workflow = CompiledWorkflow(
         nodes={
@@ -187,6 +229,7 @@ def test_leave_launch_reuses_plan_without_coordinator_or_planner_llm(tmp_path, m
     assert "skill_matched" in event_names
     assert event_names[-1] == "end_of_workflow"
     assert llm_calls == []
+    assert validation_calls == [(2, "alice")]
     assert fake_cache.steps[0]["agent_name"] == "RemoteHRAssistantAgent"
     assert fake_cache.steps[1]["agent_name"] == "RemoteOfficeAssistantAgent"
     assert fake_cache.steps[1]["inputs"][0]["source_step"] == "RemoteHRAssistantAgent"
@@ -272,7 +315,20 @@ def test_workflow_skill_backend_api_lifecycle_and_manual_distillation(tmp_path, 
                 headers=headers,
             )
             assert distilled.status_code == 200
-            skill_id = distilled.json()["skill"]["skill_id"]
+            distilled_skill = distilled.json()["skill"]
+            skill_id = distilled_skill["skill_id"]
+            assert distilled_skill["schema_version"] == 2
+            assert distilled_skill["evidence_count"] == 1
+            assert distilled_skill["graph"]["complete"] is True
+
+            evidence = client.get(
+                "/api/workflow-skills/evidence",
+                params={"user_id": "alice"},
+                headers=headers,
+            )
+            assert evidence.status_code == 200
+            assert evidence.json()[0]["task_id"] == "task-1"
+            assert "Please submit my leave request" not in str(evidence.json()[0])
 
             activated = client.post(
                 f"/api/workflow-skills/{skill_id}/activate",
@@ -473,7 +529,7 @@ def test_request_flag_disables_reuse_and_runs_normal_graph(tmp_path, monkeypatch
     import src.workflow.process as process
 
     manager = _manager(tmp_path)
-    card = manager.bootstrap_leave_request("alice")
+    card = _leave_skill_fixture(manager)
     manager.store.activate("alice", card.skill_id)
     fake_cache = _FakeCache()
     node_calls = []
@@ -538,3 +594,86 @@ def test_request_flag_disables_reuse_and_runs_normal_graph(tmp_path, monkeypatch
     events = asyncio.run(run())
     assert node_calls == ["coordinator"]
     assert "skill_matched" not in [event["event"] for event in events]
+
+
+def test_reused_plan_validation_failure_regenerates_with_normal_planner(monkeypatch):
+    import src.workflow.coor_task as coor_task
+
+    fake_cache = _FakeCache()
+    fake_cache.steps = [{"agent_name": "StaleAgent", "description": "stale"}]
+    events = []
+    llm_calls = []
+
+    async def validate_data_flow(steps, _user_id):
+        if steps[0]["agent_name"] == "StaleAgent":
+            return False, ["StaleAgent is unavailable"]
+        return True, []
+
+    class FakePlannerLLM:
+        async def astream(self, _messages):
+            llm_calls.append("planner")
+            yield SimpleNamespace(
+                content='{"steps":[{"agent_name":"CurrentAgent","description":"fresh"}]}'
+            )
+
+    async def emit(event):
+        events.append(event)
+
+    monkeypatch.setattr(coor_task, "cache", fake_cache)
+    monkeypatch.setattr(coor_task, "_validate_plan_data_flow", validate_data_flow)
+    monkeypatch.setattr(
+        coor_task,
+        "_validate_plan_against_task_profile",
+        lambda _steps, _state: [],
+    )
+    monkeypatch.setattr(coor_task, "apply_prompt_template", lambda *_args: [])
+    monkeypatch.setattr(coor_task, "get_llm_by_type", lambda _kind: FakePlannerLLM())
+
+    state = {
+        "user_id": "alice",
+        "workflow_id": "alice:wf",
+        "workflow_mode": "launch",
+        "workflow_skill_match": {"skill_id": "wskill-stale"},
+        "reused_skill_id": "wskill-stale",
+        "reused_skill_owner_id": "alice",
+        "planning_steps": list(fake_cache.steps),
+        "routing_decision": {"decision": "DISPATCH"},
+        "task_profile": {},
+        "instruction_history": ["generate a report"],
+        "deep_thinking_mode": False,
+        "search_before_planning": False,
+        "stop_after_planner": True,
+        "runtime_event_handler": emit,
+    }
+
+    command = asyncio.run(coor_task.planner_node(state))
+
+    assert llm_calls == ["planner"]
+    assert command.update["planning_steps"][0]["agent_name"] == "CurrentAgent"
+    assert any(event["event"] == "skill_rejected" for event in events)
+    assert state["workflow_skill_match"] == {}
+    assert state["reused_skill_id"] == ""
+
+
+def test_data_flow_validation_rejects_missing_current_agent(monkeypatch):
+    import src.workflow.coor_task as coor_task
+
+    class EmptyRegistry:
+        async def list(self):
+            return []
+
+    monkeypatch.setattr(
+        coor_task,
+        "agent_manager",
+        SimpleNamespace(agent_registry=EmptyRegistry()),
+    )
+
+    is_valid, errors = asyncio.run(
+        coor_task._validate_plan_data_flow(
+            [{"agent_name": "MissingAgent", "inputs": []}],
+            "alice",
+        )
+    )
+
+    assert is_valid is False
+    assert "MissingAgent" in errors[0]

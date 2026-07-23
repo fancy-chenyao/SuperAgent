@@ -1,7 +1,7 @@
-"""Declarative, reusable workflow skills distilled from successful runs.
+"""Evidence-based distillation and reuse of declarative workflow skills.
 
-This module deliberately stores plans rather than executable Python or replay
-state. It is safe to use as a backend capability before the Web UI exposes it.
+The distiller stores parameterized procedure structure, never historical tool
+arguments, outputs, messages, credentials, or checkpoint state.
 """
 
 from __future__ import annotations
@@ -26,28 +26,7 @@ from src.memory.utils import contains_secret, lexical_terms
 _PLACEHOLDER = "{{user_request}}"
 _STOP_WORDS = {
     "please", "help", "create", "make", "the", "and", "with", "from",
-    "request", "task", "current", "user", "请", "帮", "我", "一下",
-}
-_SCENARIO_INTENT_ALIASES = {
-    "leave_request": [
-        "请假", "休假", "年假", "病假", "事假", "调休", "产假", "陪产假",
-        "leave", "time off", "sick leave", "annual leave",
-    ],
-    "travel_request": ["出差", "差旅", "business travel"],
-    "salary_query": ["工资", "薪资", "salary"],
-    "employee_info": ["员工信息", "人员信息", "employee information"],
-    "employee_proof": ["员工证明", "在职证明", "employment certificate"],
-    "notification_send": ["发送通知", "发送邮件", "send notification", "send email"],
-    "mass_notification": ["批量通知", "群发", "batch notification"],
-    "risk_analysis": ["风险分析", "risk analysis"],
-    "market_research": ["市场调研", "market research"],
-}
-_ALLOWED_TASK_TYPES = {
-    "GENERAL", "HR", "COMMUNICATION", "RISK", "DOCUMENT", "RESEARCH",
-}
-_ALLOWED_CAPABILITIES = {
-    "general", "hr", "hr_data_access", "salary_information_retrieval",
-    "leave management", "communication", "research", "document",
+    "request", "task", "current", "user", "this", "that", "for", "to",
 }
 _DATA_PATH_RE = re.compile(
     r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*$"
@@ -55,6 +34,16 @@ _DATA_PATH_RE = re.compile(
 _INSTANCE_IDENTIFIER_RE = re.compile(
     r"(?:@|\b\d{4}[-/]\d{1,2}[-/]\d{1,2}\b|^[A-Z]{1,4}\d{2,}$)"
 )
+_RISK_LEVEL = {"LOW": 0, "MEDIUM": 1, "HIGH": 2, "CRITICAL": 3}
+_BUSINESS_OUTCOME_ACTIONS = {
+    "approve",
+    "delete",
+    "execute",
+    "send",
+    "submit",
+    "update",
+    "write",
+}
 
 
 def _now() -> str:
@@ -62,7 +51,91 @@ def _now() -> str:
 
 
 def _json(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+
+
+def _hash(value: Any) -> str:
+    return hashlib.sha256(_json(value).encode("utf-8")).hexdigest()
+
+
+def _normalize_token(value: Any, default: str = "") -> str:
+    text = str(value or "").strip().casefold().replace("-", "_").replace(" ", "_")
+    return re.sub(r"_+", "_", text).strip("_") or default
+
+
+def _normalize_values(value: Any) -> list[str]:
+    if isinstance(value, str):
+        source = value.split(",") if "," in value else [value]
+    elif isinstance(value, Iterable) and not isinstance(value, (dict, bytes)):
+        source = list(value)
+    else:
+        source = []
+    return sorted({item for raw in source if (item := _normalize_token(raw))})
+
+
+def _safe_terms(text: str) -> set[str]:
+    normalized = text.replace("_", " ").replace("-", " ")
+    return {
+        term for term in lexical_terms(normalized)
+        if term not in _STOP_WORDS and len(term) > 1
+    }
+
+
+def _profile_intent(profile: dict[str, Any]) -> str:
+    direct = (
+        profile.get("primary_goal_intent")
+        or profile.get("intent")
+        or profile.get("sub_intent")
+    )
+    if direct:
+        return _normalize_token(direct, "general_assistance")
+    tags = _normalize_values(profile.get("scenario_tags"))
+    if tags and tags != ["general"]:
+        return tags[0]
+    return _normalize_token(profile.get("task_type"), "general_assistance")
+
+
+def _profile_action(profile: dict[str, Any]) -> str:
+    return _normalize_token(
+        profile.get("action") or profile.get("operation_mode"),
+        "read",
+    )
+
+
+def _profile_risk(profile: dict[str, Any]) -> str:
+    risk = str(profile.get("risk_level") or profile.get("risk_profile") or "LOW").upper()
+    return risk if risk in _RISK_LEVEL else "LOW"
+
+
+def _replace_request(value: Any, request: str) -> Any:
+    if isinstance(value, str):
+        return value.replace(_PLACEHOLDER, request)
+    if isinstance(value, list):
+        return [_replace_request(item, request) for item in value]
+    if isinstance(value, dict):
+        return {key: _replace_request(item, request) for key, item in value.items()}
+    return value
+
+
+def _bind_skill_plan(
+    card: "WorkflowSkillCard",
+    request: str,
+    profile: dict[str, Any],
+) -> list[dict[str, Any]]:
+    bound = _replace_request(card.planning_steps, request)
+    raw_entities = (
+        profile.get("entities") if isinstance(profile.get("entities"), dict) else {}
+    )
+    entities = {_normalize_token(key): value for key, value in raw_entities.items()}
+    slot_bindings = {
+        slot.name: entities[slot.name]
+        for slot in card.slots
+        if slot.name in entities
+    }
+    for step in bound:
+        if isinstance(step, dict) and slot_bindings:
+            step["slot_bindings"] = dict(slot_bindings)
+    return bound
 
 
 class WorkflowSkillStatus(str, Enum):
@@ -81,13 +154,17 @@ class WorkflowSkillSettings(BaseModel):
     match_margin: float = 0.08
     promotion_success_threshold: int = 2
     failure_disable_threshold: int = 2
+    minimum_structure_consistency: float = 1.0
+    allow_legacy_reuse: bool = True
     store_path: Path = Path("store/skills/workflow_skills.sqlite3")
 
     @classmethod
     def from_env(cls) -> "WorkflowSkillSettings":
         def boolean(name: str, default: bool) -> bool:
             value = os.getenv(name)
-            return default if value is None else value.strip().lower() in {"1", "true", "yes", "on"}
+            return default if value is None else value.strip().lower() in {
+                "1", "true", "yes", "on",
+            }
 
         def integer(name: str, default: int) -> int:
             try:
@@ -107,9 +184,22 @@ class WorkflowSkillSettings(BaseModel):
             auto_distill_enabled=boolean("WORKFLOW_SKILL_AUTO_DISTILL_ENABLED", True),
             match_threshold=decimal("WORKFLOW_SKILL_MATCH_THRESHOLD", 0.62),
             match_margin=decimal("WORKFLOW_SKILL_MATCH_MARGIN", 0.08),
-            promotion_success_threshold=max(1, integer("WORKFLOW_SKILL_PROMOTION_THRESHOLD", 2)),
-            failure_disable_threshold=max(1, integer("WORKFLOW_SKILL_FAILURE_THRESHOLD", 2)),
-            store_path=Path(os.getenv("WORKFLOW_SKILL_DB_PATH", "store/skills/workflow_skills.sqlite3")),
+            promotion_success_threshold=max(
+                1, integer("WORKFLOW_SKILL_PROMOTION_THRESHOLD", 2)
+            ),
+            failure_disable_threshold=max(
+                1, integer("WORKFLOW_SKILL_FAILURE_THRESHOLD", 2)
+            ),
+            minimum_structure_consistency=decimal(
+                "WORKFLOW_SKILL_STRUCTURE_CONSISTENCY", 1.0
+            ),
+            allow_legacy_reuse=boolean("WORKFLOW_SKILL_ALLOW_LEGACY_REUSE", True),
+            store_path=Path(
+                os.getenv(
+                    "WORKFLOW_SKILL_DB_PATH",
+                    "store/skills/workflow_skills.sqlite3",
+                )
+            ),
         )
 
 
@@ -119,6 +209,88 @@ class WorkflowSkillProvenance(BaseModel):
     distilled_at: str = Field(default_factory=_now)
 
 
+class WorkflowSkillSlot(BaseModel):
+    name: str
+    value_type: str = "string"
+    required: bool = True
+    source: str = "task_profile.entities"
+    description: str = "Value bound from the current task"
+
+
+class WorkflowSkillApplicability(BaseModel):
+    intent: str = "general_assistance"
+    action: str = "read"
+    task_type: str = "GENERAL"
+    expected_capabilities: list[str] = Field(default_factory=list)
+    data_scopes: list[str] = Field(default_factory=lambda: ["general"])
+    scenario_tags: list[str] = Field(default_factory=list)
+    max_risk: str = "LOW"
+    irreversible: bool = False
+
+
+class WorkflowSkillGraphNode(BaseModel):
+    node_id: str
+    capability: str
+    agent_binding: str
+    inputs: list[dict[str, str]] = Field(default_factory=list)
+    request_slots: list[str] = Field(default_factory=list)
+    success_condition: str = "agent_execution_succeeded"
+    retry_policy: dict[str, Any] = Field(
+        default_factory=lambda: {"max_attempts": 1, "fallback": "normal_planning"}
+    )
+
+
+class WorkflowSkillGraphEdge(BaseModel):
+    source: str
+    target: str
+    kind: str = "sequence"
+    condition: str = ""
+    data_mapping: dict[str, str] = Field(default_factory=dict)
+
+
+class WorkflowSkillGraph(BaseModel):
+    graph_type: str = "capability_dag"
+    nodes: list[WorkflowSkillGraphNode] = Field(default_factory=list)
+    edges: list[WorkflowSkillGraphEdge] = Field(default_factory=list)
+    entry_nodes: list[str] = Field(default_factory=list)
+    exit_nodes: list[str] = Field(default_factory=list)
+    complete: bool = False
+
+
+class WorkflowSkillQuality(BaseModel):
+    support_count: int = 0
+    structure_consistency: float = 0.0
+    slot_coverage: float = 0.0
+    execution_success_rate: float = 1.0
+    business_success_rate: Optional[float] = None
+    business_outcome_coverage: float = 0.0
+    contract_stability: float = 1.0
+
+
+class WorkflowSkillValidation(BaseModel):
+    status: str = "pending"
+    method: str = "multi_trace_consistency"
+    operator_override: bool = False
+    validated_at: Optional[str] = None
+
+
+class WorkflowSkillEvidence(BaseModel):
+    evidence_id: str
+    user_id: str
+    task_id: str
+    bucket_signature: str
+    control_flow_signature: str
+    task_profile: dict[str, Any]
+    slots: list[WorkflowSkillSlot] = Field(default_factory=list)
+    graph: WorkflowSkillGraph
+    planning_steps: list[dict[str, Any]] = Field(default_factory=list)
+    contract_fingerprints: dict[str, str] = Field(default_factory=dict)
+    outcome_summary: dict[str, Any] = Field(
+        default_factory=lambda: {"technical_success": True}
+    )
+    created_at: str = Field(default_factory=_now)
+
+
 class WorkflowSkillCard(BaseModel):
     model_config = ConfigDict(extra="allow")
 
@@ -126,6 +298,7 @@ class WorkflowSkillCard(BaseModel):
     user_id: str
     name: str
     description: str
+    schema_version: int = 1
     status: WorkflowSkillStatus = WorkflowSkillStatus.CANDIDATE
     version: int = 1
     family_signature: str = ""
@@ -137,6 +310,18 @@ class WorkflowSkillCard(BaseModel):
     risk_profile: str = "LOW"
     planning_steps: list[dict[str, Any]] = Field(default_factory=list)
     required_agents: list[str] = Field(default_factory=list)
+    applicability: WorkflowSkillApplicability = Field(
+        default_factory=WorkflowSkillApplicability
+    )
+    slots: list[WorkflowSkillSlot] = Field(default_factory=list)
+    preconditions: list[str] = Field(default_factory=list)
+    graph: WorkflowSkillGraph = Field(default_factory=WorkflowSkillGraph)
+    postconditions: list[str] = Field(default_factory=list)
+    outputs: list[str] = Field(default_factory=list)
+    failure_modes: list[str] = Field(default_factory=list)
+    contract_fingerprints: dict[str, str] = Field(default_factory=dict)
+    quality: WorkflowSkillQuality = Field(default_factory=WorkflowSkillQuality)
+    validation: WorkflowSkillValidation = Field(default_factory=WorkflowSkillValidation)
     confidence: float = 0.5
     evidence_count: int = 1
     success_count: int = 1
@@ -154,21 +339,42 @@ class WorkflowSkillMatch(BaseModel):
     lexical_score: float
     reason: str
     bound_planning_steps: list[dict[str, Any]]
+    applicability_checks: dict[str, bool] = Field(default_factory=dict)
 
 
-def _safe_terms(text: str) -> set[str]:
-    normalized = text.replace("_", " " ).replace("-", " ")
-    return {term for term in lexical_terms(normalized) if term not in _STOP_WORDS and len(term) > 1}
-
-
-def _replace_request(value: Any, request: str) -> Any:
-    if isinstance(value, str):
-        return value.replace(_PLACEHOLDER, request)
+def _value_type(value: Any) -> str:
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, int):
+        return "integer"
+    if isinstance(value, float):
+        return "number"
     if isinstance(value, list):
-        return [_replace_request(item, request) for item in value]
+        return "array"
     if isinstance(value, dict):
-        return {key: _replace_request(item, request) for key, item in value.items()}
-    return value
+        return "object"
+    return "string"
+
+
+def _slots_from_profile(profile: dict[str, Any]) -> list[WorkflowSkillSlot]:
+    raw_entities = (
+        profile.get("entities") if isinstance(profile.get("entities"), dict) else {}
+    )
+    entities = {_normalize_token(key): value for key, value in raw_entities.items()}
+    missing = {
+        _normalize_token(item) for item in profile.get("missing_fields", []) if item
+    }
+    names = sorted(set(_normalize_token(key) for key in entities) | missing)
+    return [
+        WorkflowSkillSlot(
+            name=name,
+            value_type=_value_type(entities.get(name)),
+            required=True,
+            source="task_profile.entities",
+        )
+        for name in names
+        if name
+    ]
 
 
 def _parameterize_input_mapping(
@@ -183,24 +389,29 @@ def _parameterize_input_mapping(
     if not parameter_name or not source_step or not source_output:
         return None
     if source_step not in prior_agents:
-        raise ValueError(f"workflow skill input references unknown prior Agent: {source_step}")
+        raise ValueError(
+            f"workflow skill input references unknown prior Agent: {source_step}"
+        )
     for field_name, identifier in (
         ("parameter_name", parameter_name),
         ("source_output", source_output),
     ):
-        if not _DATA_PATH_RE.fullmatch(identifier) or _INSTANCE_IDENTIFIER_RE.search(identifier):
+        if (
+            not _DATA_PATH_RE.fullmatch(identifier)
+            or _INSTANCE_IDENTIFIER_RE.search(identifier)
+        ):
             raise ValueError(f"workflow skill input has invalid {field_name}")
     return {
         "parameter_name": parameter_name,
         "source_step": source_step,
         "source_output": source_output,
-        "description": f"将 {source_step}.{source_output} 映射到 {parameter_name}",
+        "description": f"Map {source_step}.{source_output} to {parameter_name}",
     }
 
 
-def _parameterize_steps(planning_steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Retain procedure structure while removing task-instance values."""
-
+def _parameterize_steps(
+    planning_steps: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
     parameterized: list[dict[str, Any]] = []
     prior_agents: set[str] = set()
     for index, step in enumerate(planning_steps, start=1):
@@ -217,12 +428,14 @@ def _parameterize_steps(planning_steps: list[dict[str, Any]]) -> list[dict[str, 
         parameterized.append(
             {
                 "agent_name": agent_name,
-                "title": f"可复用步骤 {index}：{agent_name}",
+                "title": f"Reusable step {index}: {agent_name}",
                 "description": (
-                    f"由 {agent_name} 处理本次请求。只能使用本次请求和前序步骤映射输出中的数据。"
-                    f"本次请求：{_PLACEHOLDER}"
+                    f"Use {agent_name} for the current task. Current request: {_PLACEHOLDER}"
                 ),
-                "note": "禁止复用源任务中的员工、日期、收件人、数量、原因或其他实例值。",
+                "note": (
+                    "Use only the current request and explicitly mapped outputs "
+                    "from prior steps."
+                ),
                 "inputs": inputs,
                 "request_context": _PLACEHOLDER,
             }
@@ -231,70 +444,185 @@ def _parameterize_steps(planning_steps: list[dict[str, Any]]) -> list[dict[str, 
     return parameterized
 
 
+def _capability_for_step(
+    source_step: dict[str, Any],
+    profile_capabilities: list[str],
+    agent_capabilities: dict[str, list[str]],
+    index: int,
+    total: int,
+) -> str:
+    explicit = (
+        source_step.get("capability")
+        or source_step.get("expected_capability")
+        or source_step.get("operation")
+    )
+    if explicit:
+        return _normalize_token(explicit, "general")
+    agent_name = str(source_step.get("agent_name") or "")
+    declared = _normalize_values(agent_capabilities.get(agent_name, []))
+    profile_matches = [
+        capability for capability in profile_capabilities if capability in declared
+    ]
+    if profile_matches:
+        return profile_matches[0]
+    if declared and declared != ["general"]:
+        return declared[0]
+    if total == 1 and len(profile_capabilities) == 1:
+        return profile_capabilities[0]
+    if index == total - 1 and profile_capabilities:
+        return profile_capabilities[0]
+    return _normalize_token(source_step.get("agent_name"), "general")
+
+
+def _compile_graph(
+    source_steps: list[dict[str, Any]],
+    parameterized_steps: list[dict[str, Any]],
+    profile_capabilities: list[str],
+    slots: list[WorkflowSkillSlot],
+    agent_capabilities: dict[str, list[str]],
+) -> WorkflowSkillGraph:
+    nodes: list[WorkflowSkillGraphNode] = []
+    edges: list[WorkflowSkillGraphEdge] = []
+    agent_nodes: dict[str, str] = {}
+    slot_names = [slot.name for slot in slots]
+    total = len(parameterized_steps)
+    valid_source = [step for step in source_steps if isinstance(step, dict) and step.get("agent_name")]
+    for index, step in enumerate(parameterized_steps):
+        node_id = f"step_{index + 1}"
+        source = valid_source[index] if index < len(valid_source) else step
+        node = WorkflowSkillGraphNode(
+            node_id=node_id,
+            capability=_capability_for_step(
+                source,
+                profile_capabilities,
+                agent_capabilities,
+                index,
+                total,
+            ),
+            agent_binding=str(step["agent_name"]),
+            inputs=list(step.get("inputs") or []),
+            request_slots=slot_names,
+        )
+        nodes.append(node)
+        agent_nodes[node.agent_binding] = node_id
+        if index:
+            edges.append(
+                WorkflowSkillGraphEdge(
+                    source=f"step_{index}",
+                    target=node_id,
+                    kind="sequence",
+                )
+            )
+    for node in nodes:
+        for mapping in node.inputs:
+            source_node = agent_nodes.get(mapping.get("source_step", ""))
+            if source_node:
+                edges.append(
+                    WorkflowSkillGraphEdge(
+                        source=source_node,
+                        target=node.node_id,
+                        kind="data",
+                        data_mapping={
+                            "source_output": mapping["source_output"],
+                            "parameter_name": mapping["parameter_name"],
+                        },
+                    )
+                )
+    complete = bool(nodes) and all(node.agent_binding and node.capability for node in nodes)
+    return WorkflowSkillGraph(
+        nodes=nodes,
+        edges=edges,
+        entry_nodes=[nodes[0].node_id] if nodes else [],
+        exit_nodes=[nodes[-1].node_id] if nodes else [],
+        complete=complete,
+    )
+
+
+def _applicability(profile: dict[str, Any]) -> WorkflowSkillApplicability:
+    task_type = str(profile.get("task_type") or "GENERAL").upper()
+    return WorkflowSkillApplicability(
+        intent=_profile_intent(profile),
+        action=_profile_action(profile),
+        task_type=task_type,
+        expected_capabilities=_normalize_values(profile.get("expected_capabilities")),
+        data_scopes=_normalize_values(profile.get("data_scope")) or ["general"],
+        scenario_tags=_normalize_values(profile.get("scenario_tags")),
+        max_risk=_profile_risk(profile),
+        irreversible=bool(profile.get("irreversible", False)),
+    )
+
+
+def _sanitized_profile(
+    applicability: WorkflowSkillApplicability,
+    slots: list[WorkflowSkillSlot],
+) -> dict[str, Any]:
+    return {
+        **applicability.model_dump(mode="json"),
+        "slot_names": [slot.name for slot in slots],
+    }
+
+
+def _family_signature(applicability: WorkflowSkillApplicability) -> str:
+    return _hash(
+        {
+            "intent": applicability.intent,
+            "action": applicability.action,
+            "task_type": applicability.task_type,
+            "expected_capabilities": applicability.expected_capabilities,
+            "data_scopes": applicability.data_scopes,
+        }
+    )
+
+
+def _control_flow_signature(
+    graph: WorkflowSkillGraph,
+    contracts: dict[str, str],
+) -> str:
+    return _hash(
+        {
+            "nodes": [
+                {
+                    "capability": node.capability,
+                    "agent_binding": node.agent_binding,
+                    "inputs": [
+                        {
+                            "parameter_name": item.get("parameter_name"),
+                            "source_step": item.get("source_step"),
+                            "source_output": item.get("source_output"),
+                        }
+                        for item in node.inputs
+                    ],
+                }
+                for node in graph.nodes
+            ],
+            "edges": [
+                {
+                    "source": edge.source,
+                    "target": edge.target,
+                    "kind": edge.kind,
+                    "data_mapping": edge.data_mapping,
+                }
+                for edge in graph.edges
+            ],
+            "contracts": dict(sorted(contracts.items())),
+        }
+    )
+
+
 def _intent_examples(
-    profile: dict[str, Any],
+    applicability: WorkflowSkillApplicability,
     explicit_examples: Iterable[str] | None,
-    user_query: str,
 ) -> list[str]:
-    examples = [str(item).strip() for item in explicit_examples or [] if str(item).strip()]
-    tags = [str(item).strip() for item in profile.get("scenario_tags", []) if str(item).strip()]
-    for tag in tags:
-        aliases = _SCENARIO_INTENT_ALIASES.get(tag.casefold())
-        if aliases:
-            examples.extend(aliases)
-        elif not tag.casefold().endswith(("_service", "_operation")):
-            examples.append(tag)
-    lowered_query = user_query.casefold()
-    for aliases in _SCENARIO_INTENT_ALIASES.values():
-        if any(alias.casefold() in lowered_query for alias in aliases):
-            examples.extend(aliases)
+    examples = [
+        str(item).strip() for item in explicit_examples or [] if str(item).strip()
+    ]
+    examples.append(applicability.intent.replace("_", " "))
+    examples.extend(tag.replace("_", " ") for tag in applicability.scenario_tags)
     return list(dict.fromkeys(examples))
 
 
-def _inferred_scenario_tags(user_query: str) -> list[str]:
-    lowered_query = user_query.casefold()
-    return [
-        tag
-        for tag, aliases in _SCENARIO_INTENT_ALIASES.items()
-        if any(alias.casefold() in lowered_query for alias in aliases)
-    ]
-
-
-def _family_signature(
-    task_type: str,
-    tags: Iterable[str],
-) -> str:
-    payload = {
-        "task_type": str(task_type or "GENERAL").upper(),
-        "tags": sorted({str(item).casefold() for item in tags if item}),
-    }
-    return hashlib.sha256(_json(payload).encode("utf-8")).hexdigest()
-
-
-def _signature(family_signature: str, planning_steps: list[dict[str, Any]]) -> str:
-    structure = []
-    for step in planning_steps:
-        structure.append(
-            {
-                "agent_name": step.get("agent_name"),
-                "inputs": [
-                    {
-                        "parameter_name": mapping.get("parameter_name"),
-                        "source_step": mapping.get("source_step"),
-                        "source_output": mapping.get("source_output"),
-                    }
-                    for mapping in step.get("inputs", [])
-                    if isinstance(mapping, dict)
-                ],
-            }
-        )
-    return hashlib.sha256(
-        _json({"family_signature": family_signature, "structure": structure}).encode("utf-8")
-    ).hexdigest()
-
-
 class WorkflowSkillStore:
-    """SQLite persistence with user-scoped reads and transactional updates."""
+    """SQLite persistence for cards and their independently auditable evidence."""
 
     def __init__(self, path: str | Path):
         self.path = Path(path)
@@ -303,7 +631,9 @@ class WorkflowSkillStore:
         self._initialize()
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(str(self.path), timeout=30, check_same_thread=False)
+        connection = sqlite3.connect(
+            str(self.path), timeout=30, check_same_thread=False
+        )
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA busy_timeout=30000")
         return connection
@@ -331,10 +661,31 @@ class WorkflowSkillStore:
                 "ON workflow_skills(user_id, json_extract(payload, '$.status'), "
                 "json_extract(payload, '$.task_type'))"
             )
+            connection.execute(
+                """CREATE TABLE IF NOT EXISTS workflow_skill_evidence (
+                    evidence_id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    task_id TEXT NOT NULL,
+                    bucket_signature TEXT NOT NULL,
+                    control_flow_signature TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(user_id, task_id)
+                )"""
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_workflow_evidence_bucket "
+                "ON workflow_skill_evidence(user_id, bucket_signature, "
+                "control_flow_signature)"
+            )
 
     @staticmethod
-    def _from_row(row: sqlite3.Row) -> WorkflowSkillCard:
+    def _card_from_row(row: sqlite3.Row) -> WorkflowSkillCard:
         return WorkflowSkillCard.model_validate(json.loads(row["payload"]))
+
+    @staticmethod
+    def _evidence_from_row(row: sqlite3.Row) -> WorkflowSkillEvidence:
+        return WorkflowSkillEvidence.model_validate(json.loads(row["payload"]))
 
     def get(self, user_id: str, skill_id: str) -> Optional[WorkflowSkillCard]:
         with self._lock, self._connect() as connection:
@@ -342,9 +693,21 @@ class WorkflowSkillStore:
                 "SELECT * FROM workflow_skills WHERE user_id = ? AND skill_id = ?",
                 (user_id, skill_id),
             ).fetchone()
-            return self._from_row(row) if row else None
+            return self._card_from_row(row) if row else None
 
-    def list(self, user_id: str, include_shared: bool = True) -> list[WorkflowSkillCard]:
+    def get_by_signature(
+        self, user_id: str, signature: str
+    ) -> Optional[WorkflowSkillCard]:
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM workflow_skills WHERE user_id = ? AND signature = ?",
+                (user_id, signature),
+            ).fetchone()
+            return self._card_from_row(row) if row else None
+
+    def list(
+        self, user_id: str, include_shared: bool = True
+    ) -> list[WorkflowSkillCard]:
         users = [user_id, "share"] if include_shared and user_id != "share" else [user_id]
         placeholders = ",".join("?" for _ in users)
         with self._lock, self._connect() as connection:
@@ -353,7 +716,7 @@ class WorkflowSkillStore:
                 "ORDER BY updated_at DESC",
                 users,
             ).fetchall()
-            return [self._from_row(row) for row in rows]
+            return [self._card_from_row(row) for row in rows]
 
     def list_active(self, user_id: str, task_type: str) -> list[WorkflowSkillCard]:
         with self._lock, self._connect() as connection:
@@ -364,19 +727,99 @@ class WorkflowSkillStore:
                 "ORDER BY updated_at DESC",
                 (user_id, WorkflowSkillStatus.ACTIVE.value, task_type),
             ).fetchall()
-            return [self._from_row(row) for row in rows]
+            return [self._card_from_row(row) for row in rows]
 
-    def save_candidate(self, card: WorkflowSkillCard, promotion_threshold: int = 2) -> WorkflowSkillCard:
+    def save_evidence(self, evidence: WorkflowSkillEvidence) -> WorkflowSkillEvidence:
         with self._lock, self._connect() as connection:
-            # Serialize the read-modify-write cycle across Store instances and
-            # processes, not only threads sharing this Python object.
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                "SELECT * FROM workflow_skill_evidence "
+                "WHERE user_id = ? AND task_id = ?",
+                (evidence.user_id, evidence.task_id),
+            ).fetchone()
+            if existing:
+                connection.commit()
+                return self._evidence_from_row(existing)
+            connection.execute(
+                "INSERT INTO workflow_skill_evidence"
+                "(evidence_id,user_id,task_id,bucket_signature,"
+                "control_flow_signature,payload,created_at) VALUES(?,?,?,?,?,?,?)",
+                (
+                    evidence.evidence_id,
+                    evidence.user_id,
+                    evidence.task_id,
+                    evidence.bucket_signature,
+                    evidence.control_flow_signature,
+                    _json(evidence.model_dump(mode="json")),
+                    evidence.created_at,
+                ),
+            )
+            connection.commit()
+            return evidence
+
+    def list_evidence(
+        self,
+        user_id: str,
+        *,
+        bucket_signature: str | None = None,
+        control_flow_signature: str | None = None,
+    ) -> list[WorkflowSkillEvidence]:
+        clauses = ["user_id = ?"]
+        values: list[str] = [user_id]
+        if bucket_signature:
+            clauses.append("bucket_signature = ?")
+            values.append(bucket_signature)
+        if control_flow_signature:
+            clauses.append("control_flow_signature = ?")
+            values.append(control_flow_signature)
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM workflow_skill_evidence WHERE "
+                + " AND ".join(clauses)
+                + " ORDER BY created_at",
+                values,
+            ).fetchall()
+            return [self._evidence_from_row(row) for row in rows]
+
+    def save_candidate(
+        self,
+        card: WorkflowSkillCard,
+        promotion_threshold: int = 2,
+        minimum_structure_consistency: float = 1.0,
+    ) -> WorkflowSkillCard:
+        promotion_threshold = max(2, promotion_threshold)
+        minimum_structure_consistency = min(
+            1.0, max(0.0, minimum_structure_consistency)
+        )
+
+        def promotion_ready(candidate: WorkflowSkillCard) -> bool:
+            requires_business_outcome = (
+                candidate.applicability.irreversible
+                or candidate.applicability.action in _BUSINESS_OUTCOME_ACTIONS
+            )
+            business_ready = (
+                not requires_business_outcome
+                or (
+                    candidate.quality.business_outcome_coverage >= 1.0
+                    and candidate.quality.business_success_rate == 1.0
+                )
+            )
+            return (
+                candidate.schema_version >= 2
+                and candidate.evidence_count >= promotion_threshold
+                and candidate.graph.complete
+                and candidate.quality.structure_consistency
+                >= minimum_structure_consistency
+                and business_ready
+            )
+        with self._lock, self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             existing_row = connection.execute(
                 "SELECT * FROM workflow_skills WHERE user_id = ? AND signature = ?",
                 (card.user_id, card.signature),
             ).fetchone()
             if existing_row:
-                existing = self._from_row(existing_row)
+                existing = self._card_from_row(existing_row)
                 new_task_ids = [
                     task_id
                     for task_id in card.provenance.source_task_ids
@@ -385,75 +828,105 @@ class WorkflowSkillStore:
                 if not new_task_ids:
                     connection.commit()
                     return existing
-                existing.evidence_count += len(new_task_ids)
+                existing.provenance.source_task_ids.extend(new_task_ids)
+                existing.evidence_count = len(existing.provenance.source_task_ids)
+                existing.provenance.source_count = existing.evidence_count
                 existing.success_count += len(new_task_ids)
                 existing.consecutive_failures = 0
-                existing.confidence = min(1.0, max(existing.confidence, card.confidence) + 0.05)
-                existing.provenance.source_count = existing.evidence_count
-                existing.provenance.source_task_ids.extend(new_task_ids)
+                existing.confidence = min(
+                    1.0, max(existing.confidence, card.confidence) + 0.05
+                )
+                existing.quality = card.quality
+                existing.quality.support_count = existing.evidence_count
                 for example in card.intent_examples:
                     if example not in existing.intent_examples:
                         existing.intent_examples.append(example)
                 existing.updated_at = _now()
-                if existing.status != WorkflowSkillStatus.DISABLED and promotion_threshold <= existing.evidence_count:
+                if (
+                    existing.status != WorkflowSkillStatus.DISABLED
+                    and promotion_ready(existing)
+                ):
                     existing.status = WorkflowSkillStatus.ACTIVE
+                    existing.validation.status = "validated"
+                    existing.validation.validated_at = _now()
                 card = existing
             else:
-                if (
-                    card.status != WorkflowSkillStatus.DISABLED
-                    and promotion_threshold <= card.evidence_count
-                ):
+                card.evidence_count = len(card.provenance.source_task_ids)
+                card.provenance.source_count = card.evidence_count
+                card.quality.support_count = card.evidence_count
+                if promotion_ready(card):
                     card.status = WorkflowSkillStatus.ACTIVE
+                    card.validation.status = "validated"
+                    card.validation.validated_at = _now()
                 rows = connection.execute(
                     "SELECT * FROM workflow_skills WHERE user_id = ?",
                     (card.user_id,),
                 ).fetchall()
-                loaded_cards = [self._from_row(row) for row in rows]
                 family_cards = [
-                    item for item in loaded_cards if item.family_signature == card.family_signature
+                    self._card_from_row(row)
+                    for row in rows
+                    if self._card_from_row(row).family_signature == card.family_signature
                 ]
                 card.version = max((item.version for item in family_cards), default=0) + 1
-            payload = card.model_dump(mode="json")
             if card.status == WorkflowSkillStatus.ACTIVE and card.family_signature:
-                for sibling in connection.execute(
-                    "SELECT * FROM workflow_skills WHERE user_id = ?",
-                    (card.user_id,),
-                ).fetchall():
-                    sibling_card = self._from_row(sibling)
-                    if (
-                        sibling_card.skill_id != card.skill_id
-                        and sibling_card.family_signature == card.family_signature
-                        and sibling_card.status == WorkflowSkillStatus.ACTIVE
-                    ):
-                        sibling_card.status = WorkflowSkillStatus.DISABLED
-                        sibling_card.updated_at = _now()
-                        connection.execute(
-                            "UPDATE workflow_skills SET payload = ?, updated_at = ? "
-                            "WHERE user_id = ? AND skill_id = ?",
-                            (
-                                _json(sibling_card.model_dump(mode="json")),
-                                sibling_card.updated_at,
-                                sibling_card.user_id,
-                                sibling_card.skill_id,
-                            ),
-                        )
+                self._disable_active_siblings(connection, card)
             connection.execute(
-                """INSERT INTO workflow_skills(skill_id,user_id,signature,payload,created_at,updated_at)
+                """INSERT INTO workflow_skills
+                (skill_id,user_id,signature,payload,created_at,updated_at)
                 VALUES(?,?,?,?,?,?)
                 ON CONFLICT(user_id,signature) DO UPDATE SET
                   skill_id=excluded.skill_id, payload=excluded.payload,
                   updated_at=excluded.updated_at""",
-                (card.skill_id, card.user_id, card.signature, _json(payload), card.created_at, card.updated_at),
+                (
+                    card.skill_id,
+                    card.user_id,
+                    card.signature,
+                    _json(card.model_dump(mode="json")),
+                    card.created_at,
+                    card.updated_at,
+                ),
             )
             connection.commit()
             return card
+
+    def _disable_active_siblings(
+        self, connection: sqlite3.Connection, card: WorkflowSkillCard
+    ) -> None:
+        rows = connection.execute(
+            "SELECT * FROM workflow_skills WHERE user_id = ?", (card.user_id,)
+        ).fetchall()
+        for row in rows:
+            sibling = self._card_from_row(row)
+            if (
+                sibling.skill_id != card.skill_id
+                and sibling.family_signature == card.family_signature
+                and sibling.status == WorkflowSkillStatus.ACTIVE
+            ):
+                sibling.status = WorkflowSkillStatus.DISABLED
+                sibling.updated_at = _now()
+                connection.execute(
+                    "UPDATE workflow_skills SET payload = ?, updated_at = ? "
+                    "WHERE user_id = ? AND skill_id = ?",
+                    (
+                        _json(sibling.model_dump(mode="json")),
+                        sibling.updated_at,
+                        sibling.user_id,
+                        sibling.skill_id,
+                    ),
+                )
 
     def update(self, card: WorkflowSkillCard) -> WorkflowSkillCard:
         card.updated_at = _now()
         with self._lock, self._connect() as connection:
             connection.execute(
-                "UPDATE workflow_skills SET payload = ?, updated_at = ? WHERE user_id = ? AND skill_id = ?",
-                (_json(card.model_dump(mode="json")), card.updated_at, card.user_id, card.skill_id),
+                "UPDATE workflow_skills SET payload = ?, updated_at = ? "
+                "WHERE user_id = ? AND skill_id = ?",
+                (
+                    _json(card.model_dump(mode="json")),
+                    card.updated_at,
+                    card.user_id,
+                    card.skill_id,
+                ),
             )
         return card
 
@@ -466,40 +939,27 @@ class WorkflowSkillStore:
             ).fetchone()
             if row is None:
                 raise KeyError(f"workflow skill not found: {skill_id}")
-            card = self._from_row(row)
+            card = self._card_from_row(row)
             card.status = WorkflowSkillStatus.ACTIVE
             card.confidence = max(card.confidence, 0.8)
+            card.validation.status = "operator_approved"
+            card.validation.operator_override = True
+            card.validation.validated_at = _now()
             card.updated_at = _now()
             if card.family_signature:
-                rows = connection.execute(
-                    "SELECT * FROM workflow_skills WHERE user_id = ?",
-                    (user_id,),
-                ).fetchall()
-                for row in rows:
-                    sibling = self._from_row(row)
-                    if (
-                        sibling.skill_id != card.skill_id
-                        and sibling.family_signature == card.family_signature
-                        and sibling.status == WorkflowSkillStatus.ACTIVE
-                    ):
-                        sibling.status = WorkflowSkillStatus.DISABLED
-                        sibling.updated_at = _now()
-                        connection.execute(
-                            "UPDATE workflow_skills SET payload = ?, updated_at = ? "
-                            "WHERE user_id = ? AND skill_id = ?",
-                            (
-                                _json(sibling.model_dump(mode="json")),
-                                sibling.updated_at,
-                                sibling.user_id,
-                                sibling.skill_id,
-                            ),
-                        )
+                self._disable_active_siblings(connection, card)
             connection.execute(
-                "UPDATE workflow_skills SET payload = ?, updated_at = ? WHERE user_id = ? AND skill_id = ?",
-                (_json(card.model_dump(mode="json")), card.updated_at, user_id, skill_id),
+                "UPDATE workflow_skills SET payload = ?, updated_at = ? "
+                "WHERE user_id = ? AND skill_id = ?",
+                (
+                    _json(card.model_dump(mode="json")),
+                    card.updated_at,
+                    user_id,
+                    skill_id,
+                ),
             )
             connection.commit()
-        return card
+            return card
 
     def disable(self, user_id: str, skill_id: str) -> WorkflowSkillCard:
         with self._lock, self._connect() as connection:
@@ -510,17 +970,29 @@ class WorkflowSkillStore:
             ).fetchone()
             if row is None:
                 raise KeyError(f"workflow skill not found: {skill_id}")
-            card = self._from_row(row)
+            card = self._card_from_row(row)
             card.status = WorkflowSkillStatus.DISABLED
             card.updated_at = _now()
             connection.execute(
-                "UPDATE workflow_skills SET payload = ?, updated_at = ? WHERE user_id = ? AND skill_id = ?",
-                (_json(card.model_dump(mode="json")), card.updated_at, user_id, skill_id),
+                "UPDATE workflow_skills SET payload = ?, updated_at = ? "
+                "WHERE user_id = ? AND skill_id = ?",
+                (
+                    _json(card.model_dump(mode="json")),
+                    card.updated_at,
+                    user_id,
+                    skill_id,
+                ),
             )
             connection.commit()
             return card
 
-    def record_outcome(self, user_id: str, skill_id: str, success: bool, failure_threshold: int) -> Optional[WorkflowSkillCard]:
+    def record_outcome(
+        self,
+        user_id: str,
+        skill_id: str,
+        success: bool,
+        failure_threshold: int,
+    ) -> Optional[WorkflowSkillCard]:
         with self._lock, self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
@@ -529,7 +1001,7 @@ class WorkflowSkillStore:
             ).fetchone()
             if row is None:
                 return None
-            card = self._from_row(row)
+            card = self._card_from_row(row)
             card.last_used_at = _now()
             if success:
                 card.success_count += 1
@@ -539,17 +1011,27 @@ class WorkflowSkillStore:
                 card.consecutive_failures += 1
                 if card.consecutive_failures >= failure_threshold:
                     card.status = WorkflowSkillStatus.DISABLED
+            total = card.success_count + card.failure_count
+            card.quality.execution_success_rate = (
+                card.success_count / total if total else 0.0
+            )
             card.updated_at = _now()
             connection.execute(
-                "UPDATE workflow_skills SET payload = ?, updated_at = ? WHERE user_id = ? AND skill_id = ?",
-                (_json(card.model_dump(mode="json")), card.updated_at, user_id, skill_id),
+                "UPDATE workflow_skills SET payload = ?, updated_at = ? "
+                "WHERE user_id = ? AND skill_id = ?",
+                (
+                    _json(card.model_dump(mode="json")),
+                    card.updated_at,
+                    user_id,
+                    skill_id,
+                ),
             )
             connection.commit()
             return card
 
-    def mark_successful_reuse(self, user_id: str, skill_id: str) -> Optional[WorkflowSkillCard]:
-        """Update reuse health when distillation already counted this success."""
-
+    def mark_successful_reuse(
+        self, user_id: str, skill_id: str
+    ) -> Optional[WorkflowSkillCard]:
         with self._lock, self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
@@ -558,26 +1040,42 @@ class WorkflowSkillStore:
             ).fetchone()
             if row is None:
                 return None
-            card = self._from_row(row)
+            card = self._card_from_row(row)
             card.last_used_at = _now()
             card.consecutive_failures = 0
             card.updated_at = _now()
             connection.execute(
-                "UPDATE workflow_skills SET payload = ?, updated_at = ? WHERE user_id = ? AND skill_id = ?",
-                (_json(card.model_dump(mode="json")), card.updated_at, user_id, skill_id),
+                "UPDATE workflow_skills SET payload = ?, updated_at = ? "
+                "WHERE user_id = ? AND skill_id = ?",
+                (
+                    _json(card.model_dump(mode="json")),
+                    card.updated_at,
+                    user_id,
+                    skill_id,
+                ),
             )
             connection.commit()
             return card
 
 
 class WorkflowSkillManager:
-    def __init__(self, settings: WorkflowSkillSettings | None = None, store: WorkflowSkillStore | None = None):
+    def __init__(
+        self,
+        settings: WorkflowSkillSettings | None = None,
+        store: WorkflowSkillStore | None = None,
+    ):
         self.settings = settings or WorkflowSkillSettings.from_env()
         self.store = store or WorkflowSkillStore(self.settings.store_path)
 
     @staticmethod
     def _agents_from_steps(steps: list[dict[str, Any]]) -> list[str]:
-        return list(dict.fromkeys(str(step.get("agent_name")) for step in steps if isinstance(step, dict) and step.get("agent_name")))
+        return list(
+            dict.fromkeys(
+                str(step.get("agent_name"))
+                for step in steps
+                if isinstance(step, dict) and step.get("agent_name")
+            )
+        )
 
     def distill(
         self,
@@ -588,160 +1086,315 @@ class WorkflowSkillManager:
         planning_steps: list[dict[str, Any]],
         task_profile: dict[str, Any] | None = None,
         intent_examples: Iterable[str] | None = None,
+        agent_contracts: dict[str, str] | None = None,
+        agent_capabilities: dict[str, list[str]] | None = None,
+        outcome_summary: dict[str, Any] | None = None,
     ) -> WorkflowSkillCard:
         if not planning_steps:
             raise ValueError("workflow skill requires planning steps")
-        serialized = _json(planning_steps)
-        source_profile = dict(task_profile or {})
+        profile = dict(task_profile or {})
         if (
-            contains_secret(serialized)
+            contains_secret(_json(planning_steps))
             or contains_secret(user_query)
-            or contains_secret(_json(source_profile))
+            or contains_secret(_json(profile))
         ):
             raise ValueError("workflow skill source contains secret-looking content")
-        profile = dict(source_profile)
-        task_type = str(profile.get("task_type") or "GENERAL").upper()
-        profile["task_type"] = task_type if task_type in _ALLOWED_TASK_TYPES else "GENERAL"
-        scenario_tags = [
-            str(item).casefold()
-            for item in profile.get("scenario_tags", [])
-            if str(item).casefold() in _SCENARIO_INTENT_ALIASES
-        ]
-        inferred_tags = _inferred_scenario_tags(user_query)
-        for inferred_tag in inferred_tags:
-            if inferred_tag not in scenario_tags:
-                scenario_tags.append(inferred_tag)
-        profile["scenario_tags"] = scenario_tags
-        profile["expected_capabilities"] = [
-            str(item)
-            for item in profile.get("expected_capabilities", [])
-            if str(item).casefold() in _ALLOWED_CAPABILITIES
-        ]
-        risk_profile = str(profile.get("risk_profile") or "LOW").upper()
-        profile["risk_profile"] = risk_profile if risk_profile in {"LOW", "MEDIUM", "HIGH", "CRITICAL"} else "LOW"
-        examples = _intent_examples(profile, intent_examples, user_query)
-        if contains_secret(_json(examples)):
-            raise ValueError("workflow skill source contains secret-looking content")
-        agents = self._agents_from_steps(planning_steps)
+
+        applicability = _applicability(profile)
+        slots = _slots_from_profile(profile)
         parameterized = _parameterize_steps(planning_steps)
+        agents = self._agents_from_steps(parameterized)
         if not parameterized or not agents:
             raise ValueError("workflow skill requires valid Agent planning steps")
-        family_signature = _family_signature(
-            profile.get("task_type", "GENERAL"),
-            inferred_tags or scenario_tags or [f"agent:{agent}" for agent in agents],
+        contracts = {
+            str(name): str(fingerprint)
+            for name, fingerprint in (agent_contracts or {}).items()
+            if str(name) in agents and str(fingerprint)
+        }
+        graph = _compile_graph(
+            planning_steps,
+            parameterized,
+            applicability.expected_capabilities,
+            slots,
+            dict(agent_capabilities or {}),
         )
-        signature = _signature(family_signature, parameterized)
+        if not graph.complete:
+            raise ValueError("workflow skill graph is incomplete")
+        family_signature = _family_signature(applicability)
+        signature = _control_flow_signature(graph, contracts)
+        evidence = WorkflowSkillEvidence(
+            evidence_id=f"wevidence_{uuid.uuid4().hex}",
+            user_id=user_id,
+            task_id=task_id,
+            bucket_signature=family_signature,
+            control_flow_signature=signature,
+            task_profile=_sanitized_profile(applicability, slots),
+            slots=slots,
+            graph=graph,
+            planning_steps=parameterized,
+            contract_fingerprints=contracts,
+            outcome_summary=dict(
+                outcome_summary or {"technical_success": True}
+            ),
+        )
+        saved_evidence = self.store.save_evidence(evidence)
+        if saved_evidence.control_flow_signature != signature:
+            existing = self.store.get_by_signature(
+                user_id, saved_evidence.control_flow_signature
+            )
+            if existing is not None:
+                return existing
+            raise ValueError("task already contributed to another workflow skill")
+
+        supporting = self.store.list_evidence(
+            user_id,
+            bucket_signature=family_signature,
+            control_flow_signature=signature,
+        )
+        bucket_evidence = self.store.list_evidence(
+            user_id,
+            bucket_signature=family_signature,
+        )
+        source_task_ids = list(dict.fromkeys(item.task_id for item in supporting))
+        business_results = [
+            item.outcome_summary.get("business_success")
+            for item in supporting
+            if isinstance(item.outcome_summary.get("business_success"), bool)
+        ]
+        quality = WorkflowSkillQuality(
+            support_count=len(source_task_ids),
+            structure_consistency=(
+                len(supporting) / len(bucket_evidence)
+                if bucket_evidence
+                else 0.0
+            ),
+            slot_coverage=1.0 if all(slot.name for slot in slots) else 0.0,
+            execution_success_rate=1.0,
+            business_success_rate=(
+                sum(bool(item) for item in business_results) / len(business_results)
+                if business_results
+                else None
+            ),
+            business_outcome_coverage=(
+                len(business_results) / len(supporting) if supporting else 0.0
+            ),
+            contract_stability=1.0,
+        )
+        examples = _intent_examples(applicability, intent_examples)
+        if contains_secret(_json(examples)):
+            raise ValueError("workflow skill source contains secret-looking content")
         card = WorkflowSkillCard(
             skill_id=f"wskill_{uuid.uuid4().hex}",
             user_id=user_id,
-            name=f"workflow_{str(profile.get('task_type', 'general')).lower()}_{agents[0] if agents else 'task'}",
-            description=f"由成功的 {profile.get('task_type', 'GENERAL')} 执行轨迹蒸馏得到的可复用工作流",
+            name=f"workflow_{applicability.intent}",
+            description=(
+                f"Reusable {applicability.intent.replace('_', ' ')} procedure "
+                "distilled from successful executions"
+            ),
+            schema_version=2,
             family_signature=family_signature,
             signature=signature,
-            task_type=str(profile.get("task_type", "GENERAL")).upper(),
+            task_type=applicability.task_type,
             intent_examples=examples,
-            scenario_tags=scenario_tags,
-            expected_capabilities=[str(item) for item in profile.get("expected_capabilities", [])],
-            risk_profile=str(profile.get("risk_profile", "LOW")).upper(),
+            scenario_tags=applicability.scenario_tags,
+            expected_capabilities=applicability.expected_capabilities,
+            risk_profile=applicability.max_risk,
             planning_steps=parameterized,
             required_agents=agents,
-            confidence=0.65,
-            provenance=WorkflowSkillProvenance(source_task_ids=[task_id]),
-        )
-        return self.store.save_candidate(card, self.settings.promotion_success_threshold)
-
-    def bootstrap_leave_request(
-        self,
-        user_id: str,
-        lookup_agent_name: str = "RemoteHRAssistantAgent",
-        action_agent_name: str = "RemoteOfficeAssistantAgent",
-    ) -> WorkflowSkillCard:
-        query = "\u8bf7\u5047 leave request"
-        steps = [
-            {
-                "agent_name": lookup_agent_name,
-                "title": "Resolve the employee identity",
-                "description": "Find the employee ID and name for the current leave request.",
-                "inputs": [],
-            },
-            {
-                "agent_name": action_agent_name,
-                "title": "Save the leave request",
-                "description": "Save the current leave type, dates, and reason for the resolved employee.",
-                "inputs": [
-                    {
-                        "parameter_name": "employee.id",
-                        "source_step": lookup_agent_name,
-                        "source_output": "employee.id",
-                    },
-                    {
-                        "parameter_name": "employee.name",
-                        "source_step": lookup_agent_name,
-                        "source_output": "employee.name",
-                    },
-                ],
-            },
-        ]
-        return self.distill(
-            user_id=user_id,
-            task_id="bootstrap-leave-request",
-            user_query=query,
-            planning_steps=steps,
-            task_profile={
-                "task_type": "HR",
-                "scenario_tags": ["leave_request", "hr_service"],
-                "expected_capabilities": ["leave management"],
-                "risk_profile": "MEDIUM",
-            },
-            intent_examples=[
-                "请假",
-                "申请休假",
-                "申请年假",
-                "leave request",
-                "request time off",
+            applicability=applicability,
+            slots=slots,
+            preconditions=[f"slot:{slot.name}" for slot in slots if slot.required],
+            graph=graph,
+            postconditions=[
+                f"node_completed:{node_id}" for node_id in graph.exit_nodes
             ],
+            outputs=[f"{node_id}.result" for node_id in graph.exit_nodes],
+            failure_modes=[
+                "missing_required_slot",
+                "agent_unavailable",
+                "contract_mismatch",
+                "authorization_denied",
+                "execution_failed",
+            ],
+            contract_fingerprints=contracts,
+            quality=quality,
+            confidence=min(0.95, 0.55 + 0.1 * len(source_task_ids)),
+            evidence_count=len(source_task_ids),
+            success_count=len(source_task_ids),
+            provenance=WorkflowSkillProvenance(
+                source_task_ids=source_task_ids,
+                source_count=len(source_task_ids),
+            ),
+        )
+        return self.store.save_candidate(
+            card,
+            max(2, self.settings.promotion_success_threshold),
+            self.settings.minimum_structure_consistency,
         )
 
-    def _score(self, card: WorkflowSkillCard, query: str, profile: dict[str, Any]) -> tuple[float, float, str]:
+    def _applicability_checks(
+        self,
+        card: WorkflowSkillCard,
+        profile: dict[str, Any],
+        available_agents: set[str],
+        agent_contracts: dict[str, str],
+    ) -> dict[str, bool]:
+        current = _applicability(profile)
+        skill = card.applicability
+        current_caps = set(current.expected_capabilities)
+        skill_caps = set(skill.expected_capabilities)
+        current_scopes = set(current.data_scopes)
+        skill_scopes = set(skill.data_scopes)
+        entities = {
+            _normalize_token(key)
+            for key in (profile.get("entities") or {})
+            if key
+        } if isinstance(profile.get("entities") or {}, dict) else set()
+        missing = {
+            _normalize_token(item)
+            for item in profile.get("missing_fields", [])
+            if item
+        }
+        required_slots = {slot.name for slot in card.slots if slot.required}
+        contracts_ok = (
+            not card.contract_fingerprints
+            or not agent_contracts
+            or all(
+                agent_contracts.get(name) == fingerprint
+                for name, fingerprint in card.contract_fingerprints.items()
+            )
+        )
+        return {
+            "schema": card.schema_version >= 2 or self.settings.allow_legacy_reuse,
+            "task_ready": not missing and not bool(profile.get("needs_clarification")),
+            "intent": (
+                card.schema_version < 2
+                or current.intent == skill.intent
+                or skill.intent == "general_assistance"
+            ),
+            "action": card.schema_version < 2 or current.action == skill.action,
+            "capabilities": (
+                card.schema_version < 2
+                or not current_caps
+                or current_caps.issubset(skill_caps)
+            ),
+            "data_scope": (
+                card.schema_version < 2
+                or not current_scopes
+                or current_scopes.issubset(skill_scopes)
+            ),
+            "risk": (
+                card.schema_version < 2
+                or _RISK_LEVEL[current.max_risk] <= _RISK_LEVEL[skill.max_risk]
+            ),
+            "slots": not required_slots or (
+                required_slots.issubset(entities) and not (required_slots & missing)
+            ),
+            "agents": set(card.required_agents).issubset(available_agents),
+            "contracts": contracts_ok,
+            "graph": card.schema_version < 2 or card.graph.complete,
+        }
+
+    def _score(
+        self,
+        card: WorkflowSkillCard,
+        query: str,
+        profile: dict[str, Any],
+    ) -> tuple[float, float, str]:
+        current = _applicability(profile)
         query_terms = _safe_terms(query)
         example_scores = []
         for example in card.intent_examples:
             intent_terms = _safe_terms(example)
             if intent_terms:
-                example_scores.append(len(query_terms & intent_terms) / len(intent_terms))
+                example_scores.append(
+                    len(query_terms & intent_terms) / max(1, len(intent_terms))
+                )
         lexical_score = max(example_scores, default=0.0)
-        task_type = str(profile.get("task_type", "GENERAL")).upper()
-        type_score = 1.0 if task_type == card.task_type or card.task_type == "GENERAL" else 0.0
-        tags = {str(item).casefold() for item in profile.get("scenario_tags", [])}
-        tags.update(_inferred_scenario_tags(query))
-        card_tags = {str(item).casefold() for item in card.scenario_tags}
+        intent_score = 1.0 if current.intent == card.applicability.intent else 0.0
+        action_score = 1.0 if current.action == card.applicability.action else 0.0
+        current_caps = set(current.expected_capabilities)
+        skill_caps = set(card.applicability.expected_capabilities)
+        capability_score = len(current_caps & skill_caps) / max(
+            1, len(current_caps | skill_caps)
+        )
+        current_scopes = set(current.data_scopes)
+        skill_scopes = set(card.applicability.data_scopes)
+        scope_score = len(current_scopes & skill_scopes) / max(
+            1, len(current_scopes | skill_scopes)
+        )
+        tags = set(current.scenario_tags)
+        card_tags = set(card.applicability.scenario_tags)
         tag_score = len(tags & card_tags) / max(1, len(tags | card_tags))
-        caps = {str(item).casefold() for item in profile.get("expected_capabilities", [])}
-        card_caps = {str(item).casefold() for item in card.expected_capabilities}
-        capability_score = len(caps & card_caps) / max(1, len(caps | card_caps))
-        score = 0.55 * lexical_score + 0.2 * type_score + 0.15 * tag_score + 0.1 * capability_score
-        return score, lexical_score, f"lexical={lexical_score:.2f}, type={type_score:.2f}, tags={tag_score:.2f}, capabilities={capability_score:.2f}"
+        if card.schema_version < 2:
+            type_score = 1.0 if current.task_type in {card.task_type, "GENERAL"} else 0.0
+            score = 0.55 * lexical_score + 0.3 * type_score + 0.15 * tag_score
+        else:
+            score = (
+                0.25 * lexical_score
+                + 0.25 * intent_score
+                + 0.15 * action_score
+                + 0.15 * capability_score
+                + 0.1 * scope_score
+                + 0.1 * tag_score
+            )
+        reason = (
+            f"lexical={lexical_score:.2f}, intent={intent_score:.2f}, "
+            f"action={action_score:.2f}, capabilities={capability_score:.2f}, "
+            f"data_scope={scope_score:.2f}, tags={tag_score:.2f}"
+        )
+        return score, lexical_score, reason
 
-    def match(self, *, user_id: str, query: str, task_profile: dict[str, Any], available_agents: Iterable[str]) -> Optional[WorkflowSkillMatch]:
-        if not self.settings.enabled or not self.settings.reuse_enabled or not query.strip():
+    def match(
+        self,
+        *,
+        user_id: str,
+        query: str,
+        task_profile: dict[str, Any],
+        available_agents: Iterable[str],
+        agent_contracts: dict[str, str] | None = None,
+    ) -> Optional[WorkflowSkillMatch]:
+        if (
+            not self.settings.enabled
+            or not self.settings.reuse_enabled
+            or not query.strip()
+        ):
             return None
         available = set(available_agents)
+        contracts = dict(agent_contracts or {})
+        current_task_type = str(
+            task_profile.get("task_type") or "GENERAL"
+        ).upper()
         candidates: list[WorkflowSkillMatch] = []
-        current_task_type = str(task_profile.get("task_type") or "GENERAL").upper()
         for card in self.store.list_active(user_id, current_task_type):
-            if current_task_type not in {"GENERAL", card.task_type} and card.task_type != "GENERAL":
-                continue
-            if not set(card.required_agents).issubset(available):
+            checks = self._applicability_checks(
+                card, task_profile, available, contracts
+            )
+            if not all(checks.values()):
                 continue
             score, lexical_score, reason = self._score(card, query, task_profile)
             if score < self.settings.match_threshold:
                 continue
-            bound = _replace_request(card.planning_steps, query)
-            candidates.append(WorkflowSkillMatch(skill=card, score=score, lexical_score=lexical_score, reason=reason, bound_planning_steps=bound))
+            candidates.append(
+                WorkflowSkillMatch(
+                    skill=card,
+                    score=score,
+                    lexical_score=lexical_score,
+                    reason=reason,
+                    bound_planning_steps=_bind_skill_plan(
+                        card, query, task_profile
+                    ),
+                    applicability_checks=checks,
+                )
+            )
         candidates.sort(key=lambda item: item.score, reverse=True)
         if not candidates:
             return None
-        if len(candidates) > 1 and candidates[0].score - candidates[1].score < self.settings.match_margin:
+        if (
+            len(candidates) > 1
+            and candidates[0].score - candidates[1].score
+            < self.settings.match_margin
+        ):
             return None
         return candidates[0]
 
@@ -765,6 +1418,14 @@ __all__ = [
     "WorkflowSkillStatus",
     "WorkflowSkillSettings",
     "WorkflowSkillProvenance",
+    "WorkflowSkillSlot",
+    "WorkflowSkillApplicability",
+    "WorkflowSkillGraphNode",
+    "WorkflowSkillGraphEdge",
+    "WorkflowSkillGraph",
+    "WorkflowSkillQuality",
+    "WorkflowSkillValidation",
+    "WorkflowSkillEvidence",
     "WorkflowSkillCard",
     "WorkflowSkillMatch",
     "WorkflowSkillStore",

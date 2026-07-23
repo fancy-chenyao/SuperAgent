@@ -74,6 +74,50 @@ def _normalize_planning_steps(raw: Any) -> list:
     return []
 
 
+def _agent_contract_fingerprints(agent_cards: Any) -> dict[str, str]:
+    """Hash the current dispatch contract without persisting runtime state."""
+
+    fingerprints: dict[str, str] = {}
+    for card in agent_cards if isinstance(agent_cards, list) else []:
+        if not isinstance(card, dict):
+            continue
+        agent_id = str(card.get("agent_id") or card.get("name") or "").strip()
+        if not agent_id:
+            continue
+        contract = {
+            "capabilities": card.get("capabilities") or [],
+            "intents": card.get("intents") or [],
+            "supported_actions": card.get("supported_actions") or [],
+            "accepted_data_scopes": card.get("accepted_data_scopes") or [],
+            "risk_ceiling": card.get("risk_ceiling") or "LOW",
+            "input_schema": card.get("input_schema") or {},
+            "output_schema": card.get("output_schema") or {},
+            "version": card.get("version") or "1.0.0",
+        }
+        fingerprints[agent_id] = hashlib.sha256(
+            json.dumps(
+                contract,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+    return fingerprints
+
+
+def _agent_capability_bindings(agent_cards: Any) -> dict[str, list[str]]:
+    bindings: dict[str, list[str]] = {}
+    for card in agent_cards if isinstance(agent_cards, list) else []:
+        if not isinstance(card, dict):
+            continue
+        agent_id = str(card.get("agent_id") or card.get("name") or "").strip()
+        if agent_id:
+            bindings[agent_id] = [
+                str(item) for item in card.get("capabilities") or [] if str(item)
+            ]
+    return bindings
+
+
 async def _execute_node_with_runtime_events(
     state: State, node_func, enable_runtime_events: bool
 ):
@@ -812,6 +856,14 @@ async def _process_workflow(
                     _normalize_planning_steps(cache.get_planning_steps(workflow_id)),
                     state.get("task_profile") or {},
                 )
+                if hasattr(task_logger, "set_agent_contract_fingerprints"):
+                    task_logger.set_agent_contract_fingerprints(
+                        _agent_contract_fingerprints(state.get("agent_cards"))
+                    )
+                if hasattr(task_logger, "set_agent_capability_bindings"):
+                    task_logger.set_agent_capability_bindings(
+                        _agent_capability_bindings(state.get("agent_cards"))
+                    )
 
         if (
             state.get("workflow_mode") == "launch"
@@ -828,8 +880,18 @@ async def _process_workflow(
                         query=state.get("USER_QUERY", ""),
                         task_profile=state.get("task_profile") or {},
                         available_agents=state.get("TEAM_MEMBERS") or [],
+                        agent_contracts=_agent_contract_fingerprints(
+                            state.get("agent_cards")
+                        ),
                     )
-                    if skill_manager is not None
+                    if (
+                        skill_manager is not None
+                        and (
+                            not state.get("routing_decision")
+                            or (state.get("routing_decision") or {}).get("decision")
+                            == "DISPATCH"
+                        )
+                    )
                     else None
                 )
                 if skill_match is not None:
@@ -856,6 +918,9 @@ async def _process_workflow(
                         "event": "skill_matched",
                         "data": {
                             **state["workflow_skill_match"],
+                            "schema_version": skill_match.skill.schema_version,
+                            "applicability_checks": skill_match.applicability_checks,
+                            "quality": skill_match.skill.quality.model_dump(mode="json"),
                             "planning_steps": skill_match.bound_planning_steps,
                         },
                     }
@@ -1129,6 +1194,20 @@ async def _process_workflow(
                                 user_query=user_query,
                                 planning_steps=planning_steps,
                                 task_profile=task_logger.task_profile,
+                                agent_contracts=getattr(
+                                    task_logger,
+                                    "agent_contract_fingerprints",
+                                    _agent_contract_fingerprints(state.get("agent_cards")),
+                                ),
+                                agent_capabilities=getattr(
+                                    task_logger,
+                                    "agent_capability_bindings",
+                                    _agent_capability_bindings(state.get("agent_cards")),
+                                ),
+                                outcome_summary={
+                                    "technical_success": True,
+                                    "business_success": state.get("business_success"),
+                                },
                             )
                             yield {
                                 "event": "skill_distilled",
@@ -1136,6 +1215,10 @@ async def _process_workflow(
                                     "skill_id": distilled_card.skill_id,
                                     "status": distilled_card.status.value,
                                     "version": distilled_card.version,
+                                    "schema_version": distilled_card.schema_version,
+                                    "evidence_count": distilled_card.evidence_count,
+                                    "bucket_signature": distilled_card.family_signature,
+                                    "quality": distilled_card.quality.model_dump(mode="json"),
                                 },
                             }
                     reused_skill_id = str(state.get("reused_skill_id") or "")

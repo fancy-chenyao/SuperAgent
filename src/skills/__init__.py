@@ -1,12 +1,20 @@
 from .skill import Skill
 from .manager import SkillsManager
 from .workflow_skill import (
+    WorkflowSkillApplicability,
     WorkflowSkillCard,
+    WorkflowSkillEvidence,
+    WorkflowSkillGraph,
+    WorkflowSkillGraphEdge,
+    WorkflowSkillGraphNode,
     WorkflowSkillManager,
     WorkflowSkillMatch,
+    WorkflowSkillQuality,
     WorkflowSkillSettings,
+    WorkflowSkillSlot,
     WorkflowSkillStatus,
     WorkflowSkillStore,
+    WorkflowSkillValidation,
     get_workflow_skill_manager,
     set_workflow_skill_manager,
 )
@@ -14,12 +22,20 @@ from .workflow_skill import (
 __all__ = [
     "Skill",
     "SkillsManager",
+    "WorkflowSkillApplicability",
     "WorkflowSkillCard",
+    "WorkflowSkillEvidence",
+    "WorkflowSkillGraph",
+    "WorkflowSkillGraphEdge",
+    "WorkflowSkillGraphNode",
     "WorkflowSkillManager",
     "WorkflowSkillMatch",
+    "WorkflowSkillQuality",
     "WorkflowSkillSettings",
+    "WorkflowSkillSlot",
     "WorkflowSkillStatus",
     "WorkflowSkillStore",
+    "WorkflowSkillValidation",
     "get_workflow_skill_manager",
     "set_workflow_skill_manager",
 ]

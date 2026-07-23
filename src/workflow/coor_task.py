@@ -412,8 +412,10 @@ async def _validate_plan_data_flow(steps: list, user_id: str) -> tuple[bool, lis
 
         metadata = agent_metadata.get(agent_name)
         if not metadata:
-            # Agent not found in registry, skip validation
-            logger.warning(f"Step {step_idx + 1}: Agent '{agent_name}' not found in registry")
+            errors.append(
+                f"Step {step_idx + 1}: Agent '{agent_name}' is not available "
+                "in the current user registry"
+            )
             continue
 
         required_params = metadata["requires"]
@@ -705,7 +707,19 @@ async def planner_node(state: State) -> Command[Literal["publisher", "__end__"]]
                 steps = json.loads(steps)
             except Exception:
                 steps = []
+        validation_errors: list[str] = []
+        skill_plan_valid = False
         if isinstance(steps, list) and steps:
+            try:
+                data_flow_valid, data_flow_errors = await _validate_plan_data_flow(
+                    steps, state.get("user_id", "")
+                )
+                profile_errors = _validate_plan_against_task_profile(steps, state)
+                validation_errors = list(data_flow_errors) + list(profile_errors)
+                skill_plan_valid = data_flow_valid and not profile_errors
+            except Exception as exc:
+                validation_errors = [f"skill plan validation error: {exc}"]
+        if isinstance(steps, list) and steps and skill_plan_valid:
             raw_content = json.dumps({"steps": steps}, ensure_ascii=False)
             message_content = json.dumps({"steps": steps}, indent=2, ensure_ascii=False)
             cache.restore_planning_steps(state["workflow_id"], steps, state["user_id"])
@@ -720,7 +734,30 @@ async def planner_node(state: State) -> Command[Literal["publisher", "__end__"]]
                 },
                 goto=goto,
             )
+        if validation_errors:
+            logger.warning(
+                "Rejected matched workflow skill during current-plan validation: %s",
+                "; ".join(validation_errors),
+            )
+            if callable(runtime_event_handler):
+                await runtime_event_handler(
+                    {
+                        "event": "skill_rejected",
+                        "agent_name": "planner",
+                        "data": {
+                            "skill_id": (
+                                state.get("workflow_skill_match") or {}
+                            ).get("skill_id", ""),
+                            "reason": "current_plan_validation_failed",
+                            "errors": validation_errors,
+                        },
+                    }
+                )
         state["workflow_skill_match"] = {}
+        state["reused_skill_id"] = ""
+        state["reused_skill_owner_id"] = ""
+        state["planning_steps"] = []
+        cache.restore_planning_steps(state["workflow_id"], [], state["user_id"])
 
     routing_decision = state.get("routing_decision") or {}
     if state["workflow_mode"] == "launch" and routing_decision.get("decision") != "DISPATCH":

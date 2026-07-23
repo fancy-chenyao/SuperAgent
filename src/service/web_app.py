@@ -66,13 +66,6 @@ class WorkflowSkillDistillRequest(BaseModel):
     workflow_id: Optional[str] = None
 
 
-class WorkflowSkillBootstrapRequest(BaseModel):
-    user_id: str
-    lookup_agent_name: str = "RemoteHRAssistantAgent"
-    action_agent_name: str = "RemoteOfficeAssistantAgent"
-    activate: bool = True
-
-
 def _authorize_workflow_skill_api(
     authorization: Optional[str] = Header(default=None),
 ) -> None:
@@ -947,6 +940,20 @@ def create_app() -> FastAPI:
         )
         return [card.model_dump(mode="json") for card in cards]
 
+    @app.get("/api/workflow-skills/evidence")
+    def list_workflow_skill_evidence(
+        user_id: str,
+        bucket_signature: Optional[str] = None,
+        control_flow_signature: Optional[str] = None,
+        _authorized: None = Depends(_authorize_workflow_skill_api),
+    ):
+        evidence = get_workflow_skill_manager().store.list_evidence(
+            user_id,
+            bucket_signature=bucket_signature,
+            control_flow_signature=control_flow_signature,
+        )
+        return [item.model_dump(mode="json") for item in evidence]
+
     @app.get("/api/workflow-skills/{skill_id}")
     def get_workflow_skill(
         skill_id: str,
@@ -982,24 +989,11 @@ def create_app() -> FastAPI:
                 user_query=task.user_query,
                 planning_steps=planning_steps,
                 task_profile=task_profile if isinstance(task_profile, dict) else {},
+                agent_contracts=getattr(task, "agent_contract_fingerprints", {}),
+                agent_capabilities=getattr(task, "agent_capability_bindings", {}),
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return {"skill": card.model_dump(mode="json")}
-
-    @app.post("/api/workflow-skills/bootstrap/leave")
-    def bootstrap_leave_workflow_skill(
-        body: WorkflowSkillBootstrapRequest,
-        _authorized: None = Depends(_authorize_workflow_skill_api),
-    ):
-        manager = get_workflow_skill_manager()
-        card = manager.bootstrap_leave_request(
-            body.user_id,
-            lookup_agent_name=body.lookup_agent_name,
-            action_agent_name=body.action_agent_name,
-        )
-        if body.activate:
-            card = manager.store.activate(body.user_id, card.skill_id)
         return {"skill": card.model_dump(mode="json")}
 
     @app.post("/api/workflow-skills/{skill_id}/activate")
