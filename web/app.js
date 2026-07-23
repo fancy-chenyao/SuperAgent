@@ -2695,32 +2695,77 @@ const handleEvent = (eventName, payload) => {
     return;
   }
   if (eventName === "end_of_workflow") {
-    if (!plannerOnlyMode) {
-      if (currentRunContext !== "executing" && !planSteps.length && !coordinatorResponseHandled) {
-        const question = buildRoutingClarification(latestRoutingDecision);
-        if (question) {
-          clarificationPending = true;
-          showAssistantText(question);
-          appendActiveConversationMessage("assistant", question);
-          showSummaryHint("Waiting for your reply.");
-          showPlanHint("More information is required before planning.");
-          setStatus("Waiting for reply", true);
-          return;
-        }
+    const rawStatus = (payload.data && payload.data.status) || "";
+    const status = String(rawStatus).toUpperCase();
+    if (plannerOnlyMode) {
+      if (!plannerOnlyStepsUpdated) {
+        showPlanNlHint("Planner completed, but no executable steps were generated. Please refine the instruction and try again.", true);
       }
-      showSummaryHint("Workflow completed.");
-      if (currentRunContext === "executing") {
-        finalizeStepCard();
-        updateChatExecutionProgress("completed");
-        if (currentChatLifecycle) currentChatLifecycle.resultTitle.textContent = "最终结果";
-        setStatus("Completed", true);
+      return;
+    }
+    if (currentRunContext !== "executing" && !planSteps.length && !coordinatorResponseHandled) {
+      const question = buildRoutingClarification(latestRoutingDecision);
+      if (question) {
+        clarificationPending = true;
+        showAssistantText(question);
+        appendActiveConversationMessage("assistant", question);
+        showSummaryHint("Waiting for your reply.");
+        showPlanHint("More information is required before planning.");
+        setStatus("Waiting for reply", true);
+        return;
+      }
+    }
+    if (currentRunContext === "executing") {
+      finalizeStepCard();
+    }
+    switch (status) {
+      case "SUCCEEDED":
+        showSummaryHint("Workflow completed.");
+        if (currentRunContext === "executing") {
+          updateChatExecutionProgress("completed");
+          if (currentChatLifecycle) currentChatLifecycle.resultTitle.textContent = "最终结果";
+          setStatus("Completed", true);
+        }
         showPlanValidationHint("Execution completed. You can review the execution log.");
         showPlanHint("Plan execution completed.");
-      } else {
-        appendOutput("system", "\n[workflow] completed\n");
+        break;
+      case "PARTIAL_FAILED":
+        showSummaryHint("Workflow partially failed.", true);
+        showPlanValidationHint("Some steps failed. Review the execution log; you can recover from Task History.", true);
+        break;
+      case "FAILED":
+        showSummaryHint("Workflow failed.", true);
+        showPlanValidationHint("Execution failed. You can recover from Task History.", true);
+        if (payload.data && payload.data.error) {
+          appendOutput("system", `\n[workflow failed] ${payload.data.error}\n`);
+        }
+        break;
+      case "CLARIFY_REQUIRED": {
+        const qs = (payload.data && payload.data.clarifications || []).join("; ");
+        showSummaryHint("Clarification required.", true);
+        showPlanNlHint(qs ? `Clarification required: ${qs}` : "Clarification required before execution.", true);
+        break;
       }
-    } else if (!plannerOnlyStepsUpdated) {
-      showPlanNlHint("Planner completed, but no executable steps were generated. Please refine the instruction and try again.", true);
+      case "REJECTED":
+        showSummaryHint("Request rejected.", true);
+        showPlanValidationHint("The request was rejected by routing (no capable/authorized agent).", true);
+        break;
+      case "NEEDS_RECONCILIATION":
+        showSummaryHint("Needs reconciliation.", true);
+        showPlanValidationHint("A side effect may have completed but could not be confirmed. Manual reconciliation required; automatic retry is disabled.", true);
+        break;
+      default:
+        // Legacy publisher/while path emits no status -> treat as completed.
+        showSummaryHint("Workflow completed.");
+        if (currentRunContext === "executing") {
+          updateChatExecutionProgress("completed");
+          if (currentChatLifecycle) currentChatLifecycle.resultTitle.textContent = "最终结果";
+          setStatus("Completed", true);
+          showPlanValidationHint("Execution completed. You can review the execution log.");
+          showPlanHint("Plan execution completed.");
+        } else {
+          appendOutput("system", "\n[workflow] completed\n");
+        }
     }
     return;
   }
