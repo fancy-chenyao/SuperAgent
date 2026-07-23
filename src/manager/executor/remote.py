@@ -56,6 +56,7 @@ All communication with remote agents MUST use JSON format with the following str
 """
 
 import asyncio
+import json
 import logging
 import time
 from dataclasses import dataclass
@@ -95,21 +96,59 @@ class RemoteAgentRequest:
 @dataclass
 class RemoteAgentResponse:
     status: str
-    result: Optional[str] = None
+    result: Any = None
     error: Optional[str] = None
     metadata: Optional[Dict[str, Any]] = None
 
     def to_execute_result(self, duration: float) -> ExecuteResult:
-        if self.status == "success":
+        metadata = dict(self.metadata or {})
+        # Response metadata is supplied by the remote service.  It may carry a
+        # useful report, but it is not a platform-trusted verifier assertion.
+        metadata["verification_trusted"] = False
+        # Some legacy remote tools put a second status inside ``result``.  Do
+        # not let an outer transport success mask an explicit inner failure.
+        nested_status = None
+        result_payload = self.result
+        if isinstance(result_payload, str):
+            stripped = result_payload.strip()
+            if stripped.startswith("{") and stripped.endswith("}"):
+                try:
+                    result_payload = json.loads(stripped)
+                except (TypeError, ValueError):
+                    result_payload = self.result
+        if isinstance(result_payload, dict):
+            nested = result_payload.get("business_outcome")
+            if isinstance(nested, dict):
+                nested_status = nested.get("operation_status") or nested.get("status")
+            nested_status = (
+                nested_status
+                or result_payload.get("operation_status")
+                or result_payload.get("status")
+            )
+            nested_result = result_payload.get("result")
+            if nested_status is None and isinstance(nested_result, dict):
+                nested_status = (
+                    nested_result.get("operation_status")
+                    or nested_result.get("status")
+                )
+        if nested_status is not None:
+            metadata.setdefault("nested_status", str(nested_status))
+        failure_statuses = {"failed", "failure", "error", "rejected", "cancelled", "canceled", "timeout"}
+        if str(self.status).lower() == "success" and str(nested_status or "").lower() not in failure_statuses:
             return ExecuteResult(
                 status=ExecutionStatus.SUCCESS,
                 result=self.result,
-                metadata=self.metadata or {},
+                metadata=metadata,
             )
         return ExecuteResult(
             status=ExecutionStatus.FAILED,
-            error=self.error or "Unknown error",
-            metadata=self.metadata or {},
+            error=self.error or (
+                f"Remote business result reported status: {nested_status}"
+                if nested_status is not None
+                else "Unknown error"
+            ),
+            result=self.result,
+            metadata=metadata,
         )
 
 

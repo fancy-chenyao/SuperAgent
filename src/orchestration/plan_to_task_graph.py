@@ -15,13 +15,22 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from src.interface.task_graph import TaskGraph, TaskSpec, TaskStep
+from src.interface.task_graph import CompletionCondition, TaskGraph, TaskSpec, TaskStep
 
 # Effective operation modes (ignoring the ubiquitous "delegate") that imply a
 # side effect. An agent whose config declares any of these is NOT read-only.
 _SEND_MODES = {"send"}
-_WRITE_MODES = {"write", "generate", "execute",
-                "export", "create", "update", "delete"}
+_WRITE_MODES = {
+    "write",
+    "generate",
+    "execute",
+    "export",
+    "create",
+    "update",
+    "delete",
+    "submit",
+    "approve",
+}
 _READ_MODES = {"read", "query", "lookup", "search"}
 
 # Risk ranking of the four classified modes. Higher = more dangerous. Used to
@@ -193,12 +202,27 @@ def plan_to_task_graph(
             resolved = agent_to_step.get(source_step)
             if resolved and resolved not in depends_on:
                 depends_on.append(resolved)
+        for dependency in raw.get("depends_on") or []:
+            resolved = agent_to_step.get(str(dependency), str(dependency))
+            if resolved and resolved not in depends_on:
+                depends_on.append(resolved)
 
         expected_outputs = (
             raw.get("expected_outputs")
             or raw.get("produces")
             or agent_produces.get(agent_name, [])
         )
+        if isinstance(expected_outputs, str):
+            expected_outputs = [expected_outputs]
+
+        completion_conditions = []
+        for condition in raw.get("completion_conditions") or []:
+            if isinstance(condition, str) and condition.strip():
+                completion_conditions.append(
+                    CompletionCondition(expression=condition.strip())
+                )
+            elif isinstance(condition, dict) and condition.get("expression"):
+                completion_conditions.append(CompletionCondition(**condition))
 
         operation_mode, operation_mode_source, operation_mode_reason = _derive_operation_mode(
             agent_name, raw.get("operation_mode"), write_agents
@@ -209,8 +233,11 @@ def plan_to_task_graph(
             required_capabilities=raw.get("required_capabilities", []) or [],
             expected_outputs=list(expected_outputs),
             depends_on=depends_on,
+            completion_conditions=completion_conditions,
             operation_mode=operation_mode,
             risk_level=raw.get("risk_level", "LOW"),
+            timeout=raw.get("timeout"),
+            retry=max(0, int(raw.get("retry") or 0)),
             resource_locks=raw.get("resource_locks", []) or [],
             preferred_resource_id=agent_name or None,
             # extras (TaskStep has extra="allow"):
@@ -218,6 +245,10 @@ def plan_to_task_graph(
             input_bindings=inputs,
             title=raw.get("title", ""),
             description=raw.get("description", ""),
+            expected_schema_ref=(
+                raw.get("expected_schema_ref") or raw.get("output_schema_ref")
+            ),
+            verification_contract=dict(raw.get("verification_contract") or {}),
             # trusted classification audit trail
             operation_mode_source=operation_mode_source,
             operation_mode_reason=operation_mode_reason,
