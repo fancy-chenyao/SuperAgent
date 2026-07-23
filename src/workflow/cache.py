@@ -4,7 +4,11 @@ from copy import deepcopy
 from src.workflow.template import WORKFLOW_TEMPLATE
 from typing import Union, List
 from src.interface.agent import Agent
-from config.global_variables import agents_dir, mermaid_enabled
+from config.global_variables import (
+    agents_dir,
+    mermaid_enabled,
+    orchestration_scheduler_enabled,
+)
 from src.interface.agent import Component
 import os
 from pathlib import Path
@@ -158,7 +162,16 @@ class WorkflowCache:
                             }
                             self.queue[workflow_id].appendleft(begin_node)
                         else:
-                            logger.warning("Execution queue is empty for workflow %s", workflow_id)
+                            if orchestration_scheduler_enabled:
+                                logger.debug(
+                                    "Legacy execution queue is empty before scheduler graph "
+                                    "preparation for workflow %s",
+                                    workflow_id,
+                                )
+                            else:
+                                logger.warning(
+                                    "Execution queue is empty for workflow %s", workflow_id
+                                )
                     except Exception as e:
                         logger.error(f"Error initializing workflow cache: {e}")
                         raise e

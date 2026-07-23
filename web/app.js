@@ -1,4 +1,4 @@
-﻿const statusIndicator = document.getElementById("statusIndicator");
+const statusIndicator = document.getElementById("statusIndicator");
 const readinessBanner = document.getElementById("readinessBanner");
 const readinessTitle = document.getElementById("readinessTitle");
 const readinessComponents = document.getElementById("readinessComponents");
@@ -356,7 +356,7 @@ let workflowsPage = 1;
 let workflowsPageSize = 5;
 let workflowsTotal = 0;
 let workflowsTotalPages = 0;
-const PLANNER_ONLY_TIMEOUT_MS = 50000;
+const PLANNER_ONLY_TIMEOUT_MS = 180000;
 const CHAT_HISTORY_LIMIT = 10;
 const CHAT_HISTORY_KEY_PREFIX = "cooragent.conversations.v2";
 const LEGACY_CHAT_HISTORY_KEY_PREFIX = "cooragent.chatHistory.v1";
@@ -1630,6 +1630,30 @@ const createStepCard = (displayName, subAgentName) => {
   return card;
 };
 
+const isExecutionAgentEvent = (agentName) => {
+  const normalized = String(agentName || "").toLowerCase();
+  return normalized.includes("agent_proxy") || normalized.startsWith("scheduler");
+};
+
+const formatStepResultContent = (data) => {
+  const outputs = data && typeof data.outputs === "object" && data.outputs
+    ? data.outputs
+    : {};
+  const outputNames = Object.keys(outputs);
+  let value = outputs;
+  if (outputNames.length === 1) {
+    value = outputs[outputNames[0]];
+  }
+  if (outputNames.length > 0) {
+    return typeof value === "string" ? value : JSON.stringify(value, null, 2);
+  }
+  const unavailable = Object.keys(data?.unavailable_outputs || {});
+  if (unavailable.length > 0) {
+    return `结果已生成，但以下输出未通过读取校验：${unavailable.join(", ")}`;
+  }
+  return data?.error || "该步骤未返回可展示的结果。";
+};
+
 const appendStepContent = (content) => {
   if (!currentStepCard) return;
   currentStepCard.content += content;
@@ -2582,11 +2606,28 @@ const handleEvent = (eventName, payload) => {
       coordinatorBuffer = "";
     }
     if (!plannerOnlyMode) {
-      const isExecAgent = currentRunContext === "executing" && agentName.includes("agent_proxy");
+      const isExecAgent = currentRunContext === "executing" && isExecutionAgentEvent(agentName);
       if (isExecAgent) {
         createStepCard(agentName, subAgentName);
       } else if (currentRunContext !== "executing") {
         appendOutput("system", `\n[start_of_agent] ${agentName}\n`);
+      }
+    }
+    return;
+  }
+  if (eventName === "step_result") {
+    const data = payload.data || {};
+    const status = String(data.status || "").toUpperCase();
+    if (currentRunContext === "executing") {
+      if (!currentStepCard) {
+        const agentName = data.agent_name || data.step_id || "scheduler";
+        createStepCard(`scheduler【${agentName}】`, agentName);
+      }
+      const content = formatStepResultContent(data);
+      if (status && status !== "SUCCEEDED") {
+        errorStepCard(content);
+      } else {
+        appendStepContent(content);
       }
     }
     return;
@@ -2622,7 +2663,7 @@ const handleEvent = (eventName, payload) => {
       }
     }
     if (!plannerOnlyMode) {
-      const isExecAgent = currentRunContext === "executing" && agentName.includes("agent_proxy");
+      const isExecAgent = currentRunContext === "executing" && isExecutionAgentEvent(agentName);
       if (isExecAgent) {
         finalizeStepCard();
       } else if (currentRunContext !== "executing") {

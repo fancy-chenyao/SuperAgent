@@ -23,6 +23,11 @@ def _isolate_stores(tmp_path, monkeypatch):
     monkeypatch.setenv("ARTIFACT_PAYLOAD_STORE_DIR",
                        str(tmp_path / "artifacts"))
     monkeypatch.setenv("RECEIPT_STORE_DIR", str(tmp_path / "receipts"))
+    # Unit tests use synthetic user ``u1``; keep the runtime result-event
+    # contract deterministic regardless of a developer's local S-ABAC .env.
+    monkeypatch.setattr(
+        "src.service.env.S_ABAC_ENABLED", False, raising=False
+    )
 
 
 async def _fake_execute(*, step, selected_agent, inputs, context):
@@ -81,6 +86,57 @@ def test_runtime_updates_state_completed_and_results():
     _collect(state)
     assert state["completed_steps"] == ["s1", "s2"]
     assert set(state["step_results"].keys()) == {"s1", "s2"}
+
+
+def test_runtime_emits_materialized_step_result_payload():
+    state = _two_step_state()
+    events = _collect(state)
+
+    result_events = [event for event in events if event["event"] == "step_result"]
+    assert [event["data"]["step_id"] for event in result_events] == ["s1", "s2"]
+    assert result_events[0]["data"]["status"] == "SUCCEEDED"
+    assert result_events[0]["data"]["outputs"]["out_a"] == {"ok": "s1"}
+    assert result_events[0]["data"]["output_refs"]["out_a"]["artifact_id"]
+
+
+def test_runtime_finalizes_task_logger_on_success():
+    class RecordingTaskLogger:
+        def __init__(self):
+            self.workflow_end_calls = 0
+            self.errors = []
+
+        def log_agent_start(self, **_kwargs):
+            return None
+
+        def log_agent_end(self, **_kwargs):
+            return None
+
+        def log_workflow_end(self):
+            self.workflow_end_calls += 1
+
+        def log_error(self, **kwargs):
+            self.errors.append(kwargs)
+
+    state = _two_step_state()
+    task_logger = RecordingTaskLogger()
+
+    async def _run():
+        events = []
+        async for event in run_scheduler_workflow(
+            state,
+            task_id="task-1",
+            task_logger=task_logger,
+            execute_step=_fake_execute,
+            routing_provider=StubRoutingProvider(),
+        ):
+            events.append(event)
+        return events
+
+    events = asyncio.run(_run())
+
+    assert events[-1]["data"]["status"] == "SUCCEEDED"
+    assert task_logger.workflow_end_calls == 1
+    assert task_logger.errors == []
 
 
 def test_runtime_reports_failure_status():

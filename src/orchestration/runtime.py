@@ -301,7 +301,6 @@ async def run_scheduler_workflow(
     """
     workflow_id = state.get("workflow_id")
     graph = build_task_graph_from_state(state)
-
     def persist_skill_evidence(evidence: SkillExecutionEvidence) -> None:
         payload = evidence.model_dump(mode="json")
         state["skill_execution_evidence"] = payload
@@ -492,6 +491,41 @@ async def run_scheduler_workflow(
                 pass
         counter["step"] += 1
 
+        status_value = str(
+            getattr(result.status, "value", result.status) or ""
+        ).upper()
+        result_data: dict[str, Any] = {
+            "step_id": step.step_id,
+            "agent_name": getattr(step, "agent_name", None),
+            "status": status_value,
+            "outputs": {},
+            "output_refs": {},
+            "error": result.error,
+        }
+        unavailable_outputs: dict[str, str] = {}
+        for name, ref in (result.outputs or {}).items():
+            if isinstance(ref, ArtifactRef):
+                result_data["output_refs"][name] = ref.model_dump()
+            try:
+                value = resolver.resolve(
+                    ref,
+                    subject=state.get("user_id"),
+                    scenario=scenario_ctx,
+                    action="read",
+                )
+                # Keep the SSE contract JSON-safe without assuming every remote
+                # provider returns only primitive JSON values.
+                result_data["outputs"][name] = json.loads(
+                    json.dumps(value, ensure_ascii=False, default=str)
+                )
+            except Exception as exc:  # noqa: BLE001 - fail closed per output
+                unavailable_outputs[name] = type(exc).__name__
+        if unavailable_outputs:
+            result_data["unavailable_outputs"] = unavailable_outputs
+
+        # Emit the governed, materialized result before end_of_agent so the Web
+        # execution card receives its body before the card is finalized.
+        await event_queue.put({"event": "step_result", "data": result_data})
         await event_queue.put(
             {
                 "event": "end_of_agent",

@@ -9,6 +9,68 @@ from .base_agent import BaseRemoteAgent
 
 logger = logging.getLogger(__name__)
 
+_SALARY_INTENT_TERMS = (
+    "薪资",
+    "工资",
+    "薪酬",
+    "薪水",
+    "收入",
+    "报酬",
+    "salary",
+    "payroll",
+    "compensation",
+    "income",
+)
+_EXECUTION_CONTEXT_PREFIX = "EXECUTION_CONTEXT"
+
+
+def _salary_requested(messages: List[Dict[str, Any]]) -> bool:
+    """Detect salary intent from the current execution brief or latest user turn.
+
+    The remote Agent is commonly configured with both person and salary tools.
+    Tool availability is not user intent, so never query salary merely because
+    the salary tool is present.
+    """
+    for message in reversed(messages or []):
+        content = message.get("content", "") if isinstance(message, dict) else ""
+        if not isinstance(content, str):
+            content = json.dumps(content, ensure_ascii=False, default=str)
+        stripped = content.strip()
+        if stripped.startswith(_EXECUTION_CONTEXT_PREFIX):
+            _, _, raw = stripped.partition("\n")
+            try:
+                brief = json.loads(raw)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                brief = {}
+            step = brief.get("step") if isinstance(brief, dict) else {}
+            current_text = " ".join(
+                str(value)
+                for value in (
+                    brief.get("original_user_query") if isinstance(brief, dict) else "",
+                    step.get("title") if isinstance(step, dict) else "",
+                    step.get("description") if isinstance(step, dict) else "",
+                )
+                if value
+            ).lower()
+            return any(term in current_text for term in _SALARY_INTENT_TERMS)
+
+    for message in reversed(messages or []):
+        if not isinstance(message, dict):
+            continue
+        if str(message.get("role") or message.get("type") or "").lower() not in {
+            "user",
+            "human",
+        }:
+            continue
+        content = message.get("content", "")
+        if not isinstance(content, str):
+            content = json.dumps(content, ensure_ascii=False, default=str)
+        lowered = content.lower()
+        if lowered.strip() in {"execute the confirmed plan.", "execute the confirmed plan"}:
+            continue
+        return any(term in lowered for term in _SALARY_INTENT_TERMS)
+    return False
+
 
 class RemoteHRAssistantAgent(BaseRemoteAgent):
     """
@@ -52,6 +114,7 @@ class RemoteHRAssistantAgent(BaseRemoteAgent):
         logger.info(f"[{self.name}] person_tool: {person_tool is not None}, salary_tool: {salary_tool is not None}")
 
         results = {}
+        salary_requested = _salary_requested(messages)
 
         # Step 1: Query person info if requested
         if person_tool:
@@ -95,7 +158,7 @@ class RemoteHRAssistantAgent(BaseRemoteAgent):
                 results["person_info_error"] = str(e)
 
         # Step 2: Query salary info if requested
-        if salary_tool:
+        if salary_tool and salary_requested:
             logger.info(f"[{self.name}] ===== SALARY TOOL SECTION STARTED =====")
             try:
                 logger.info(f"[{self.name}] Extracting parameters for salary info tool")
@@ -150,6 +213,10 @@ class RemoteHRAssistantAgent(BaseRemoteAgent):
                 import traceback
                 logger.error(f"[{self.name}] Traceback: {traceback.format_exc()}")
                 results["salary_info_error"] = str(e)
+        elif salary_tool:
+            logger.info(
+                f"[{self.name}] Salary tool available but skipped: no salary intent"
+            )
         else:
             logger.warning(f"[{self.name}] ===== NO SALARY TOOL FOUND =====")
 
