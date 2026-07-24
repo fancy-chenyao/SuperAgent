@@ -86,6 +86,32 @@ def test_converter_explicit_step_id_and_independent_steps():
     assert g.step_map()["step_2"].depends_on == []
 
 
+def test_converter_preserves_structured_execution_contract():
+    graph = plan_to_task_graph(
+        [
+            {
+                "step_id": "send",
+                "agent_name": "RemoteEmailDispatchAgent",
+                "operation_mode": "send",
+                "expected_outputs": ["receipt"],
+                "expected_schema_ref": "send_receipt@v1",
+                "retry": 3,
+                "completion_conditions": ["status == 'SUCCEEDED'"],
+                "verification_contract": {
+                    "required": True,
+                    "method": "provider_receipt",
+                },
+            }
+        ],
+        task_id="structured",
+    )
+    step = graph.step_map()["send"]
+    assert step.expected_schema_ref == "send_receipt@v1"
+    assert step.verification_contract["required"] is True
+    assert step.retry == 3
+    assert step.completion_conditions[0].expression == "status == 'SUCCEEDED'"
+
+
 def test_converter_skips_non_dict_steps():
     g = plan_to_task_graph([None, {"agent_name": "A"}, 42], task_id="t")
     assert list(g.step_map().keys()) == ["step_2"]

@@ -27,7 +27,7 @@ SCHEMA_VERSION = 1
 # Bumped whenever ``plan_to_task_graph`` changes its derivation so a snapshot
 # built by an older converter is refused (re-plan) instead of executed against a
 # graph the current converter would no longer produce.
-CONVERTER_VERSION = 1
+CONVERTER_VERSION = 2
 _DEFAULT_DIR = "store/plan_snapshots"
 
 

@@ -27,7 +27,7 @@ import logging
 import os
 from typing import Any, AsyncGenerator, Awaitable, Callable, Optional
 
-from src.interface.artifact import ArtifactRef, StepStatus
+from src.interface.artifact import ArtifactRef, StepResult, StepStatus
 from src.interface.task_graph import TaskGraph, WorkflowStatus
 from src.orchestration.artifact_guard import PolicyEngineArtifactGuard
 from src.orchestration.artifact_payload_store import (
@@ -40,6 +40,11 @@ from src.orchestration.providers import MainAgentRoutingProvider, RoutingProvide
 from src.orchestration.resolver import ArtifactResolver
 from src.orchestration.scheduler import TaskScheduler
 from src.orchestration.store import ArtifactStore, ArtifactStoreCorruption
+from src.skills.execution_evidence import (
+    SkillExecutionEvidence,
+    aggregate_evidence,
+    build_scheduler_evidence,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +99,30 @@ def _restore_outputs(state: dict, completed: set[str]) -> dict:
         if revived:
             outputs[sid] = revived
     return outputs
+
+
+def _restore_completed_step_results(
+    state: dict, completed: set[str]
+) -> dict[str, StepResult]:
+    """Restore only validated successful results for checkpointed steps."""
+
+    raw_results = state.get("step_results")
+    if not isinstance(raw_results, dict):
+        return {}
+    restored: dict[str, StepResult] = {}
+    for step_id in completed:
+        raw_result = raw_results.get(step_id)
+        try:
+            result = (
+                raw_result
+                if isinstance(raw_result, StepResult)
+                else StepResult.model_validate(raw_result)
+            )
+        except Exception:
+            continue
+        if result.status == StepStatus.SUCCEEDED:
+            restored[step_id] = result
+    return restored
 
 
 def unknown_operation_modes(graph: TaskGraph) -> list[str]:
@@ -273,6 +302,15 @@ async def run_scheduler_workflow(
     workflow_id = state.get("workflow_id")
     graph = build_task_graph_from_state(state)
 
+    def persist_skill_evidence(evidence: SkillExecutionEvidence) -> None:
+        payload = evidence.model_dump(mode="json")
+        state["skill_execution_evidence"] = payload
+        state["business_success"] = evidence.business_success
+        if task_logger is not None and hasattr(
+            task_logger, "set_skill_execution_evidence"
+        ):
+            task_logger.set_skill_execution_evidence(payload)
+
     yield {
         "event": "start_of_workflow",
         "data": {"workflow_id": workflow_id, "task_id": task_id, "mode": "scheduler"},
@@ -313,6 +351,21 @@ async def run_scheduler_workflow(
         except (ArtifactStoreCorruption, ArtifactPayloadCorruption) as exc:
             logger.error(
                 "scheduler: corrupt/missing restored artifacts: %s", exc)
+            evidence = aggregate_evidence(
+                task_id=task_id,
+                workflow_id=str(workflow_id or ""),
+                execution_mode="scheduler",
+                workflow_status=WorkflowStatus.FAILED.value,
+                steps=[],
+                task_graph=graph,
+                planning_steps=state.get("planning_steps") or [],
+            )
+            persist_skill_evidence(evidence)
+            if task_logger is not None:
+                task_logger.log_error(
+                    error=f"corrupt artifact store on resume: {exc}",
+                    node_name="scheduler",
+                )
             yield {
                 "event": "end_of_workflow",
                 "data": {
@@ -322,6 +375,7 @@ async def run_scheduler_workflow(
                     "status": WorkflowStatus.FAILED.value,
                     "error": f"corrupt artifact store on resume: {exc}",
                     "reason": "artifact_store_corruption",
+                    "skill_execution_evidence": evidence.model_dump(mode="json"),
                 },
             }
             return
@@ -450,12 +504,13 @@ async def run_scheduler_workflow(
             }
         )
 
+    receipt_store = PersistentReceiptStore(task_id)
     scheduler = TaskScheduler(
         execute_step=execute,
         routing_provider=routing,
         store=store,
         resolver=resolver,
-        receipt_store=PersistentReceiptStore(task_id),
+        receipt_store=receipt_store,
     )
     ctx = {
         "user_query": state.get("USER_QUERY", "") or state.get("original_user_query", ""),
@@ -472,6 +527,7 @@ async def run_scheduler_workflow(
     }
     initial_completed = set(state.get("completed_steps") or [])
     initial_outputs = _restore_outputs(state, initial_completed)
+    initial_results = _restore_completed_step_results(state, initial_completed)
 
     run_task = asyncio.create_task(
         scheduler.run(
@@ -502,6 +558,21 @@ async def run_scheduler_workflow(
         # Drain any events enqueued before the failure so nothing is lost.
         while not event_queue.empty():
             yield await event_queue.get()
+        evidence = aggregate_evidence(
+            task_id=task_id,
+            workflow_id=str(workflow_id or ""),
+            execution_mode="scheduler",
+            workflow_status=WorkflowStatus.FAILED.value,
+            steps=[],
+            task_graph=graph,
+            planning_steps=state.get("planning_steps") or [],
+        )
+        persist_skill_evidence(evidence)
+        if task_logger is not None:
+            task_logger.log_error(
+                error=f"scheduler failed: {exc}",
+                node_name="scheduler",
+            )
         yield {
             "event": "end_of_workflow",
             "data": {
@@ -510,6 +581,7 @@ async def run_scheduler_workflow(
                 "mode": "scheduler",
                 "status": WorkflowStatus.FAILED.value,
                 "error": str(exc),
+                "skill_execution_evidence": evidence.model_dump(mode="json"),
             },
         }
         return
@@ -529,6 +601,27 @@ async def run_scheduler_workflow(
     terminal = getattr(results, "terminal_status", None)
     status = str(getattr(terminal, "value", terminal)
                  or WorkflowStatus.SUCCEEDED.value)
+    evidence_results = dict(initial_results)
+    evidence_results.update(results)
+    evidence = build_scheduler_evidence(
+        task_id=task_id,
+        workflow_id=str(workflow_id or ""),
+        graph=graph,
+        results=evidence_results,
+        artifact_store=store,
+        receipt_store=receipt_store,
+        planning_steps=state.get("planning_steps") or [],
+        workflow_status=status,
+    )
+    persist_skill_evidence(evidence)
+    if task_logger is not None:
+        if evidence.technical_success:
+            task_logger.log_workflow_end()
+        else:
+            task_logger.log_error(
+                error=f"scheduler workflow ended with status {status}",
+                node_name="scheduler",
+            )
     yield {
         "event": "end_of_workflow",
         "data": {
@@ -541,5 +634,6 @@ async def run_scheduler_workflow(
             "clarifications": clarifications,
             "needs_reconciliation": needs_recon,
             "results": {sid: str(r.status) for sid, r in results.items()},
+            "skill_execution_evidence": evidence.model_dump(mode="json"),
         },
     }

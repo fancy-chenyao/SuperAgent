@@ -19,7 +19,17 @@ from typing import Any, List, Optional
 from src.interface.artifact import Artifact, ArtifactRef, Sensitivity, compute_checksum
 from src.orchestration.schema_registry import SchemaRegistry, get_schema_registry
 
-_WRITE_MODES = {"write", "send", "delete", "update", "create"}
+_WRITE_MODES = {
+    "write",
+    "send",
+    "delete",
+    "update",
+    "create",
+    "submit",
+    "approve",
+    "execute",
+    "export",
+}
 
 # Sensitivity ordering: an artifact is at least as sensitive as the most
 # sensitive datum it derives from (upstream) and at least as sensitive as the
@@ -146,6 +156,23 @@ def to_artifact(
         "executor_success": is_success,
         "risk_level": risk_level,
     }
+    # Preserve the machine-readable outcome envelope and receipt identifiers,
+    # but never copy the entire executor metadata (it may contain transport
+    # details or request context that does not belong in an Artifact).
+    exec_metadata = getattr(execute_result, "metadata", None) or {}
+    if isinstance(exec_metadata, dict):
+        business_outcome = exec_metadata.get("business_outcome")
+        if isinstance(business_outcome, dict):
+            metadata["business_outcome"] = dict(business_outcome)
+        for key in (
+            "external_op_id",
+            "external_operation_id",
+            "idempotency_key",
+            "receipt_status",
+            "verification_trusted",
+        ):
+            if exec_metadata.get(key) is not None:
+                metadata[key] = exec_metadata[key]
     # Carry the acting scenario/capability domain + provenance so a downstream
     # artifact-read guard can evaluate S-ABAC scenario fit, ownership and
     # clearance against real data.

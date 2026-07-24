@@ -445,9 +445,11 @@ async def _validate_plan_data_flow(steps: list, user_id: str) -> tuple[bool, lis
 
         metadata = agent_metadata.get(agent_name)
         if not metadata:
-            # Agent not found in registry, skip validation
             logger.warning(
                 f"Step {step_idx + 1}: Agent '{agent_name}' not found in registry")
+            errors.append(
+                f"Step {step_idx + 1}: Agent '{agent_name}' is not available for this user"
+            )
             continue
 
         required_params = metadata["requires"]
@@ -632,7 +634,6 @@ async def agent_proxy_node(state: State) -> Command[Literal["publisher", "__end_
             "scenario_fit_cache": state.get("scenario_fit_cache", {}),
         },
     )
-    await enforce_agent_dispatch(_agent, context)
 
     # 为执行 Agent 补充明确的当前任务上下文。Production 阶段的用户消息通常只有
     # “Confirm execution”，若不附带原问题和规划步骤，Agent 会自行猜测甚至读取旧文件。
@@ -642,6 +643,60 @@ async def agent_proxy_node(state: State) -> Command[Literal["publisher", "__end_
         for step in current_plan
         if isinstance(step, dict) and step.get("agent_name") == state["next"]
     ]
+    # Keep the plan's concrete operation mode for evidence and authorization.
+    # Collapsing approve/delete into generic write/send would allow a weaker
+    # receipt to satisfy a contract that explicitly requires a trusted verifier.
+    def _normalize_legacy_operation_mode(value: Any) -> str:
+        mode = str(value or "").strip().lower()
+        if mode in {"query", "lookup", "search"}:
+            return "read"
+        if mode in {
+            "read", "write", "send", "delete", "update", "create",
+            "submit", "approve", "execute", "export",
+        }:
+            return mode
+        return "write" if mode else ""
+
+    mode_rank = {
+        "read": 0,
+        "generate": 1,
+        "write": 2,
+        "update": 3,
+        "create": 3,
+        "export": 3,
+        "execute": 4,
+        "send": 5,
+        "submit": 6,
+        "approve": 7,
+        "delete": 7,
+    }
+    normalized_step_modes = [
+        (step, _normalize_legacy_operation_mode(step.get("operation_mode")))
+        for step in assigned_steps
+        if isinstance(step, dict) and step.get("operation_mode")
+    ]
+    fallback_mode = _normalize_legacy_operation_mode(state.get("operation_mode")) or "read"
+    selected_step, step_operation_mode = max(
+        normalized_step_modes or [(None, fallback_mode)],
+        key=lambda item: mode_rank.get(item[1], 2),
+    )
+    selected_contract = (
+        selected_step.get("verification_contract")
+        if isinstance(selected_step, dict)
+        else None
+    )
+    verification_contract = (
+        dict(selected_contract) if isinstance(selected_contract, dict) else {}
+    )
+    step_risk_level = str(
+        (selected_step or {}).get("risk_level")
+        or state.get("risk_profile")
+        or "LOW"
+    )
+    context.metadata["operation_mode"] = step_operation_mode
+    context.metadata["risk_level"] = step_risk_level
+    context.metadata["verification_contract"] = verification_contract
+    await enforce_agent_dispatch(_agent, context)
     execution_brief = {
         "original_user_query": state.get("original_user_query")
         or state.get("USER_QUERY")
@@ -665,9 +720,7 @@ async def agent_proxy_node(state: State) -> Command[Literal["publisher", "__end_
     execute_result = await execute_agent(_agent, messages_to_send, context)
     if not execute_result.is_success:
         error_detail = execute_result.error or "Unknown executor error"
-        raise RuntimeError(
-            f"Agent '{_agent.agent_name}' execution failed: {error_detail}"
-        )
+        logger.warning("Agent '%s' execution failed: %s", _agent.agent_name, error_detail)
     response_content = execute_result.result if execute_result.is_success else execute_result.error
     if response_content is None:
         response_content = ""
@@ -696,12 +749,14 @@ async def agent_proxy_node(state: State) -> Command[Literal["publisher", "__end_
     # Execution-engine (Phase 2): optionally capture this step's output as a typed
     # Artifact. Gated OFF by default and wrapped so capture never breaks the legacy
     # flow; the messages/return below are unchanged.
+    captured_artifact = None
+    step_key = f"{state.get('current_step')}:{_agent.agent_name}"
     if artifact_capture_enabled:
         try:
             from src.manager.executor.artifact_adapter import to_artifact
             from src.interface.artifact import StepResult, StepStatus
 
-            artifact = to_artifact(
+            captured_artifact = to_artifact(
                 execute_result,
                 step=None,  # legacy publisher/while path has no TaskStep
                 context=context,
@@ -710,27 +765,53 @@ async def agent_proxy_node(state: State) -> Command[Literal["publisher", "__end_
             artifacts = state.get("artifacts")
             if not isinstance(artifacts, dict):
                 artifacts = {}
-            artifacts[artifact.artifact_id] = artifact.model_dump()
+            artifacts[captured_artifact.artifact_id] = captured_artifact.model_dump()
             state["artifacts"] = artifacts
 
             step_results = state.get("step_results")
             if not isinstance(step_results, dict):
                 step_results = {}
-            step_key = f"{state.get('current_step')}:{_agent.agent_name}"
+            captured_status = (
+                StepStatus.SUCCEEDED
+                if execute_result.is_success
+                else StepStatus.FAILED
+            )
             step_results[step_key] = StepResult(
                 step_id=step_key,
-                status=StepStatus.SUCCEEDED,
-                outputs={artifact.logical_name: artifact.ref()},
+                status=captured_status,
+                outputs=(
+                    {captured_artifact.logical_name: captured_artifact.ref()}
+                    if execute_result.is_success
+                    else {}
+                ),
+                error=None if execute_result.is_success else execute_result.error,
             ).model_dump()
             state["step_results"] = step_results
             logger.info(
                 "artifact captured: %s (%s) for agent %s",
-                artifact.artifact_id,
-                artifact.logical_name,
+                captured_artifact.artifact_id,
+                captured_artifact.logical_name,
                 _agent.agent_name,
             )
         except Exception as exc:  # pragma: no cover - defensive; never break flow
             logger.warning("artifact capture skipped: %s", exc)
+
+    skill_step_evidence = dict(state.get("skill_step_evidence") or {})
+    try:
+        from src.skills.execution_evidence import build_step_evidence
+
+        evidence = build_step_evidence(
+            step_id=step_key,
+            agent_name=_agent.agent_name,
+            operation_mode=step_operation_mode,
+            risk_level=step_risk_level,
+            verification_contract=verification_contract,
+            execute_result=execute_result,
+            artifact=captured_artifact,
+        )
+        skill_step_evidence[step_key] = evidence.model_dump(mode="json")
+    except Exception as exc:  # pragma: no cover - evidence must not break execution
+        logger.warning("skill execution evidence capture skipped: %s", exc)
 
     if state["workflow_mode"] == "launch":
         cache.restore_node(
@@ -757,8 +838,13 @@ async def agent_proxy_node(state: State) -> Command[Literal["publisher", "__end_
             ],
             "processing_agent_name": _agent.agent_name,
             "agent_name": _agent.agent_name,
+            "workflow_execution_failed": bool(state.get("workflow_execution_failed"))
+            or not execute_result.is_success,
+            "skill_step_evidence": skill_step_evidence,
         },
-        goto="publisher",
+        # A failed Agent cannot produce a valid dependency for publisher or any
+        # subsequent Agent. End the legacy loop after recording the failure.
+        goto="__end__" if not execute_result.is_success else "publisher",
     )
 
 
@@ -776,6 +862,65 @@ async def planner_node(state: State) -> Command[Literal["publisher", "__end__"]]
     retry_llm = None
     plan_validation_failed = False
     runtime_event_handler = state.get("runtime_event_handler")
+
+    if state.get("workflow_mode") == "launch" and state.get("workflow_skill_match"):
+        steps = state.get("planning_steps") or cache.get_planning_steps(state["workflow_id"])
+        if isinstance(steps, str):
+            try:
+                steps = json.loads(steps)
+            except Exception:
+                steps = []
+        validation_errors: list[str] = []
+        skill_plan_valid = False
+        if isinstance(steps, list) and steps:
+            try:
+                data_flow_valid, data_flow_errors = await _validate_plan_data_flow(
+                    steps, state.get("user_id", "")
+                )
+                profile_errors = _validate_plan_against_task_profile(steps, state)
+                validation_errors = list(data_flow_errors) + list(profile_errors)
+                skill_plan_valid = data_flow_valid and not profile_errors
+            except Exception as exc:
+                validation_errors = [f"skill plan validation error: {exc}"]
+        if isinstance(steps, list) and steps and skill_plan_valid:
+            raw_content = json.dumps({"steps": steps}, ensure_ascii=False)
+            message_content = json.dumps({"steps": steps}, indent=2, ensure_ascii=False)
+            cache.restore_planning_steps(state["workflow_id"], steps, state["user_id"])
+            goto = "__end__" if state.get("stop_after_planner") else "publisher"
+            cache.restore_system_node(state["workflow_id"], goto, state["user_id"])
+            return Command(
+                update={
+                    "messages": [{"content": message_content, "tool": "planner", "role": "assistant"}],
+                    "agent_name": "planner",
+                    "full_plan": raw_content,
+                    "planning_steps": steps,
+                },
+                goto=goto,
+            )
+        if validation_errors:
+            logger.warning(
+                "Rejected matched workflow skill during current-plan validation: %s",
+                "; ".join(validation_errors),
+            )
+            if callable(runtime_event_handler):
+                await runtime_event_handler(
+                    {
+                        "event": "skill_rejected",
+                        "agent_name": "planner",
+                        "data": {
+                            "skill_id": (
+                                state.get("workflow_skill_match") or {}
+                            ).get("skill_id", ""),
+                            "reason": "current_plan_validation_failed",
+                            "errors": validation_errors,
+                        },
+                    }
+                )
+        state["workflow_skill_match"] = {}
+        state["reused_skill_id"] = ""
+        state["reused_skill_owner_id"] = ""
+        state["planning_steps"] = []
+        cache.restore_planning_steps(state["workflow_id"], [], state["user_id"])
 
     routing_decision = state.get("routing_decision") or {}
     if state["workflow_mode"] == "launch" and routing_decision.get("decision") != "DISPATCH":
@@ -1230,6 +1375,19 @@ async def coordinator_node(state: State) -> Command[Literal["planner", "__end__"
 
     goto = "__end__"
     content = ""
+
+    if state.get("workflow_mode") == "launch" and state.get("workflow_skill_match"):
+        cache.restore_system_node(state["workflow_id"], COORDINATOR, state["user_id"])
+        cache.restore_system_node(state["workflow_id"], "planner", state["user_id"])
+        return Command(
+            update={
+                "messages": [
+                    {"content": "handover_to_planner", "tool": "coordinator", "role": "assistant"}
+                ],
+                "agent_name": "coordinator",
+            },
+            goto="planner",
+        )
 
     if state.get("workflow_mode") == "production":
         goto = "publisher"
