@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import tempfile
 from pathlib import Path
@@ -122,6 +123,71 @@ def test_provider_receipt_verifies_standard_side_effect_even_if_payload_is_untyp
     assert step.schema_valid is False
 
 
+def test_resource_ids_require_exact_id_field_and_scalar_identifier():
+    step = build_step_evidence(
+        step_id="send",
+        operation_mode="send",
+        execute_result=_success(
+            {
+                "valid": True,
+                "invalid": "not-an-id",
+                "record_id": "record-1",
+                "id": False,
+            }
+        ),
+    )
+
+    assert step.resource_ids == ["record-1"]
+
+
+def test_outcome_summary_redacts_raw_task_graph_content():
+    graph = TaskGraph(
+        spec=TaskSpec(
+            task_id="workflow-1",
+            goal="Submit confidential customer SSN 123-45-6789",
+            subject="alice",
+            metadata={"customer_email": "alice@example.com"},
+        ),
+        steps=[
+            TaskStep(
+                step_id="approve",
+                operation_mode="approve",
+                depends_on=["lookup"],
+                required_capabilities=["approval"],
+                expected_schema_ref="approval_receipt@v1",
+                description="Approve SSN 123-45-6789 for Alice",
+                verification_contract={
+                    "required": True,
+                    "trusted_verifier_required": True,
+                    "method": "provider_receipt",
+                },
+            )
+        ],
+    )
+    evidence = aggregate_evidence(
+        task_id="task-1",
+        workflow_status="SUCCEEDED",
+        steps=[
+            build_step_evidence(
+                step_id="approve",
+                operation_mode="approve",
+                execute_result=_success({"approval_id": "approval-1"}),
+            )
+        ],
+        task_graph=graph,
+    )
+
+    summary = evidence.outcome_summary()
+    serialized = json.dumps(summary, ensure_ascii=True)
+    assert "123-45-6789" not in serialized
+    assert "alice@example.com" not in serialized
+    assert "goal" not in summary["task_graph"]
+    assert "description" not in summary["task_graph"]["steps"][0]
+    assert summary["task_graph"]["steps"][0]["expected_schema_ref"] == "approval_receipt@v1"
+    assert summary["task_graph"]["steps"][0]["verification_contract"]["trusted_verifier_required"] is True
+    assert len(summary["task_graph"]["graph_hash"]) == 64
+
+
 def test_high_risk_side_effect_requires_trusted_verifier_not_only_receipt():
     result = StepResult(
         step_id="approve",
@@ -210,6 +276,31 @@ def test_empty_successful_workflow_has_no_distillable_trace():
     assert evidence.technical_success is False
     assert decision.eligible is False
     assert "no_step_execution_evidence" in decision.reasons
+
+
+def test_partial_legacy_step_evidence_cannot_distill_the_full_plan():
+    evidence = aggregate_evidence(
+        task_id="task-resume",
+        workflow_status="COMPLETED",
+        steps=[
+            build_step_evidence(
+                step_id="5:WriterAgent",
+                agent_name="WriterAgent",
+                operation_mode="read",
+                execute_result=_success({"done": True}),
+            )
+        ],
+        planning_steps=[
+            {"agent_name": "ReaderAgent", "description": "Read source data"},
+            {"agent_name": "WriterAgent", "description": "Write the result"},
+        ],
+    )
+
+    decision = evaluate_distillation_evidence(evidence)
+    assert evidence.step_coverage == 0.5
+    assert evidence.technical_success is False
+    assert decision.eligible is False
+    assert "incomplete_step_execution_evidence" in decision.reasons
 
 
 def test_scheduler_persists_execution_evidence_in_state_and_terminal_event():

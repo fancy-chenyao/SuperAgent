@@ -1378,7 +1378,6 @@ class WorkflowSkillManager:
         required_slots = {slot.name for slot in card.slots if slot.required}
         contracts_ok = (
             not card.contract_fingerprints
-            or not agent_contracts
             or all(
                 agent_contracts.get(name) == fingerprint
                 for name, fingerprint in card.contract_fingerprints.items()

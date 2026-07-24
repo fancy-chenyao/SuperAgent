@@ -634,7 +634,6 @@ async def agent_proxy_node(state: State) -> Command[Literal["publisher", "__end_
             "scenario_fit_cache": state.get("scenario_fit_cache", {}),
         },
     )
-    await enforce_agent_dispatch(_agent, context)
 
     # 为执行 Agent 补充明确的当前任务上下文。Production 阶段的用户消息通常只有
     # “Confirm execution”，若不附带原问题和规划步骤，Agent 会自行猜测甚至读取旧文件。
@@ -644,23 +643,60 @@ async def agent_proxy_node(state: State) -> Command[Literal["publisher", "__end_
         for step in current_plan
         if isinstance(step, dict) and step.get("agent_name") == state["next"]
     ]
-    declared_modes = [
-        str(step.get("operation_mode") or "").strip().lower()
+    # Keep the plan's concrete operation mode for evidence and authorization.
+    # Collapsing approve/delete into generic write/send would allow a weaker
+    # receipt to satisfy a contract that explicitly requires a trusted verifier.
+    def _normalize_legacy_operation_mode(value: Any) -> str:
+        mode = str(value or "").strip().lower()
+        if mode in {"query", "lookup", "search"}:
+            return "read"
+        if mode in {
+            "read", "write", "send", "delete", "update", "create",
+            "submit", "approve", "execute", "export",
+        }:
+            return mode
+        return "write" if mode else ""
+
+    mode_rank = {
+        "read": 0,
+        "generate": 1,
+        "write": 2,
+        "update": 3,
+        "create": 3,
+        "export": 3,
+        "execute": 4,
+        "send": 5,
+        "submit": 6,
+        "approve": 7,
+        "delete": 7,
+    }
+    normalized_step_modes = [
+        (step, _normalize_legacy_operation_mode(step.get("operation_mode")))
         for step in assigned_steps
         if isinstance(step, dict) and step.get("operation_mode")
     ]
-    mode_rank = {"read": 0, "write": 1, "send": 2}
-    normalized_modes = [
-        "send" if mode == "send" else "read" if mode in {
-            "read", "query", "lookup", "search"
-        } else "write"
-        for mode in declared_modes
-    ]
-    step_operation_mode = max(
-        normalized_modes or [str(state.get("operation_mode") or "read").lower()],
-        key=lambda mode: mode_rank.get(mode, 1),
+    fallback_mode = _normalize_legacy_operation_mode(state.get("operation_mode")) or "read"
+    selected_step, step_operation_mode = max(
+        normalized_step_modes or [(None, fallback_mode)],
+        key=lambda item: mode_rank.get(item[1], 2),
+    )
+    selected_contract = (
+        selected_step.get("verification_contract")
+        if isinstance(selected_step, dict)
+        else None
+    )
+    verification_contract = (
+        dict(selected_contract) if isinstance(selected_contract, dict) else {}
+    )
+    step_risk_level = str(
+        (selected_step or {}).get("risk_level")
+        or state.get("risk_profile")
+        or "LOW"
     )
     context.metadata["operation_mode"] = step_operation_mode
+    context.metadata["risk_level"] = step_risk_level
+    context.metadata["verification_contract"] = verification_contract
+    await enforce_agent_dispatch(_agent, context)
     execution_brief = {
         "original_user_query": state.get("original_user_query")
         or state.get("USER_QUERY")
@@ -768,7 +804,8 @@ async def agent_proxy_node(state: State) -> Command[Literal["publisher", "__end_
             step_id=step_key,
             agent_name=_agent.agent_name,
             operation_mode=step_operation_mode,
-            risk_level=str(state.get("risk_profile") or "LOW"),
+            risk_level=step_risk_level,
+            verification_contract=verification_contract,
             execute_result=execute_result,
             artifact=captured_artifact,
         )
@@ -805,7 +842,9 @@ async def agent_proxy_node(state: State) -> Command[Literal["publisher", "__end_
             or not execute_result.is_success,
             "skill_step_evidence": skill_step_evidence,
         },
-        goto="publisher",
+        # A failed Agent cannot produce a valid dependency for publisher or any
+        # subsequent Agent. End the legacy loop after recording the failure.
+        goto="__end__" if not execute_result.is_success else "publisher",
     )
 
 

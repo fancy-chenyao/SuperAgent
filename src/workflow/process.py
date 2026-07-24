@@ -36,6 +36,7 @@ from src.skills.execution_evidence import (
     SkillExecutionEvidence,
     build_legacy_evidence,
     evaluate_distillation_evidence,
+    load_execution_evidence,
 )
 
 logging.basicConfig(
@@ -78,6 +79,26 @@ def _normalize_planning_steps(raw: Any) -> list:
             return []
         return _normalize_planning_steps(parsed)
     return []
+
+
+def _resume_step_evidence(raw: Any, resume_step: int | None) -> dict[str, Any]:
+    """Keep only durable legacy evidence produced before the resume frontier."""
+
+    if not isinstance(raw, dict) or resume_step is None or resume_step < 1:
+        return {}
+    preserved: dict[str, Any] = {}
+    for key, value in raw.items():
+        if not isinstance(value, dict):
+            continue
+        step_id = str(value.get("step_id") or key)
+        raw_step_number = step_id.split(":", 1)[0]
+        try:
+            step_number = int(raw_step_number)
+        except ValueError:
+            continue
+        if step_number < resume_step:
+            preserved[str(key)] = value
+    return preserved
 
 
 def _agent_contract_fingerprints(agent_cards: Any) -> dict[str, str]:
@@ -833,6 +854,20 @@ async def _process_workflow(
             task_id=task_id, workflow_id=workflow_id, user_query=user_query)
         task_logger.set_execution_phase(execution_phase)  # 设置执行阶段
 
+    def _reset_resume_evidence(target_state: dict[str, Any]) -> None:
+        """Drop stale terminal evidence and keep only pre-resume step evidence."""
+
+        target_state["skill_execution_evidence"] = {}
+        target_state["skill_step_evidence"] = _resume_step_evidence(
+            target_state.get("skill_step_evidence"), resume_step
+        )
+        target_state["business_success"] = None
+        target_state["workflow_execution_failed"] = False
+        if hasattr(task_logger, "set_skill_execution_evidence"):
+            task_logger.set_skill_execution_evidence({})
+        else:
+            task_logger.skill_execution_evidence = {}
+
     def _record_reused_skill_outcome(
         source_state: dict[str, Any] | None,
         success: bool,
@@ -862,14 +897,18 @@ async def _process_workflow(
         raw_evidence = source_state.get("skill_execution_evidence") or getattr(
             task_logger, "skill_execution_evidence", {}
         )
+        planning_steps = (
+            _normalize_planning_steps(getattr(task_logger, "planning_steps", []))
+            or _normalize_planning_steps(source_state.get("planning_steps"))
+            or _normalize_planning_steps(cache.get_planning_steps(workflow_id))
+        )
         if isinstance(raw_evidence, dict) and raw_evidence:
-            evidence = SkillExecutionEvidence.model_validate(raw_evidence)
-        else:
-            planning_steps = (
-                _normalize_planning_steps(getattr(task_logger, "planning_steps", []))
-                or _normalize_planning_steps(source_state.get("planning_steps"))
-                or _normalize_planning_steps(cache.get_planning_steps(workflow_id))
+            evidence = load_execution_evidence(
+                raw_evidence,
+                planning_steps=planning_steps,
+                task_graph=source_state.get("task_graph"),
             )
+        else:
             evidence = build_legacy_evidence(
                 task_id=task_id,
                 workflow_id=workflow_id,
@@ -1181,6 +1220,12 @@ async def _process_workflow(
             except Exception as e:
                 logger.warning(
                     f"Could not load checkpoint for resume, starting from scratch: {e}")
+
+        if should_resume:
+            # Checkpoints may contain the previous attempt's terminal evidence.
+            # Clear it after all checkpoint/scenario restoration so completion
+            # aggregates only evidence produced by this resumed attempt.
+            _reset_resume_evidence(state)
 
         # Only log workflow_start for new executions, not for resume
         if not should_resume:

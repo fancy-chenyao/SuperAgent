@@ -347,6 +347,13 @@ def test_structured_matching_rejects_incompatible_task_signals(tmp_path):
         available_agents=agents,
         agent_contracts={"MetricsReaderAgent": "1.0"},
     ) is None
+    assert manager.match(
+        user_id="alice",
+        query="generate monthly report",
+        task_profile=_profile(),
+        available_agents=agents,
+        agent_contracts={},
+    ) is None
 
 
 def test_legacy_card_payload_remains_readable():

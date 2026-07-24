@@ -35,8 +35,8 @@ from src.memory import get_memory_manager
 from src.memory.store import SecretDetectedError
 from src.skills.workflow_skill import get_workflow_skill_manager
 from src.skills.execution_evidence import (
-    SkillExecutionEvidence,
     evaluate_distillation_evidence,
+    load_execution_evidence,
 )
 
 
@@ -998,7 +998,10 @@ def create_app() -> FastAPI:
                 detail="Task log has no structured skill execution evidence",
             )
         try:
-            execution_evidence = SkillExecutionEvidence.model_validate(raw_evidence)
+            execution_evidence = load_execution_evidence(
+                raw_evidence,
+                planning_steps=planning_steps,
+            )
             if execution_evidence.task_id != body.task_id:
                 raise ValueError("Task/evidence identity mismatch")
             decision = evaluate_distillation_evidence(execution_evidence)

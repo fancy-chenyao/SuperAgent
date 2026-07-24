@@ -170,6 +170,10 @@ def test_t5_resume_downstream_receives_full_upstream_artifact():
     events2 = _drain(state, execute)
     assert events2[-1]["data"]["status"] == "SUCCEEDED"
     assert execute.received["s2"]["upstream"] == {"data_a": "hello-from-s1"}
+    evidence = events2[-1]["data"]["skill_execution_evidence"]
+    assert evidence["technical_success"] is True
+    assert evidence["step_coverage"] == 1.0
+    assert {step["step_id"] for step in evidence["steps"]} == {"s1", "s2"}
 
 
 def test_t6_resume_with_missing_artifact_fails_closed():

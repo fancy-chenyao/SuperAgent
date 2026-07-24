@@ -299,6 +299,80 @@ def test_reused_plan_still_passes_agentproxy_authorization(tmp_path, monkeypatch
     assert failed_evidence["technical_success"] is False
 
 
+def test_legacy_agent_proxy_preserves_operation_contract_and_stops_on_failure(monkeypatch):
+    import asyncio
+    import src.workflow.coor_task as coor_task
+
+    fake_cache = _FakeCache()
+    fake_cache.steps = [
+        {
+            "agent_name": "reporter",
+            "operation_mode": "approve",
+            "risk_level": "LOW",
+            "verification_contract": {"trusted_verifier_required": True},
+        }
+    ]
+    agent = SimpleNamespace(agent_name="reporter")
+    observed_modes = []
+
+    class Registry:
+        async def get(self, name):
+            return agent if name == "reporter" else None
+
+    class AgentManager:
+        agent_registry = Registry()
+
+        async def ensure_initialized(self):
+            return None
+
+    async def enforce(_target, _context):
+        return None
+
+    async def execute(_target, _messages, context):
+        observed_modes.append(context.metadata["operation_mode"])
+        return ExecuteResult(
+            status=ExecutionStatus.SUCCESS,
+            result={"approval_id": "approval-1"},
+            metadata={
+                "receipt_status": "SUCCEEDED",
+                "external_operation_id": "approval-1",
+            },
+        )
+
+    monkeypatch.setattr(coor_task, "agent_manager", AgentManager())
+    monkeypatch.setattr(coor_task, "enforce_agent_dispatch", enforce)
+    monkeypatch.setattr(coor_task, "execute_agent", execute)
+    monkeypatch.setattr(coor_task, "cache", fake_cache)
+
+    state = {
+        "user_id": "alice",
+        "workflow_id": "alice:wf",
+        "workflow_mode": "production",
+        "next": "reporter",
+        "messages": [{"role": "user", "content": "approve request"}],
+        "deep_thinking_mode": False,
+        "task_id": "task-production",
+        "current_step": 2,
+        "risk_profile": "LOW",
+    }
+    command = asyncio.run(coor_task.agent_proxy_node(state))
+    evidence = command.update["skill_step_evidence"]["2:reporter"]
+
+    assert observed_modes == ["approve"]
+    assert evidence["operation_mode"] == "approve"
+    assert evidence["business_success"] is None
+    assert evidence["verification_method"] == "trusted_verifier_required"
+    assert command.goto == "publisher"
+
+    async def failed_execute(_target, _messages, _context):
+        return ExecuteResult(status=ExecutionStatus.FAILED, error="remote Agent failed")
+
+    monkeypatch.setattr(coor_task, "execute_agent", failed_execute)
+    failed = asyncio.run(coor_task.agent_proxy_node(state))
+    assert failed.goto == "__end__"
+    assert failed.update["workflow_execution_failed"] is True
+
+
 def test_workflow_skill_backend_api_lifecycle_and_manual_distillation(tmp_path, monkeypatch):
     import src.service.web_app as web_app
 
@@ -321,9 +395,10 @@ def test_workflow_skill_backend_api_lifecycle_and_manual_distillation(tmp_path, 
             "business_success": True,
             "business_outcome_coverage": 1.0,
             "steps": [
-                {
-                    "step_id": "submit",
-                    "operation_mode": "write",
+                    {
+                        "step_id": "submit",
+                        "agent_name": "reporter",
+                        "operation_mode": "write",
                     "technical_success": True,
                     "business_success": True,
                     "verification_status": "verified",
@@ -563,6 +638,108 @@ def test_non_success_agent_status_is_not_distilled(tmp_path, monkeypatch):
     end_event = next(event for event in events if event["event"] == "end_of_workflow")
     assert end_event["data"]["status"] == "failed"
     assert end_event["data"]["messages"][0]["content"] == "workflow failed"
+
+
+def test_resume_discards_previous_skill_execution_evidence(tmp_path, monkeypatch):
+    import asyncio
+    import src.robust.task_logger as task_logger_module
+    import src.workflow.process as process
+
+    manager = _manager(tmp_path)
+    fake_cache = _FakeCache()
+    fake_cache.steps = [{"agent_name": "reporter", "description": "Process leave"}]
+    fake_cache.cache["alice:wf"]["planning_steps"] = fake_cache.steps
+    old_logger = _FakeTaskLogger("task-resume", "alice:wf", "old query")
+    old_logger.skill_execution_evidence = {
+        "task_id": "stale-task",
+        "workflow_status": "COMPLETED",
+        "technical_success": True,
+        "business_success": True,
+        "steps": [{"step_id": "old", "technical_success": True}],
+    }
+
+    monkeypatch.setattr(process, "cache", fake_cache)
+    monkeypatch.setattr(process, "get_workflow_skill_manager", lambda: manager)
+    monkeypatch.setattr(process, "TaskLogger", _FakeTaskLogger)
+    monkeypatch.setattr(process, "CheckpointManager", _FakeCheckpointManager)
+    monkeypatch.setattr(process, "AUTO_RECOVERY_ENABLED", False)
+    monkeypatch.setattr(process, "get_llm_by_type", lambda _kind: SimpleNamespace())
+    monkeypatch.setattr(task_logger_module.TaskLogger, "load", lambda _task_id: old_logger)
+
+    async def finish(_state):
+        return SimpleNamespace(goto="__end__", update={})
+
+    workflow = CompiledWorkflow(nodes={"finish": finish}, edges={}, start_node="finish")
+    state = {
+        "user_id": "alice",
+        "TEAM_MEMBERS": ["reporter"],
+        "TEAM_MEMBERS_DESCRIPTION": "reporter",
+        "TOOLS": "",
+        "RESOURCE_CATALOG": "",
+        "USER_QUERY": "Please submit my leave request",
+        "execution_user_query": "Confirm execution",
+        "original_user_query": "Please submit my leave request",
+        "messages": [{"role": "user", "content": "Confirm execution"}],
+        "deep_thinking_mode": False,
+        "search_before_planning": False,
+        "workflow_id": "alice:wf",
+        "workflow_mode": "production",
+        "initialized": True,
+        "stop_after_planner": False,
+        "instruction_history": [],
+        "memory_session_id": "",
+        "memory_context": {},
+        "skill_reuse_enabled": True,
+        "reused_skill_id": "",
+        "reused_skill_owner_id": "",
+        "workflow_skill_match": {},
+        "workflow_execution_failed": True,
+        "skill_step_evidence": {"old": {"technical_success": True}},
+        "skill_execution_evidence": old_logger.skill_execution_evidence,
+        "task_profile": _leave_profile(),
+    }
+
+    async def run():
+        return [
+            event
+            async for event in process._process_workflow(
+                workflow,
+                state,
+                resume_step=1,
+                task_id="task-resume",
+                execution_phase="execution",
+            )
+        ]
+
+    events = asyncio.run(run())
+    end_event = next(event for event in events if event["event"] == "end_of_workflow")
+    evidence = end_event["data"]["skill_execution_evidence"]
+    assert old_logger.skill_execution_evidence["task_id"] == "task-resume"
+    assert old_logger.skill_execution_evidence["steps"] == []
+    assert evidence["task_id"] == "task-resume"
+    assert evidence["steps"] == []
+
+
+def test_resume_step_evidence_keeps_only_steps_before_the_frontier():
+    import src.workflow.process as process
+
+    previous = {
+        "3:ReaderAgent": {
+            "step_id": "3:ReaderAgent",
+            "agent_name": "ReaderAgent",
+            "technical_success": True,
+        },
+        "5:WriterAgent": {
+            "step_id": "5:WriterAgent",
+            "agent_name": "WriterAgent",
+            "technical_success": True,
+        },
+        "unknown": {"step_id": "unknown", "technical_success": True},
+    }
+
+    assert process._resume_step_evidence(previous, 5) == {
+        "3:ReaderAgent": previous["3:ReaderAgent"]
+    }
 
 
 def test_request_flag_disables_reuse_and_runs_normal_graph(tmp_path, monkeypatch):

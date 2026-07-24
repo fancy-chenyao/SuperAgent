@@ -9,6 +9,9 @@ Artifact/receipt stores.
 
 from __future__ import annotations
 
+import hashlib
+import json
+from collections import Counter
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any, Iterable, Mapping
@@ -51,6 +54,108 @@ _SUCCESS_STATUSES = frozenset(
         "pending_approval",
     }
 )
+
+
+def _safe_scalar(value: Any) -> str | int | None:
+    """Return an identifier-safe scalar, excluding booleans and containers."""
+
+    if isinstance(value, bool) or not isinstance(value, (str, int)):
+        return None
+    if isinstance(value, str):
+        value = value.strip()
+        if not value:
+            return None
+    return value
+
+
+def _sanitize_verification_contract(value: Any) -> dict[str, Any]:
+    """Keep contract semantics and references without arbitrary planner text."""
+
+    raw = value if isinstance(value, Mapping) else {}
+    sanitized: dict[str, Any] = {}
+    for key in ("required", "trusted_verifier_required"):
+        if isinstance(raw.get(key), bool):
+            sanitized[key] = raw[key]
+    for key in (
+        "method",
+        "verification_ref",
+        "evidence_ref",
+        "receipt_ref",
+        "provider_reference",
+        "schema_ref",
+    ):
+        scalar = _safe_scalar(raw.get(key))
+        if scalar is not None:
+            sanitized[key] = scalar
+    return sanitized
+
+
+def _sanitize_task_graph(task_graph: Any) -> dict[str, Any]:
+    """Return topology/schema metadata without goals, descriptions, or inputs."""
+
+    if isinstance(task_graph, TaskGraph):
+        raw_graph: Mapping[str, Any] = task_graph.model_dump(mode="json")
+    elif isinstance(task_graph, Mapping):
+        raw_graph = task_graph
+    else:
+        return {}
+
+    safe_steps: list[dict[str, Any]] = []
+    raw_steps = raw_graph.get("steps", [])
+    if isinstance(raw_steps, list):
+        for raw_step in raw_steps:
+            if not isinstance(raw_step, Mapping):
+                continue
+            step_id = _safe_scalar(raw_step.get("step_id"))
+            if step_id is None:
+                continue
+            safe_step: dict[str, Any] = {
+                "step_id": str(step_id),
+                "depends_on": [
+                    str(dep)
+                    for dep in raw_step.get("depends_on", [])
+                    if _safe_scalar(dep) is not None
+                ],
+                "operation_mode": str(raw_step.get("operation_mode") or "read"),
+                "risk_level": str(raw_step.get("risk_level") or "LOW"),
+            }
+            agent_name = _safe_scalar(raw_step.get("agent_name"))
+            if agent_name is not None:
+                safe_step["agent_name"] = str(agent_name)
+            capabilities = raw_step.get("required_capabilities")
+            if isinstance(capabilities, list):
+                safe_step["required_capabilities"] = [
+                    str(item)
+                    for item in capabilities
+                    if _safe_scalar(item) is not None
+                ]
+            schema_ref = _safe_scalar(
+                raw_step.get("expected_schema_ref")
+                or raw_step.get("output_schema_ref")
+            )
+            if schema_ref is not None:
+                safe_step["expected_schema_ref"] = str(schema_ref)
+            contract = _sanitize_verification_contract(
+                raw_step.get("verification_contract")
+            )
+            if contract:
+                safe_step["verification_contract"] = contract
+            input_bindings = raw_step.get("input_bindings") or raw_step.get(
+                "required_inputs"
+            )
+            if isinstance(input_bindings, Mapping):
+                safe_step["input_names"] = sorted(str(key) for key in input_bindings)
+            safe_steps.append(safe_step)
+
+    safe_graph: dict[str, Any] = {
+        "schema_version": raw_graph.get("schema_version", 1),
+        "steps": safe_steps,
+    }
+    canonical = json.dumps(
+        safe_graph, ensure_ascii=True, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    safe_graph["graph_hash"] = hashlib.sha256(canonical).hexdigest()
+    return safe_graph
 
 
 class VerificationStatus(StrEnum):
@@ -101,6 +206,7 @@ class SkillExecutionEvidence(BaseModel):
     workflow_status: str = "UNKNOWN"
     technical_success: bool = False
     business_success: bool | None = None
+    step_coverage: float = 0.0
     business_outcome_coverage: float = 0.0
     steps: list[StepExecutionEvidence] = Field(default_factory=list)
     task_graph: dict[str, Any] = Field(default_factory=dict)
@@ -116,11 +222,12 @@ class SkillExecutionEvidence(BaseModel):
             "workflow_id": self.workflow_id,
             "technical_success": self.technical_success,
             "business_success": self.business_success,
+            "step_coverage": self.step_coverage,
             "business_outcome_coverage": self.business_outcome_coverage,
             "workflow_status": self.workflow_status,
             "execution_mode": self.execution_mode,
             "steps": [item.model_dump(mode="json") for item in self.steps],
-            "task_graph": self.task_graph,
+            "task_graph": _sanitize_task_graph(self.task_graph),
         }
 
 
@@ -146,6 +253,8 @@ def evaluate_distillation_evidence(
     reasons: list[str] = []
     if not evidence.steps:
         reasons.append("no_step_execution_evidence")
+    elif evidence.step_coverage < 1.0:
+        reasons.append("incomplete_step_execution_evidence")
     if not evidence.technical_success:
         reasons.append("workflow_not_technically_successful")
     if evidence.business_success is False:
@@ -209,18 +318,21 @@ def _business_outcome(payload: Any, metadata: Mapping[str, Any]) -> Mapping[str,
 
 def _resource_ids(payload: Any, outcome: Mapping[str, Any]) -> list[str]:
     ids: list[str] = []
+
+    def append_id(value: Any) -> None:
+        scalar = _safe_scalar(value)
+        if scalar is not None:
+            ids.append(str(scalar))
+
     resource = _mapping(outcome.get("resource"))
     for value in (resource.get("id"), outcome.get("resource_id")):
-        if value is not None and str(value).strip():
-            ids.append(str(value))
+        append_id(value)
     if isinstance(payload, Mapping):
         for key, value in payload.items():
-            if value is None or not str(value).strip():
-                continue
             normalized = str(key).lower()
-            if normalized == "id" or normalized.endswith("_id") or normalized.endswith("id"):
+            if normalized == "id" or normalized.endswith("_id"):
                 if normalized not in {"employee_id", "user_id", "workflow_id", "task_id"}:
-                    ids.append(str(value))
+                    append_id(value)
     return list(dict.fromkeys(ids))
 
 
@@ -416,8 +528,57 @@ def aggregate_evidence(
     planning_steps: Iterable[Mapping[str, Any]] | None = None,
 ) -> SkillExecutionEvidence:
     normalized_steps = list(steps)
+    normalized_plan = [
+        dict(item) for item in (planning_steps or ()) if isinstance(item, Mapping)
+    ]
+
+    expected_graph_ids: list[str] = []
+    if isinstance(task_graph, TaskGraph):
+        expected_graph_ids = [str(step.step_id) for step in task_graph.steps]
+    elif isinstance(task_graph, Mapping):
+        raw_steps = task_graph.get("steps")
+        if isinstance(raw_steps, list):
+            expected_graph_ids = [
+                str(item.get("step_id"))
+                for item in raw_steps
+                if isinstance(item, Mapping) and item.get("step_id")
+            ]
+
+    if expected_graph_ids:
+        actual_ids = {item.step_id for item in normalized_steps}
+        covered_steps = sum(step_id in actual_ids for step_id in expected_graph_ids)
+        step_coverage = covered_steps / len(expected_graph_ids)
+    elif normalized_plan:
+        expected_ids = [
+            str(item.get("step_id"))
+            for item in normalized_plan
+            if item.get("step_id")
+        ]
+        if len(expected_ids) == len(normalized_plan):
+            actual_ids = {item.step_id for item in normalized_steps}
+            covered_steps = sum(step_id in actual_ids for step_id in expected_ids)
+        else:
+            expected_agents = Counter(
+                str(item.get("agent_name"))
+                for item in normalized_plan
+                if item.get("agent_name")
+            )
+            actual_agents = Counter(
+                item.agent_name for item in normalized_steps if item.agent_name
+            )
+            if sum(expected_agents.values()) == len(normalized_plan):
+                covered_steps = sum(
+                    min(count, actual_agents.get(agent_name, 0))
+                    for agent_name, count in expected_agents.items()
+                )
+            else:
+                covered_steps = min(len(normalized_steps), len(normalized_plan))
+        step_coverage = covered_steps / len(normalized_plan)
+    else:
+        step_coverage = 1.0 if normalized_steps else 0.0
+
     terminal = str(workflow_status or "UNKNOWN").upper()
-    technical_success = bool(normalized_steps) and terminal in {
+    technical_success = step_coverage == 1.0 and terminal in {
         WorkflowStatus.SUCCEEDED.value,
         "COMPLETED",
     } and all(item.technical_success for item in normalized_steps)
@@ -441,11 +602,7 @@ def aggregate_evidence(
     )
     graph_payload: dict[str, Any] = {}
     if task_graph is not None:
-        graph_payload = (
-            task_graph.model_dump(mode="json")
-            if isinstance(task_graph, TaskGraph)
-            else dict(task_graph)
-        )
+        graph_payload = _sanitize_task_graph(task_graph)
     return SkillExecutionEvidence(
         task_id=str(task_id),
         workflow_id=str(workflow_id or ""),
@@ -453,10 +610,33 @@ def aggregate_evidence(
         workflow_status=terminal,
         technical_success=technical_success,
         business_success=business_success,
+        step_coverage=round(step_coverage, 8),
         business_outcome_coverage=round(coverage, 8),
         steps=normalized_steps,
         task_graph=graph_payload,
-        planning_steps=[dict(item) for item in (planning_steps or ()) if isinstance(item, Mapping)],
+        planning_steps=normalized_plan,
+    )
+
+
+def load_execution_evidence(
+    raw: Mapping[str, Any],
+    *,
+    planning_steps: Iterable[Mapping[str, Any]] | None = None,
+    task_graph: TaskGraph | Mapping[str, Any] | None = None,
+) -> SkillExecutionEvidence:
+    """Load evidence and safely derive coverage for records from older schemas."""
+
+    evidence = SkillExecutionEvidence.model_validate(raw)
+    if "step_coverage" in raw:
+        return evidence
+    return aggregate_evidence(
+        task_id=evidence.task_id,
+        workflow_id=evidence.workflow_id,
+        execution_mode=evidence.execution_mode,
+        workflow_status=evidence.workflow_status,
+        steps=evidence.steps,
+        task_graph=task_graph or evidence.task_graph or None,
+        planning_steps=planning_steps or evidence.planning_steps,
     )
 
 
@@ -492,6 +672,7 @@ def build_scheduler_evidence(
     artifact_store: Any,
     receipt_store: Any = None,
     planning_steps: Iterable[Mapping[str, Any]] | None = None,
+    workflow_status: str | None = None,
 ) -> SkillExecutionEvidence:
     """Build evidence from the scheduler's authoritative step results."""
 
@@ -559,7 +740,7 @@ def build_scheduler_evidence(
                 item.schema_valid = True
         step_evidence.append(item)
 
-    terminal = getattr(results, "terminal_status", None)
+    terminal = workflow_status or getattr(results, "terminal_status", None)
     terminal_value = getattr(terminal, "value", terminal) or WorkflowStatus.FAILED.value
     return aggregate_evidence(
         task_id=task_id,
@@ -583,4 +764,5 @@ __all__ = [
     "build_scheduler_evidence",
     "build_step_evidence",
     "evaluate_distillation_evidence",
+    "load_execution_evidence",
 ]

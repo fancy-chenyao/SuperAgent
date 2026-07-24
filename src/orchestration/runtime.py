@@ -27,7 +27,7 @@ import logging
 import os
 from typing import Any, AsyncGenerator, Awaitable, Callable, Optional
 
-from src.interface.artifact import ArtifactRef, StepStatus
+from src.interface.artifact import ArtifactRef, StepResult, StepStatus
 from src.interface.task_graph import TaskGraph, WorkflowStatus
 from src.orchestration.artifact_guard import PolicyEngineArtifactGuard
 from src.orchestration.artifact_payload_store import (
@@ -99,6 +99,30 @@ def _restore_outputs(state: dict, completed: set[str]) -> dict:
         if revived:
             outputs[sid] = revived
     return outputs
+
+
+def _restore_completed_step_results(
+    state: dict, completed: set[str]
+) -> dict[str, StepResult]:
+    """Restore only validated successful results for checkpointed steps."""
+
+    raw_results = state.get("step_results")
+    if not isinstance(raw_results, dict):
+        return {}
+    restored: dict[str, StepResult] = {}
+    for step_id in completed:
+        raw_result = raw_results.get(step_id)
+        try:
+            result = (
+                raw_result
+                if isinstance(raw_result, StepResult)
+                else StepResult.model_validate(raw_result)
+            )
+        except Exception:
+            continue
+        if result.status == StepStatus.SUCCEEDED:
+            restored[step_id] = result
+    return restored
 
 
 def unknown_operation_modes(graph: TaskGraph) -> list[str]:
@@ -503,6 +527,7 @@ async def run_scheduler_workflow(
     }
     initial_completed = set(state.get("completed_steps") or [])
     initial_outputs = _restore_outputs(state, initial_completed)
+    initial_results = _restore_completed_step_results(state, initial_completed)
 
     run_task = asyncio.create_task(
         scheduler.run(
@@ -576,14 +601,17 @@ async def run_scheduler_workflow(
     terminal = getattr(results, "terminal_status", None)
     status = str(getattr(terminal, "value", terminal)
                  or WorkflowStatus.SUCCEEDED.value)
+    evidence_results = dict(initial_results)
+    evidence_results.update(results)
     evidence = build_scheduler_evidence(
         task_id=task_id,
         workflow_id=str(workflow_id or ""),
         graph=graph,
-        results=results,
+        results=evidence_results,
         artifact_store=store,
         receipt_store=receipt_store,
         planning_steps=state.get("planning_steps") or [],
+        workflow_status=status,
     )
     persist_skill_evidence(evidence)
     if task_logger is not None:
