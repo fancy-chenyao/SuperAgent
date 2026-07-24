@@ -96,6 +96,7 @@ The candidate list above has already passed the main Agent's permission boundary
   - If a later step needs data not yet produced, you must insert a new step to fetch/derive that data **before** it is used (e.g., get recipient email before sending email).
   - Never assume missing data (emails, IDs, report content). Always plan a retrieval step.
   - If data cannot be retrieved with available agents/tools, list a new agent in `new_agents_needed` and leave `steps` empty.
+  - **Autonomous consuming agents (CRITICAL)**: An agent that has NO "Requires" field extracts its inputs from context, so you leave its `inputs` empty. But if such a step still consumes the OUTPUT of earlier steps (e.g. a report/summary step that combines prior query results), you MUST declare `depends_on` listing the upstream `agent_name`(s). This preserves execution ordering (the consuming step runs only after its sources complete) even when `inputs` is empty. When `Task Scenario Profile.subtasks` provides `depends_on`, mirror those edges onto the corresponding steps.
 
 ## MANDATORY Data Flow Validation Protocol
 
@@ -159,6 +160,7 @@ interface Step {
   description: string;
   note?: string;
   inputs?: InputMapping[];        // Map each required input to its source
+  depends_on?: string[];          // agent_name(s) of upstream steps this step must run AFTER (execution ordering)
 }
 
 interface PlanWithAgents {

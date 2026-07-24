@@ -8,7 +8,10 @@ import asyncio
 
 from src.interface.task_graph import TaskGraphValidationError
 from src.manager.executor.base import ExecuteResult, ExecutionStatus
-from src.orchestration.plan_to_task_graph import plan_to_task_graph
+from src.orchestration.plan_to_task_graph import (
+    derive_step_dependencies,
+    plan_to_task_graph,
+)
 from src.orchestration.providers import StubRoutingProvider
 from src.orchestration.scheduler import TaskScheduler
 
@@ -115,6 +118,92 @@ def test_converter_preserves_structured_execution_contract():
 def test_converter_skips_non_dict_steps():
     g = plan_to_task_graph([None, {"agent_name": "A"}, 42], task_id="t")
     assert list(g.step_map().keys()) == ["step_2"]
+
+
+# --- Subtask dependency fallback (王强/年假 report scenario regression) ---------
+
+# The Planner leaves `inputs` empty for the autonomous report agent, so the
+# report step's dependency on the two upstream queries is lost -> all three run
+# in parallel and the report fails (NEEDS_RECONCILIATION). The task profile's
+# subtasks already know the correct DAG.
+WANGQIANG_LEAVE_PLAN = [
+    {"agent_name": "RemoteHRAssistantAgent", "title": "查询王强员工基础信息"},
+    {"agent_name": "RemoteKnowledgeAgent", "title": "查询公司年假制度"},
+    {"agent_name": "RemoteReportAgent", "title": "生成 Markdown 综合汇总报告"},
+]
+
+WANGQIANG_LEAVE_SUBTASKS = [
+    {"id": "subtask_1", "depends_on": []},
+    {"id": "subtask_2", "depends_on": []},
+    {"id": "subtask_3", "depends_on": ["subtask_1", "subtask_2"]},
+]
+
+
+def test_derive_recovers_report_dependency_from_subtasks():
+    augmented = derive_step_dependencies(
+        WANGQIANG_LEAVE_PLAN, WANGQIANG_LEAVE_SUBTASKS
+    )
+    assert augmented[0].get("depends_on") in (None, [])
+    assert augmented[1].get("depends_on") in (None, [])
+    assert augmented[2]["depends_on"] == [
+        "RemoteHRAssistantAgent",
+        "RemoteKnowledgeAgent",
+    ]
+
+
+def test_converter_uses_subtasks_to_serialize_report_after_queries():
+    g = plan_to_task_graph(
+        WANGQIANG_LEAVE_PLAN,
+        task_id="wq-leave",
+        subtasks=WANGQIANG_LEAVE_SUBTASKS,
+    )
+    smap = g.step_map()
+    assert smap["step_1"].depends_on == []
+    assert smap["step_2"].depends_on == []
+    # step_3 (report) now waits for both upstream queries.
+    assert sorted(smap["step_3"].depends_on) == ["step_1", "step_2"]
+    order = g.topological_order()
+    assert order.index("step_3") > order.index("step_1")
+    assert order.index("step_3") > order.index("step_2")
+
+
+def test_derive_does_not_override_explicit_planner_edges():
+    plan = [
+        {"agent_name": "A"},
+        {
+            "agent_name": "B",
+            "inputs": [{"parameter_name": "x", "source_step": "A"}],
+        },
+    ]
+    # subtasks would suggest B depends on A too, but the Planner already said so;
+    # the plan must be returned untouched (identity).
+    subtasks = [
+        {"id": "s1", "depends_on": []},
+        {"id": "s2", "depends_on": ["s1"]},
+    ]
+    assert derive_step_dependencies(plan, subtasks) is plan
+
+
+def test_derive_skips_when_counts_misaligned():
+    plan = [{"agent_name": "A"}, {"agent_name": "B"}]
+    subtasks = [{"id": "s1", "depends_on": []}]  # only one subtask
+    assert derive_step_dependencies(plan, subtasks) is plan
+
+
+def test_derive_skips_forward_and_unknown_edges():
+    plan = [{"agent_name": "A"}, {"agent_name": "B"}]
+    # s1 depends on a later (s2) and an unknown (s9) subtask -> both skipped,
+    # yielding no valid backward edge, so the plan is returned unchanged.
+    subtasks = [
+        {"id": "s1", "depends_on": ["s2", "s9"]},
+        {"id": "s2", "depends_on": []},
+    ]
+    assert derive_step_dependencies(plan, subtasks) is plan
+
+
+def test_derive_noop_without_subtasks():
+    assert derive_step_dependencies(WANGQIANG_LEAVE_PLAN, None) is WANGQIANG_LEAVE_PLAN
+    assert derive_step_dependencies(WANGQIANG_LEAVE_PLAN, []) is WANGQIANG_LEAVE_PLAN
 
 
 class _Fake:
