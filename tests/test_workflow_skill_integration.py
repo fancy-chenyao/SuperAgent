@@ -125,6 +125,15 @@ class _FakeTaskLogger:
         self.status = "completed"
         self.history.append({"event": "workflow_end"})
 
+    def log_workflow_terminal(self, status, error=None):
+        normalized = str(getattr(status, "value", status) or "").upper()
+        if self.status != "running":
+            return
+        self.status = normalized
+        self.history.append(
+            {"event": "workflow_end", "terminal_status": normalized, "error": error}
+        )
+
     def log_agent_start(self, **kwargs):
         self.history.append({"event": "start_of_agent", **kwargs})
 
@@ -479,6 +488,7 @@ def test_production_distills_success_and_disables_reused_skill_after_permission_
     monkeypatch.setattr(process, "TaskLogger", _FakeTaskLogger)
     monkeypatch.setattr(process, "CheckpointManager", _FakeCheckpointManager)
     monkeypatch.setattr(process, "AUTO_RECOVERY_ENABLED", False)
+    monkeypatch.setattr(process, "orchestration_scheduler_enabled", False)
     monkeypatch.setattr(process, "get_llm_by_type", lambda _kind: SimpleNamespace())
 
     async def finish(_state):
@@ -588,6 +598,7 @@ def test_non_success_agent_status_is_not_distilled(tmp_path, monkeypatch):
     monkeypatch.setattr(process, "TaskLogger", _FakeTaskLogger)
     monkeypatch.setattr(process, "CheckpointManager", _FakeCheckpointManager)
     monkeypatch.setattr(process, "AUTO_RECOVERY_ENABLED", False)
+    monkeypatch.setattr(process, "orchestration_scheduler_enabled", False)
     monkeypatch.setattr(process, "get_llm_by_type", lambda _kind: SimpleNamespace())
 
     async def failed_agent(_state):
@@ -663,6 +674,7 @@ def test_resume_discards_previous_skill_execution_evidence(tmp_path, monkeypatch
     monkeypatch.setattr(process, "TaskLogger", _FakeTaskLogger)
     monkeypatch.setattr(process, "CheckpointManager", _FakeCheckpointManager)
     monkeypatch.setattr(process, "AUTO_RECOVERY_ENABLED", False)
+    monkeypatch.setattr(process, "orchestration_scheduler_enabled", False)
     monkeypatch.setattr(process, "get_llm_by_type", lambda _kind: SimpleNamespace())
     monkeypatch.setattr(task_logger_module.TaskLogger, "load", lambda _task_id: old_logger)
 
