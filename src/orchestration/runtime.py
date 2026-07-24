@@ -25,6 +25,7 @@ import asyncio
 import json
 import logging
 import os
+from contextlib import suppress
 from typing import Any, AsyncGenerator, Awaitable, Callable, Optional
 
 from src.interface.artifact import ArtifactRef, StepResult, StepStatus
@@ -123,6 +124,24 @@ def _restore_completed_step_results(
         if result.status == StepStatus.SUCCEEDED:
             restored[step_id] = result
     return restored
+
+
+def _status_value(status: Any) -> str:
+    raw = str(getattr(status, "value", status) or "")
+    return raw.rsplit(".", 1)[-1].upper()
+
+
+def _json_safe(value: Any) -> Any:
+    return json.loads(json.dumps(value, ensure_ascii=False, default=str))
+
+
+def _leaf_step_ids(graph: TaskGraph) -> list[str]:
+    dependencies = {
+        dependency
+        for step in graph.steps
+        for dependency in (step.depends_on or [])
+    }
+    return [step.step_id for step in graph.steps if step.step_id not in dependencies]
 
 
 def unknown_operation_modes(graph: TaskGraph) -> list[str]:
@@ -310,6 +329,31 @@ async def run_scheduler_workflow(
         ):
             task_logger.set_skill_execution_evidence(payload)
 
+    task_log_finalized = False
+
+    def finalize_task_log(status: Any, error: Optional[str] = None) -> None:
+        """Close the TaskLogger exactly once for every scheduler terminal path."""
+        nonlocal task_log_finalized
+        if task_logger is None or task_log_finalized:
+            return
+
+        status_value = _status_value(status)
+        try:
+            terminal_logger = getattr(task_logger, "log_workflow_terminal", None)
+            if callable(terminal_logger):
+                terminal_logger(status_value, error=error)
+            elif status_value == WorkflowStatus.SUCCEEDED.value:
+                task_logger.log_workflow_end()
+            else:
+                task_logger.log_error(
+                    error=error or f"scheduler workflow ended with status {status_value}",
+                    node_name="scheduler",
+                )
+        except Exception as exc:  # noqa: BLE001 - logging must not change execution
+            logger.warning("scheduler: could not finalize task log: %s", exc)
+        finally:
+            task_log_finalized = True
+
     yield {
         "event": "start_of_workflow",
         "data": {"workflow_id": workflow_id, "task_id": task_id, "mode": "scheduler"},
@@ -392,12 +436,23 @@ async def run_scheduler_workflow(
 
     event_queue: asyncio.Queue[dict] = asyncio.Queue()
     counter = {"step": int(state.get("current_step") or 0)}
+    step_numbers: dict[str, int] = {}
+    step_agents: dict[str, str] = {}
+
+    def step_number(step_id: str) -> int:
+        if step_id not in step_numbers:
+            step_numbers[step_id] = counter["step"]
+            counter["step"] += 1
+        return step_numbers[step_id]
 
     async def on_step_start(*, step, selected_agent, inputs):
+        selected_name = selected_agent or getattr(step, "agent_name", None) or step.step_id
+        step_agents[step.step_id] = selected_name
+        current_step = step_number(step.step_id)
         if task_logger is not None:
             try:
                 task_logger.log_agent_start(
-                    node_name="scheduler", step=counter["step"], sub_agent_name=selected_agent
+                    node_name="scheduler", step=current_step, sub_agent_name=selected_name
                 )
             except Exception:  # noqa: BLE001
                 pass
@@ -405,9 +460,10 @@ async def run_scheduler_workflow(
             {
                 "event": "start_of_agent",
                 "data": {
-                    "agent_name": f"scheduler【{selected_agent}】",
+                    "step_id": step.step_id,
+                    "agent_name": f"scheduler【{selected_name}】",
                     "agent_id": f"{workflow_id}_{step.step_id}",
-                    "sub_agent_name": selected_agent,
+                    "sub_agent_name": selected_name,
                 },
             }
         )
@@ -456,6 +512,7 @@ async def run_scheduler_workflow(
         if artifacts_updated:
             candidate["artifacts"] = artifacts_index
         candidate["completed_steps"] = completed
+        candidate["current_step"] = counter["step"]
 
         # (3) Save the checkpoint FROM THE CANDIDATE (completion already applied).
         # A failure here propagates -> the step is not reported SUCCEEDED and the
@@ -464,7 +521,7 @@ async def run_scheduler_workflow(
             checkpoint_manager.save_checkpoint(
                 workflow_id=workflow_id,
                 task_id=task_id,
-                step=counter["step"],
+                step=step_number(step.step_id),
                 node_name="scheduler",
                 next_node="scheduler",
                 state=candidate,
@@ -475,6 +532,7 @@ async def run_scheduler_workflow(
         if artifacts_updated:
             state["artifacts"] = artifacts_index
         state["completed_steps"] = completed
+        state["current_step"] = counter["step"]
 
     async def on_step_end(*, step, result):
         # Non-critical hooks: logging + SSE event. Best effort (the scheduler
@@ -484,42 +542,46 @@ async def run_scheduler_workflow(
                 task_logger.log_agent_end(
                     node_name="scheduler",
                     next_node="scheduler",
-                    step=counter["step"],
+                    step=step_number(step.step_id),
                     sub_agent_name=getattr(step, "agent_name", None),
                 )
             except Exception:  # noqa: BLE001
                 pass
-        counter["step"] += 1
 
-        status_value = str(
-            getattr(result.status, "value", result.status) or ""
-        ).upper()
+        status_value = _status_value(result.status)
+        selected_name = (
+            step_agents.get(step.step_id)
+            or (result.metrics or {}).get("selected_agent")
+            or getattr(step, "agent_name", None)
+            or step.step_id
+        )
         result_data: dict[str, Any] = {
             "step_id": step.step_id,
-            "agent_name": getattr(step, "agent_name", None),
+            "agent_id": f"{workflow_id}_{step.step_id}",
+            "agent_name": selected_name,
             "status": status_value,
             "outputs": {},
             "output_refs": {},
+            "metrics": _json_safe(result.metrics or {}),
             "error": result.error,
         }
         unavailable_outputs: dict[str, str] = {}
-        for name, ref in (result.outputs or {}).items():
-            if isinstance(ref, ArtifactRef):
-                result_data["output_refs"][name] = ref.model_dump()
-            try:
-                value = resolver.resolve(
-                    ref,
-                    subject=state.get("user_id"),
-                    scenario=scenario_ctx,
-                    action="read",
-                )
-                # Keep the SSE contract JSON-safe without assuming every remote
-                # provider returns only primitive JSON values.
-                result_data["outputs"][name] = json.loads(
-                    json.dumps(value, ensure_ascii=False, default=str)
-                )
-            except Exception as exc:  # noqa: BLE001 - fail closed per output
-                unavailable_outputs[name] = type(exc).__name__
+        if status_value == StepStatus.SUCCEEDED.value:
+            for name, ref in (result.outputs or {}).items():
+                if isinstance(ref, ArtifactRef):
+                    result_data["output_refs"][name] = ref.model_dump()
+                try:
+                    value = resolver.resolve(
+                        ref,
+                        subject=state.get("user_id"),
+                        scenario=scenario_ctx,
+                        action="read",
+                    )
+                    # Keep the SSE contract JSON-safe without assuming every remote
+                    # provider returns only primitive JSON values.
+                    result_data["outputs"][name] = _json_safe(value)
+                except Exception as exc:  # noqa: BLE001 - fail closed per output
+                    unavailable_outputs[name] = type(exc).__name__
         if unavailable_outputs:
             result_data["unavailable_outputs"] = unavailable_outputs
 
@@ -530,15 +592,89 @@ async def run_scheduler_workflow(
             {
                 "event": "end_of_agent",
                 "data": {
-                    "agent_name": f"scheduler【{step.step_id}】",
+                    "step_id": step.step_id,
+                    "agent_name": f"scheduler【{selected_name}】",
                     "agent_id": f"{workflow_id}_{step.step_id}",
-                    "sub_agent_name": getattr(step, "agent_name", None),
-                    "status": str(result.status),
+                    "sub_agent_name": selected_name,
+                    "status": status_value,
                 },
             }
         )
 
     receipt_store = PersistentReceiptStore(task_id)
+
+    def build_final_result(status: str) -> dict[str, Any]:
+        """Materialize durable leaf outputs through the governed resolver."""
+        leaf_results: dict[str, Any] = {}
+        source_refs: list[dict[str, Any]] = []
+        unavailable: list[dict[str, str]] = []
+        persisted_results = state.get("step_results") or {}
+
+        for step_id in _leaf_step_ids(graph):
+            raw_result = persisted_results.get(step_id)
+            if not isinstance(raw_result, dict):
+                continue
+            if _status_value(raw_result.get("status")) != StepStatus.SUCCEEDED.value:
+                continue
+
+            resolved_outputs: dict[str, Any] = {}
+            for output_name, raw_ref in (raw_result.get("outputs") or {}).items():
+                try:
+                    ref = raw_ref if isinstance(raw_ref, ArtifactRef) else ArtifactRef(**raw_ref)
+                except Exception:  # noqa: BLE001 - malformed refs never reach Web
+                    unavailable.append(
+                        {
+                            "step_id": step_id,
+                            "output_name": str(output_name),
+                            "reason": "invalid_artifact_ref",
+                        }
+                    )
+                    continue
+
+                source_refs.append(
+                    {
+                        "step_id": step_id,
+                        "output_name": str(output_name),
+                        "artifact_ref": ref.model_dump(),
+                    }
+                )
+                try:
+                    resolved_outputs[str(output_name)] = _json_safe(
+                        resolver.resolve(
+                            ref,
+                            subject=state.get("user_id"),
+                            scenario=scenario_ctx,
+                            action="read",
+                        )
+                    )
+                except Exception as exc:  # noqa: BLE001 - fail closed, no payload
+                    unavailable.append(
+                        {
+                            "step_id": step_id,
+                            "output_name": str(output_name),
+                            "reason": type(exc).__name__,
+                        }
+                    )
+            if resolved_outputs:
+                leaf_results[step_id] = resolved_outputs
+
+        display_result: Any = leaf_results
+        if len(leaf_results) == 1:
+            display_result = next(iter(leaf_results.values()))
+            if isinstance(display_result, dict) and len(display_result) == 1:
+                display_result = next(iter(display_result.values()))
+
+        return {
+            "workflow_id": workflow_id,
+            "task_id": task_id,
+            "workflow_status": status,
+            "available": bool(leaf_results),
+            "result": display_result if leaf_results else None,
+            "leaf_steps": _leaf_step_ids(graph),
+            "source_artifact_refs": source_refs,
+            "unavailable_artifacts": unavailable,
+        }
+
     scheduler = TaskScheduler(
         execute_step=execute,
         routing_provider=routing,
@@ -575,6 +711,7 @@ async def run_scheduler_workflow(
         )
     )
 
+    results = None
     try:
         while True:
             if run_task.done():
@@ -622,6 +759,13 @@ async def run_scheduler_workflow(
     finally:
         if not run_task.done():
             run_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await run_task
+        if results is None and not task_log_finalized:
+            finalize_task_log(
+                WorkflowStatus.FAILED,
+                error="scheduler stream cancelled before a terminal result",
+            )
 
     # ``results`` is a WorkflowResult: it carries the authoritative workflow-level
     # terminal status so the frontend never infers success from the mere
@@ -648,14 +792,17 @@ async def run_scheduler_workflow(
         workflow_status=status,
     )
     persist_skill_evidence(evidence)
-    if task_logger is not None:
-        if evidence.technical_success:
-            task_logger.log_workflow_end()
-        else:
-            task_logger.log_error(
-                error=f"scheduler workflow ended with status {status}",
-                node_name="scheduler",
-            )
+    terminal_error = None
+    if status != WorkflowStatus.SUCCEEDED.value:
+        terminal_error = (
+            f"scheduler workflow ended with status {status}; "
+            f"failed_steps={failed}"
+        )
+    finalize_task_log(status, error=terminal_error)
+    yield {
+        "event": "final_result",
+        "data": build_final_result(status),
+    }
     yield {
         "event": "end_of_workflow",
         "data": {
