@@ -96,7 +96,7 @@ The candidate list above has already passed the main Agent's permission boundary
   - If a later step needs data not yet produced, you must insert a new step to fetch/derive that data **before** it is used (e.g., get recipient email before sending email).
   - Never assume missing data (emails, IDs, report content). Always plan a retrieval step.
   - If data cannot be retrieved with available agents/tools, list a new agent in `new_agents_needed` and leave `steps` empty.
-  - **Autonomous consuming agents (CRITICAL)**: An agent that has NO "Requires" field extracts its inputs from context, so you leave its `inputs` empty. But if such a step still consumes the OUTPUT of earlier steps (e.g. a report/summary step that combines prior query results), you MUST declare `depends_on` listing the upstream `agent_name`(s). This preserves execution ordering (the consuming step runs only after its sources complete) even when `inputs` is empty. When `Task Scenario Profile.subtasks` provides `depends_on`, mirror those edges onto the corresponding steps.
+  - **Fan-in inputs (CRITICAL)**: If one required parameter combines multiple prior outputs (for example `report.sources`), create ONE InputMapping for that parameter and put every producer in `source_artifacts`. Do not merely declare `depends_on`; the consuming Agent must receive the actual upstream Artifacts.
 
 ## MANDATORY Data Flow Validation Protocol
 
@@ -149,8 +149,17 @@ interface NewAgent {
 
 interface InputMapping {
   parameter_name: string;        // The parameter name required by the agent (e.g., "email.to", "report.markdown")
-  source_step: string;            // The agent_name of the step that produces this data
-  source_output: string;          // The output name from the source step (e.g., "person.email", "report.markdown")
+  source_step?: string;           // Single-source form: prior agent_name or step_id
+  source_output?: string;         // Single-source form: declared output name
+  source_artifacts?: Array<{      // Fan-in form: use instead of the two fields above
+    source_step: string;
+    source_output: string;
+  }>;
+  assembly?: {
+    schema_ref: string;
+    title?: string;
+    instruction?: string;
+  };
   description: string;            // Semantic description of what this parameter represents
 }
 
@@ -180,6 +189,9 @@ For each step, you MUST specify the `inputs` field to map the agent's required p
    - `source_step`: The agent_name of the step that produces this data
    - `source_output`: The output name from that step's "Produces" list
    - `description`: A clear description of what this data represents
+   - If the parameter needs multiple prior outputs, use `source_artifacts` and
+     list every exact `source_step` + `source_output` pair. Never mix the
+     single-source fields with `source_artifacts`.
 
 **CRITICAL RULES**:
 - **Remote agents without "Requires" field are autonomous**: They extract parameters from the conversation context themselves. Leave `inputs` empty for these agents.
@@ -189,6 +201,39 @@ For each step, you MUST specify the `inputs` field to map the agent's required p
 - **If a required parameter has no source**: Add a new step to fetch/extract that data BEFORE the current step
 - **User-provided data**: If data comes from user input, create a step that extracts or queries this information, then map it
 - **MANDATORY VALIDATION**: After creating your plan, verify that every `source_step` referenced in any InputMapping actually exists as a step in your `steps` array BEFORE the step that references it. If not, you MUST insert the missing step.
+- **NO DEPENDENCY-ONLY FAN-IN**: `depends_on` controls execution order only. A
+  report/summary step that consumes prior results must also declare
+  `source_artifacts`, otherwise it will not receive their data.
+
+**Fan-in example**:
+```json
+{
+  "agent_name": "RemoteReportAgent",
+  "title": "生成综合汇总",
+  "description": "使用员工档案和年假制度形成 Markdown 汇总",
+  "inputs": [
+    {
+      "parameter_name": "report.sources",
+      "source_artifacts": [
+        {
+          "source_step": "RemoteHRAssistantAgent",
+          "source_output": "employee.info"
+        },
+        {
+          "source_step": "RemoteKnowledgeAgent",
+          "source_output": "policy.info"
+        }
+      ],
+      "assembly": {
+        "schema_ref": "report.sources@v1",
+        "title": "员工档案与年假制度综合汇总",
+        "instruction": "使用全部来源形成 Markdown 综合汇总"
+      },
+      "description": "Report Agent 的两个实际上游 Artifact"
+    }
+  ]
+}
+```
 
 **Common Planning Errors to Avoid:**
 1. **Missing Data Source Step**: Creating InputMappings that reference agents not included in the steps array

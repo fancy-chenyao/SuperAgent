@@ -6,6 +6,11 @@ scenario (query -> generate proof -> send email) with a fake executor.
 
 import asyncio
 
+import pytest
+
+from remote_agents.hr_assistant_agent import RemoteHRAssistantAgent
+from remote_agents.knowledge_agent import RemoteKnowledgeAgent
+from remote_agents.report_agent import RemoteReportAgent
 from src.interface.task_graph import TaskGraphValidationError
 from src.manager.executor.base import ExecuteResult, ExecutionStatus
 from src.orchestration.plan_to_task_graph import (
@@ -165,6 +170,88 @@ def test_converter_uses_subtasks_to_serialize_report_after_queries():
     order = g.topological_order()
     assert order.index("step_3") > order.index("step_1")
     assert order.index("step_3") > order.index("step_2")
+
+
+def test_converter_builds_contract_fan_in_dependencies():
+    contracts = {
+        "RemoteHRAssistantAgent": RemoteHRAssistantAgent().contract,
+        "RemoteKnowledgeAgent": RemoteKnowledgeAgent().contract,
+        "RemoteReportAgent": RemoteReportAgent().contract,
+    }
+    plan = [
+        {"step_id": "hr", "agent_name": "RemoteHRAssistantAgent"},
+        {"step_id": "knowledge", "agent_name": "RemoteKnowledgeAgent"},
+        {
+            "step_id": "report",
+            "agent_name": "RemoteReportAgent",
+            "inputs": [
+                {
+                    "parameter_name": "report.sources",
+                    "source_artifacts": [
+                        {
+                            "source_step": "RemoteHRAssistantAgent",
+                            "source_output": "employee.info",
+                        },
+                        {
+                            "source_step": "RemoteKnowledgeAgent",
+                            "source_output": "policy.info",
+                        },
+                    ],
+                    "assembly": {"schema_ref": "report.sources@v1"},
+                }
+            ],
+        },
+    ]
+    graph = plan_to_task_graph(
+        plan,
+        task_id="contract-fan-in",
+        agent_contracts=contracts,
+    )
+    report = graph.step_map()["report"]
+    assert report.depends_on == ["hr", "knowledge"]
+    assert report.expected_outputs == ["report.markdown"]
+    assert report.expected_schema_refs == {
+        "report.markdown": "report.markdown@v1"
+    }
+    assert report.agent_contract.contract_version == "1.0"
+
+
+def test_converter_prefers_trusted_registry_contract_over_planner_contract():
+    trusted = RemoteKnowledgeAgent().contract
+    untrusted = RemoteReportAgent().contract
+    graph = plan_to_task_graph(
+        [
+            {
+                "agent_name": "RemoteKnowledgeAgent",
+                "agent_contract": untrusted.model_dump(mode="json"),
+            }
+        ],
+        task_id="trusted-contract",
+        agent_contracts={"RemoteKnowledgeAgent": trusted},
+    )
+    step = graph.steps[0]
+
+    assert [ref.name for ref in step.agent_contract.produces] == ["policy.info"]
+    assert step.expected_outputs == ["policy.info"]
+
+
+def test_converter_rejects_outputs_outside_trusted_contract():
+    with pytest.raises(
+        TaskGraphValidationError,
+        match="outputs not present in trusted Agent contract",
+    ):
+        plan_to_task_graph(
+            [
+                {
+                    "agent_name": "RemoteKnowledgeAgent",
+                    "expected_outputs": ["fake.output"],
+                }
+            ],
+            task_id="trusted-contract-outputs",
+            agent_contracts={
+                "RemoteKnowledgeAgent": RemoteKnowledgeAgent().contract
+            },
+        )
 
 
 def test_derive_does_not_override_explicit_planner_edges():

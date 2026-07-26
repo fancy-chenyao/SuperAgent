@@ -240,11 +240,27 @@ def verify_snapshot_for_execution(
     try:
         from src.orchestration.plan_to_task_graph import plan_to_task_graph
 
+        snap_steps = (snap_graph or {}).get("steps") or []
+        agent_produces = {}
+        agent_contracts = {}
+        for step in snap_steps:
+            if not isinstance(step, dict):
+                continue
+            agent_name = step.get("agent_name") or step.get("preferred_resource_id")
+            if not agent_name:
+                continue
+            agent_produces[str(agent_name)] = list(
+                step.get("expected_outputs") or []
+            )
+            if step.get("agent_contract"):
+                agent_contracts[str(agent_name)] = step["agent_contract"]
         rebuilt = plan_to_task_graph(
             planning_steps or [],
             task_id=workflow_id,
             subject=user_id,
             goal=goal or "",
+            agent_produces=agent_produces,
+            agent_contracts=agent_contracts,
         ).model_dump()
     except Exception as exc:  # noqa: BLE001 - cannot rebuild -> refuse
         return None, f"rebuild failed (replan required): {exc}"

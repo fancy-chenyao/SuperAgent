@@ -6,16 +6,24 @@ is the ``agent_name`` of an upstream step (see
 ``coor_task._validate_plan_data_flow``). This module makes that graph explicit so
 the scheduler can execute it.
 
-``depends_on`` is derived from ``inputs[].source_step``; the raw symbolic input
-mappings are preserved on each step as an extra ``input_bindings`` field for the
-scheduler to resolve to concrete :class:`ArtifactRef` at runtime.
+``depends_on`` is derived from ``inputs[].source_step`` and every
+``inputs[].source_artifacts[].source_step``; the raw symbolic input mappings are
+preserved on each step as an extra ``input_bindings`` field for the scheduler to
+resolve to concrete :class:`ArtifactRef` at runtime.
 """
 
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from src.interface.task_graph import CompletionCondition, TaskGraph, TaskSpec, TaskStep
+from src.contracts.agent_contract import AgentContract
+from src.interface.task_graph import (
+    CompletionCondition,
+    TaskGraph,
+    TaskGraphValidationError,
+    TaskSpec,
+    TaskStep,
+)
 
 # Effective operation modes (ignoring the ubiquitous "delegate") that imply a
 # side effect. An agent whose config declares any of these is NOT read-only.
@@ -224,6 +232,7 @@ def plan_to_task_graph(
     subject: Optional[str] = None,
     goal: str = "",
     agent_produces: Optional[Dict[str, List[str]]] = None,
+    agent_contracts: Optional[Dict[str, AgentContract | Dict[str, Any]]] = None,
     write_agents: Optional[set[str]] = None,
     subtasks: Optional[List[Dict[str, Any]]] = None,
 ) -> TaskGraph:
@@ -236,6 +245,8 @@ def plan_to_task_graph(
         goal: optional human-readable task goal.
         agent_produces: ``{agent_name: [logical_output, ...]}`` used to fill
             ``expected_outputs`` when a step does not declare it.
+        agent_contracts: versioned Agent contracts copied onto TaskSteps so the
+            Scheduler can normalize and validate actual results.
         write_agents: agent names whose steps should default to
             ``operation_mode="write"`` when the step does not declare a mode.
         subtasks: optional task-profile ``subtasks`` used as a fail-safe to
@@ -248,6 +259,7 @@ def plan_to_task_graph(
         derived graph is structurally invalid).
     """
     agent_produces = agent_produces or {}
+    agent_contracts = agent_contracts or {}
     write_agents = write_agents or set()
     if subtasks:
         planning_steps = derive_step_dependencies(planning_steps, subtasks)
@@ -267,22 +279,58 @@ def plan_to_task_graph(
         for binding in inputs:
             if not isinstance(binding, dict):
                 continue
-            source_step = binding.get("source_step")
-            if not source_step:
-                continue
-            resolved = agent_to_step.get(source_step)
-            if resolved and resolved not in depends_on:
-                depends_on.append(resolved)
+            sources = binding.get("source_artifacts")
+            if isinstance(sources, list):
+                if binding.get("source_step") or binding.get("source_output"):
+                    raise TaskGraphValidationError(
+                        "input binding cannot mix source_artifacts with "
+                        "source_step/source_output"
+                    )
+                source_bindings = sources
+            else:
+                source_bindings = [binding]
+            for source_binding in source_bindings:
+                if not isinstance(source_binding, dict):
+                    raise TaskGraphValidationError(
+                        "source_artifacts entries must be objects"
+                    )
+                source_step = source_binding.get("source_step")
+                if not source_step:
+                    continue
+                resolved = agent_to_step.get(str(source_step), str(source_step))
+                if resolved and resolved not in depends_on:
+                    depends_on.append(resolved)
         for dependency in raw.get("depends_on") or []:
             resolved = agent_to_step.get(str(dependency), str(dependency))
             if resolved and resolved not in depends_on:
                 depends_on.append(resolved)
 
-        expected_outputs = (
-            raw.get("expected_outputs")
-            or raw.get("produces")
-            or agent_produces.get(agent_name, [])
+        # The registry-provided contract is trusted platform metadata. Planner
+        # output is untrusted and must never replace it with a weaker contract.
+        raw_contract = agent_contracts.get(agent_name) or raw.get("agent_contract")
+        contract = (
+            raw_contract
+            if isinstance(raw_contract, AgentContract)
+            else AgentContract.model_validate(raw_contract)
+            if raw_contract
+            else None
         )
+        declared_outputs = raw.get("expected_outputs") or raw.get("produces")
+        if isinstance(declared_outputs, str):
+            declared_outputs = [declared_outputs]
+        if contract:
+            contract_outputs = [ref.name for ref in contract.produces]
+            undeclared = set(declared_outputs or []) - set(contract_outputs)
+            if undeclared:
+                raise TaskGraphValidationError(
+                    f"step {step_id!r} declares outputs not present in trusted "
+                    f"Agent contract: {sorted(undeclared)}"
+                )
+            expected_outputs = contract_outputs
+        else:
+            expected_outputs = (
+                declared_outputs or agent_produces.get(agent_name, [])
+            )
         if isinstance(expected_outputs, str):
             expected_outputs = [expected_outputs]
 
@@ -318,6 +366,12 @@ def plan_to_task_graph(
             description=raw.get("description", ""),
             expected_schema_ref=(
                 raw.get("expected_schema_ref") or raw.get("output_schema_ref")
+            ),
+            expected_schema_refs=(
+                dict(contract.output_schema_refs) if contract else {}
+            ),
+            agent_contract=(
+                contract.model_dump(mode="json") if contract else None
             ),
             verification_contract=dict(raw.get("verification_contract") or {}),
             # trusted classification audit trail

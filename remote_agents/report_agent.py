@@ -2,6 +2,7 @@
 """Report Agent - generates reports."""
 
 from typing import Any, Dict, List
+import json
 import logging
 import os
 
@@ -11,6 +12,27 @@ from src.contracts.agent_result import AgentResultError
 from .base_agent import BaseRemoteAgent
 
 logger = logging.getLogger(__name__)
+
+
+def _resolved_report_sources(messages: List[Dict[str, Any]]) -> Dict[str, Any] | None:
+    """Read the Scheduler-assembled report input without asking an LLM to copy it."""
+
+    for message in reversed(messages or []):
+        content = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(content, str) or not content.startswith("EXECUTION_CONTEXT"):
+            continue
+        _, _, raw = content.partition("\n")
+        try:
+            brief = json.loads(raw)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        resolved = brief.get("resolved_inputs") if isinstance(brief, dict) else None
+        report_sources = (
+            resolved.get("report.sources") if isinstance(resolved, dict) else None
+        )
+        if isinstance(report_sources, dict):
+            return report_sources
+    return None
 
 
 class RemoteReportAgent(BaseRemoteAgent):
@@ -42,7 +64,7 @@ class RemoteReportAgent(BaseRemoteAgent):
         tools: List[Dict[str, Any]],
         messages: List[Dict[str, Any]],
         context: Dict[str, Any],
-        parameter_extractor: Any
+        parameter_extractor: Any,
     ) -> Dict[str, Any]:
         """Execute report generation - single tool agent."""
         if not tools or len(tools) == 0:
@@ -58,13 +80,34 @@ class RemoteReportAgent(BaseRemoteAgent):
         tool_name = tool.get("name", "unknown")
 
         try:
-            logger.info(f"[{self.name}] Extracting parameters for {tool_name}")
-            arguments = await parameter_extractor.extract(
-                agent_name=self.name,
-                agent_prompt=self.prompt,
-                tool=tool,
-                messages=messages
-            )
+            # Artifact fan-in is a governed data-plane input. The extractor may
+            # not remove, replace or rewrite the actual upstream payloads
+            # assembled by the Scheduler.
+            report_sources = _resolved_report_sources(messages)
+            if report_sources is not None:
+                sources = report_sources.get("sources")
+                if not isinstance(sources, list) or not sources:
+                    raise ValueError(
+                        "report.sources must contain at least one upstream source"
+                    )
+                arguments = {
+                    "data": sources,
+                    "title": str(report_sources.get("title") or "分析报告"),
+                    "instruction": str(
+                        report_sources.get("instruction") or "使用全部上游来源生成报告"
+                    ),
+                }
+            else:
+                # Legacy/direct invocation has no Scheduler data-plane input.
+                logger.info(f"[{self.name}] Extracting parameters for {tool_name}")
+                arguments = await parameter_extractor.extract(
+                    agent_name=self.name,
+                    agent_prompt=self.prompt,
+                    tool=tool,
+                    messages=messages,
+                )
+                if not isinstance(arguments, dict):
+                    arguments = {}
 
             llm_timeout = int(os.getenv("REMOTE_REPORT_LLM_TIMEOUT", "120"))
             tool_timeout = int(os.getenv("REMOTE_REPORT_TOOL_TIMEOUT", "150"))
