@@ -2,6 +2,7 @@
 from pathlib import Path
 from typing import Any, Dict, Iterable, List
 
+from src.contracts.agent_contract import AgentContract, DataContractRef
 from src.interface.agent import Agent, AgentSource, LLMType
 from src.interface.mcp import Tool
 from src.manager.registry.resource_registry import ResourceRegistry, ResourceSpec
@@ -120,10 +121,45 @@ async def sync_remote_agents(resource_registry: ResourceRegistry, agent_registry
                     )
                 )
 
-        # Extract requires and produces from metadata
+        # Extract the explicit v1 contract while retaining legacy string lists.
+        contract_version = metadata.get("contract_version")
         requires = metadata.get("requires", [])
         produces = metadata.get("produces", [])
+        input_schema_refs = metadata.get("input_schema_refs", {})
+        output_schema_refs = metadata.get("output_schema_refs", {})
         parameter_mapping = metadata.get("parameter_mapping", {})
+        agent_contract = None
+        if contract_version:
+            missing_input_refs = [
+                name for name in requires if name not in input_schema_refs
+            ]
+            missing_output_refs = [
+                name for name in produces if name not in output_schema_refs
+            ]
+            if missing_input_refs or missing_output_refs:
+                raise ValueError(
+                    f"Invalid Agent contract for {agent_name}: missing schema refs "
+                    f"for requires={missing_input_refs}, produces={missing_output_refs}"
+                )
+            agent_contract = AgentContract(
+                contract_version=contract_version,
+                requires=[
+                    DataContractRef(
+                        name=name,
+                        schema_ref=input_schema_refs[name],
+                        required=True,
+                    )
+                    for name in requires
+                ],
+                produces=[
+                    DataContractRef(
+                        name=name,
+                        schema_ref=output_schema_refs[name],
+                        required=True,
+                    )
+                    for name in produces
+                ],
+            )
 
         agent = Agent(
             user_id=default_user_id,
@@ -138,6 +174,10 @@ async def sync_remote_agents(resource_registry: ResourceRegistry, agent_registry
             api_key=(spec.auth or {}).get("api_key"),
             requires=requires,
             produces=produces,
+            contract_version=contract_version,
+            input_schema_refs=input_schema_refs,
+            output_schema_refs=output_schema_refs,
+            agent_contract=agent_contract,
             parameter_mapping=parameter_mapping,
         )
 

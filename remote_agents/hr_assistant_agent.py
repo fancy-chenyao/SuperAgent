@@ -5,6 +5,9 @@ from typing import Any, Dict, List
 import logging
 import json
 
+from src.contracts.agent_contract import AgentContract, DataContractRef
+from src.contracts.agent_result import AgentResultError
+
 from .base_agent import BaseRemoteAgent
 
 logger = logging.getLogger(__name__)
@@ -81,7 +84,20 @@ class RemoteHRAssistantAgent(BaseRemoteAgent):
     def __init__(self):
         super().__init__(
             name="RemoteHRAssistantAgent",
-            prompt="You are an HR assistant that helps query employee information and salary data."
+            prompt="You are an HR assistant that helps query employee information and salary data.",
+            contract=AgentContract(
+                contract_version="1.0",
+                produces=[
+                    DataContractRef(
+                        name="employee.info",
+                        schema_ref="employee.info@v1",
+                    ),
+                    DataContractRef(
+                        name="employee.salary",
+                        schema_ref="employee.salary@v1",
+                    ),
+                ],
+            ),
         )
 
     async def execute(
@@ -114,6 +130,8 @@ class RemoteHRAssistantAgent(BaseRemoteAgent):
         logger.info(f"[{self.name}] person_tool: {person_tool is not None}, salary_tool: {salary_tool is not None}")
 
         results = {}
+        errors: list[AgentResultError] = []
+        person_query = None
         salary_requested = _salary_requested(messages)
 
         # Step 1: Query person info if requested
@@ -126,6 +144,7 @@ class RemoteHRAssistantAgent(BaseRemoteAgent):
                     tool=person_tool,
                     messages=messages
                 )
+                person_query = person_params.get("keyword")
                 logger.info(f"[{self.name}] Person params: {json.dumps(person_params, ensure_ascii=False)}")
 
                 logger.info(f"[{self.name}] Calling person info tool")
@@ -155,7 +174,9 @@ class RemoteHRAssistantAgent(BaseRemoteAgent):
 
             except Exception as e:
                 logger.error(f"[{self.name}] Person info query failed: {e}")
-                results["person_info_error"] = str(e)
+                errors.append(
+                    self.execution_error(e, tool_name="remote_person_info_tool")
+                )
 
         # Step 2: Query salary info if requested
         if salary_tool and salary_requested:
@@ -212,7 +233,9 @@ class RemoteHRAssistantAgent(BaseRemoteAgent):
                 logger.error(f"[{self.name}] Salary info query failed: {e}")
                 import traceback
                 logger.error(f"[{self.name}] Traceback: {traceback.format_exc()}")
-                results["salary_info_error"] = str(e)
+                errors.append(
+                    self.execution_error(e, tool_name="remote_salary_info_tool")
+                )
         elif salary_tool:
             logger.info(
                 f"[{self.name}] Salary tool available but skipped: no salary intent"
@@ -220,26 +243,40 @@ class RemoteHRAssistantAgent(BaseRemoteAgent):
         else:
             logger.warning(f"[{self.name}] ===== NO SALARY TOOL FOUND =====")
 
-        # Step 3: Merge results if both are available
-        if "person_info" in results and "salary_info" in results:
-            merged = self._merge_person_and_salary(
-                results["person_info"],
-                results["salary_info"]
-            )
-            logger.info(f"[{self.name}] Merged {len(merged) if isinstance(merged, list) else 1} complete records")
-            return merged
-
-        # Return whatever we have
+        outputs: dict[str, Any] = {}
         if "person_info" in results:
-            return results["person_info"]
+            employee_info: dict[str, Any] = {
+                "records": results["person_info"],
+                "matched_count": len(results["person_info"]),
+            }
+            if isinstance(person_query, str):
+                employee_info["query"] = person_query
+            outputs["employee.info"] = employee_info
         if "salary_info" in results:
-            return results["salary_info"]
+            outputs["employee.salary"] = {
+                "records": results["salary_info"],
+                "matched_count": len(results["salary_info"]),
+            }
 
-        # No results
-        return {
-            "error": "No data retrieved",
-            "details": results
-        }
+        error = None
+        if errors:
+            error = errors[0]
+            if len(errors) > 1:
+                error = AgentResultError(
+                    code="MULTIPLE_REMOTE_TOOL_ERRORS",
+                    message="Multiple HR tools failed",
+                    retryable=any(item.retryable for item in errors),
+                    details={
+                        "errors": [item.model_dump(mode="json") for item in errors]
+                    },
+                )
+        elif not outputs:
+            error = AgentResultError(
+                code="NO_DATA_RETRIEVED",
+                message="No HR data was retrieved",
+                retryable=False,
+            )
+        return self.result_envelope(outputs=outputs, error=error)
 
     def _merge_person_and_salary(
         self,

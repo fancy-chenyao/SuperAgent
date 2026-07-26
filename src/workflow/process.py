@@ -119,6 +119,11 @@ def _agent_contract_fingerprints(agent_cards: Any) -> dict[str, str]:
             "risk_ceiling": card.get("risk_ceiling") or "LOW",
             "input_schema": card.get("input_schema") or {},
             "output_schema": card.get("output_schema") or {},
+            "contract_version": card.get("contract_version"),
+            "requires": card.get("requires") or [],
+            "produces": card.get("produces") or [],
+            "input_schema_refs": card.get("input_schema_refs") or {},
+            "output_schema_refs": card.get("output_schema_refs") or {},
             "version": card.get("version") or "1.0.0",
         }
         fingerprints[agent_id] = hashlib.sha256(
