@@ -33,5 +33,10 @@ def test_report_agent_uses_separate_inner_and_outer_timeouts(monkeypatch) -> Non
     )
 
     assert result["status"] == "success"
+    assert (
+        result["outputs"]["report.markdown"]["markdown"]
+        == "# 人事情况汇总"
+    )
+    assert result["outputs"]["report.markdown"]["source_count"] == 1
     assert captured["arguments"]["llm_timeout_sec"] == 80
     assert captured["timeout"] == 100
