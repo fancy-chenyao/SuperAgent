@@ -39,6 +39,56 @@ _TYPE_MAP: Dict[str, tuple] = {
 }
 
 
+def _validate_value(
+    value: Any,
+    spec: Dict[str, Any],
+    path: str,
+    errors: List[str],
+) -> None:
+    expected = spec.get("type")
+    if expected:
+        allowed = _TYPE_MAP.get(str(expected).lower())
+        if allowed is None:
+            errors.append(f"{path}: unknown type {expected!r} in schema")
+            return
+        if isinstance(value, bool) and bool not in allowed:
+            errors.append(f"{path}: expected {expected}, got bool")
+            return
+        if not isinstance(value, allowed):
+            errors.append(
+                f"{path}: expected {expected}, got {type(value).__name__}"
+            )
+            return
+
+    enum = spec.get("enum")
+    if enum is not None and value not in enum:
+        errors.append(f"{path}: expected one of {enum!r}, got {value!r}")
+
+    if isinstance(value, dict):
+        required = spec.get("required", []) or []
+        for field in required:
+            if field not in value:
+                errors.append(f"{path}: missing required field: {field!r}")
+        properties: Dict[str, Any] = spec.get("properties", {}) or {}
+        for field, field_spec in properties.items():
+            if field in value:
+                _validate_value(
+                    value[field],
+                    field_spec or {},
+                    f"{path}.{field}",
+                    errors,
+                )
+        if not spec.get("additional_properties", True):
+            for field in value:
+                if field not in properties:
+                    errors.append(f"{path}: unexpected field: {field!r}")
+
+    if isinstance(value, list) and spec.get("items"):
+        item_spec = spec["items"] or {}
+        for index, item in enumerate(value):
+            _validate_value(item, item_spec, f"{path}[{index}]", errors)
+
+
 class SchemaRegistry:
     """In-memory registry of named schemas with minimal validation."""
 
@@ -77,39 +127,7 @@ class SchemaRegistry:
                 f"got {type(payload).__name__}"
             ]
 
-        required = schema.get("required", []) or []
-        for field in required:
-            if field not in payload:
-                errors.append(f"missing required field: {field!r}")
-
-        properties: Dict[str, Any] = schema.get("properties", {}) or {}
-        for field, spec in properties.items():
-            if field not in payload:
-                continue
-            expected = (spec or {}).get("type")
-            if not expected:
-                continue
-            allowed = _TYPE_MAP.get(str(expected).lower())
-            if allowed is None:
-                errors.append(f"field {field!r}: unknown type {expected!r} in schema")
-                continue
-            value = payload[field]
-            # bool is a subclass of int; guard against int-type accepting bool.
-            if isinstance(value, bool) and bool not in allowed:
-                errors.append(
-                    f"field {field!r}: expected {expected}, got bool"
-                )
-                continue
-            if not isinstance(value, allowed):
-                errors.append(
-                    f"field {field!r}: expected {expected}, got {type(value).__name__}"
-                )
-
-        if not schema.get("additional_properties", True):
-            allowed_keys = set(properties.keys())
-            for key in payload:
-                if key not in allowed_keys:
-                    errors.append(f"unexpected field: {key!r}")
+        _validate_value(payload, schema, "payload", errors)
 
         return (len(errors) == 0), errors
 

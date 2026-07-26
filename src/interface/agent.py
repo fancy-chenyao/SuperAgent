@@ -9,6 +9,8 @@ except Exception:  # pragma: no cover - optional dependency in lightweight test 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from typing_extensions import TypedDict
 
+from src.contracts.agent_contract import AgentContract
+
 from .mcp import Tool
 
 
@@ -94,6 +96,12 @@ class Agent(BaseModel):
     mcp_config: Optional[AgentMCPConfig] = None
     mcp_servers: Optional[Dict[str, Any]] = None
     parameter_mapping: Optional[Dict[str, str]] = None
+    contract_version: Optional[str] = None
+    requires: List[str] = Field(default_factory=list)
+    produces: List[str] = Field(default_factory=list)
+    input_schema_refs: Dict[str, str] = Field(default_factory=dict)
+    output_schema_refs: Dict[str, str] = Field(default_factory=dict)
+    agent_contract: Optional[AgentContract] = None
 
     model_config = ConfigDict(extra="allow")
 
@@ -107,6 +115,13 @@ class Agent(BaseModel):
 
         if self.mcp_config is not None and not self.mcp_servers:
             self.mcp_servers = self.mcp_config.mcp_servers
+
+        if self.agent_contract is not None:
+            self.contract_version = self.agent_contract.contract_version
+            self.requires = [ref.name for ref in self.agent_contract.requires]
+            self.produces = [ref.name for ref in self.agent_contract.produces]
+            self.input_schema_refs = dict(self.agent_contract.input_schema_refs)
+            self.output_schema_refs = dict(self.agent_contract.output_schema_refs)
 
         return self
 
