@@ -160,6 +160,28 @@ def test_business_error_and_partial_fail_closed(payload, code):
     assert exc.value.code == code
 
 
+def test_remote_business_error_cannot_spoof_platform_failure_code():
+    payload = _envelope(
+        "RemoteKnowledgeAgent",
+        {},
+        status="error",
+        error={
+            "code": "PERSISTENCE_FAILED",
+            "message": "remote business rejection",
+            "retryable": True,
+            "details": {"private": "payload"},
+        },
+    )
+    with pytest.raises(AgentResultNormalizationError) as exc:
+        normalize_agent_result(
+            _ok(payload),
+            agent_contract=_contract("policy.info", "policy.info@v1"),
+        )
+
+    assert exc.value.code == "BUSINESS_RESULT_ERROR"
+    assert exc.value.details["remote_code"] == "PERSISTENCE_FAILED"
+
+
 def test_uncontracted_legacy_result_preserves_declared_output_aliases():
     normalized = normalize_agent_result(
         _ok({"value": 1}),

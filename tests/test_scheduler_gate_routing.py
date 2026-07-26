@@ -63,6 +63,36 @@ def test_global_clarify_blocks_a_ready_email_step():
     assert result["ask"].status == StepStatus.FAILED
     assert result["ask"].metrics.get("clarify") is True
     assert "收件人邮箱？" in result.clarifications
+    assert result["email"].status == StepStatus.SKIPPED
+    assert result["email"].failure.code == "CLARIFICATION_BLOCKED"
+    assert result.blocked_steps == ["email"]
+
+
+def test_global_clarify_persists_and_publishes_every_new_step():
+    verdicts = {
+        "ask": RoutingResult(selected_agent=None, decision="CLARIFY", clarification="目标？"),
+        "work": RoutingResult(selected_agent="Worker", decision="DISPATCH"),
+    }
+    committed: list[tuple[str, str]] = []
+    ended: list[tuple[str, str]] = []
+
+    async def commit(*, step, result):
+        committed.append((step.step_id, str(result.status)))
+
+    async def on_end(*, step, result):
+        ended.append((step.step_id, str(result.status)))
+
+    result = _run(
+        _RecordingExecutor(),
+        _graph(_step("ask"), _step("work")),
+        _MapRouting(verdicts),
+        commit_step_result=commit,
+        on_step_end=on_end,
+    )
+
+    assert committed == [("ask", "FAILED"), ("work", "SKIPPED")]
+    assert ended == committed
+    assert result.terminal_status == WorkflowStatus.CLARIFY_REQUIRED
 
 
 def test_dispatch_without_agent_does_not_start_hook_or_execute():
@@ -99,7 +129,9 @@ def test_reject_isolates_branch_but_independent_readonly_survives():
     result = _run(execute, g, _MapRouting(verdicts))
 
     assert result["reject"].status == StepStatus.FAILED
-    assert "down" not in result  # downstream of the rejected step is blocked
+    assert result["down"].status == StepStatus.SKIPPED
+    assert result["down"].failure.code == "UPSTREAM_STEP_FAILED"
+    assert result["down"].failure.blocked_by == ["reject"]
     assert result["read1"].is_success
     # independent read-only branch keeps running
     assert result["read2"].is_success

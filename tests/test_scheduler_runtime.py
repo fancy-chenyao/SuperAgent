@@ -9,10 +9,12 @@ import json
 
 import pytest
 
+from src.interface.artifact import ArtifactRef, StepResult, StepStatus
 from src.interface.task_graph import TaskGraph, TaskSpec, TaskStep
 from src.manager.executor.base import ExecuteResult, ExecutionStatus
 from src.orchestration.providers import StubRoutingProvider
 from src.orchestration.runtime import (
+    _public_step_metrics,
     build_task_graph_from_state,
     has_task_graph,
     run_scheduler_workflow,
@@ -61,6 +63,24 @@ def _two_step_state():
         ],
     )
     return {"workflow_id": "wf1", "user_id": "u1", "task_graph": graph, "messages": []}
+
+
+def test_public_step_metrics_excludes_result_and_remote_diagnostics():
+    public = _public_step_metrics(
+        {
+            "attempts": 2,
+            "routing_decision": "DISPATCH",
+            "result_error": "REMOTE_PRIVATE_CODE",
+            "result_error_details": {
+                "payload": {"salary": 1000},
+                "traceback": "private",
+            },
+            "selected_agent": "private-provider-id",
+            "external_op_id": "private-operation-id",
+        }
+    )
+
+    assert public == {"attempts": 2, "routing_decision": "DISPATCH"}
 
 
 def test_runtime_emits_workflow_and_agent_events_in_order():
@@ -240,7 +260,83 @@ def test_runtime_reports_failure_status():
     # s1 succeeded, s2 failed -> partial failure at the workflow level.
     assert end["data"]["status"] == "PARTIAL_FAILED"
     assert "s2" in end["data"]["failed_steps"]
+    assert end["data"]["blocked_steps"] == []
+    assert end["data"]["failures"][0]["code"] == "AGENT_EXECUTION_FAILED"
+    failed_step = next(
+        event
+        for event in events
+        if event["event"] == "step_result"
+        and event["data"]["step_id"] == "s2"
+    )
+    assert failed_step["data"]["failure"]["category"] == "execution"
+    assert "boom" not in json.dumps(failed_step["data"])
     assert state["completed_steps"] == ["s1"]
+    assert state["step_results"]["s2"]["failure"]["code"] == "AGENT_EXECUTION_FAILED"
+
+
+def test_checkpoint_step_result_removes_raw_failure_diagnostics():
+    import src.orchestration.runtime as runtime_mod
+    from src.orchestration.failure_mapper import make_failure
+
+    result = StepResult(
+        step_id="unsafe",
+        status=StepStatus.FAILED,
+        error="<script>secret provider response</script>",
+        metrics={
+            "attempts": 1,
+            "result_error_details": {"payload": "secret"},
+            "selected_agent": "<img onerror=alert(1)>",
+        },
+        failure=make_failure("AGENT_EXECUTION_FAILED", step_id="unsafe"),
+    )
+
+    saved = runtime_mod._checkpoint_step_result(result)
+
+    assert saved["error"] == result.failure.message
+    assert saved["metrics"] == {"attempts": 1}
+    assert "secret provider response" not in json.dumps(saved)
+
+
+def test_resume_missing_leaf_artifact_cannot_report_success():
+    graph = TaskGraph(
+        spec=TaskSpec(task_id="leaf-task"),
+        steps=[
+            TaskStep(
+                step_id="leaf",
+                preferred_resource_id="A",
+                expected_outputs=["result"],
+            )
+        ],
+    )
+    state = {
+        "workflow_id": "leaf-workflow",
+        "user_id": "u1",
+        "task_graph": graph,
+        "messages": [],
+        "completed_steps": ["leaf"],
+        "step_results": {
+            "leaf": StepResult(
+                step_id="leaf",
+                status=StepStatus.SUCCEEDED,
+                outputs={
+                    "result": ArtifactRef(
+                        artifact_id="missing-artifact",
+                        version=1,
+                    )
+                },
+            ).model_dump(mode="json")
+        },
+        "artifacts": {},
+    }
+
+    events = _collect(state)
+    terminal = events[-1]["data"]
+    failed = next(event for event in events if event["event"] == "step_result")
+
+    assert terminal["status"] == "FAILED"
+    assert terminal["failed_steps"] == ["leaf"]
+    assert failed["data"]["failure"]["code"] == "ARTIFACT_NOT_FOUND"
+    assert state["completed_steps"] == []
 
 
 def test_runtime_emits_end_of_workflow_when_scheduler_crashes():
@@ -284,7 +380,33 @@ def test_runtime_emits_end_of_workflow_when_scheduler_crashes():
     assert events[0]["event"] == "start_of_workflow"
     assert events[-1]["event"] == "end_of_workflow"
     assert events[-1]["data"]["status"] == "FAILED"
-    assert "scheduler exploded" in events[-1]["data"]["error"]
+    assert events[-1]["data"]["failures"][0]["code"] == "INTERNAL_SCHEDULER_ERROR"
+    assert "scheduler exploded" not in json.dumps(events[-1]["data"])
+
+
+def test_runtime_reports_restored_artifact_corruption_without_leaking_details(
+    monkeypatch,
+):
+    import src.orchestration.runtime as runtime_mod
+
+    def _corrupt_index(self, _index):
+        raise runtime_mod.ArtifactPayloadCorruption("private path and payload")
+
+    monkeypatch.setattr(
+        runtime_mod.ArtifactPayloadStore,
+        "load_index",
+        _corrupt_index,
+    )
+    state = _two_step_state()
+    state["artifacts"] = {"corrupt": {"index": "value"}}
+
+    events = _collect(state)
+    terminal = events[-1]
+
+    assert terminal["event"] == "end_of_workflow"
+    assert terminal["data"]["status"] == "FAILED"
+    assert terminal["data"]["failures"][0]["code"] == "ARTIFACT_STORE_CORRUPTION"
+    assert "private path" not in json.dumps(terminal["data"])
 
 
 def test_runtime_checkpoint_failure_does_not_report_success():
@@ -316,9 +438,22 @@ def test_runtime_checkpoint_failure_does_not_report_success():
     # s1's persistence failed -> not completed; s2 is blocked by the failed dep.
     assert not state.get("completed_steps")  # never marked complete
     assert "s1" in end["data"]["failed_steps"]
+    assert end["data"]["blocked_steps"] == ["s2"]
+    assert {failure["code"] for failure in end["data"]["failures"]} == {
+        "PERSISTENCE_FAILED",
+        "UPSTREAM_STEP_FAILED",
+    }
     result = next(event for event in events if event["event"] == "step_result")
     assert result["data"]["status"] == "FAILED"
     assert result["data"]["outputs"] == {}
+    blocked = next(
+        event
+        for event in events
+        if event["event"] == "step_result"
+        and event["data"]["step_id"] == "s2"
+    )
+    assert blocked["data"]["status"] == "SKIPPED"
+    assert blocked["data"]["failure"]["blocked_by"] == ["s1"]
 
 
 def test_runtime_artifact_persistence_failure_does_not_report_success(monkeypatch):

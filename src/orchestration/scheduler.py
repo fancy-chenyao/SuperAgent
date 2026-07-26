@@ -44,11 +44,27 @@ from src.orchestration.resolver import (
     ArtifactSchemaIncompatible,
     ArtifactSchemaInvalid,
 )
+from src.orchestration.failure_mapper import (
+    failure_from_step_result,
+    make_failure,
+)
 from src.orchestration.schema_registry import get_schema_registry
 from src.orchestration.store import ArtifactNotFoundError, ArtifactStore
 
 # execute_step(step, selected_agent, inputs, context) -> ExecuteResult-like
 ExecuteStep = Callable[..., Awaitable[Any]]
+
+
+def _is_dispatch_permission_error(exc: BaseException) -> bool:
+    """Recognize policy denials without importing the security stack eagerly."""
+
+    if isinstance(exc, PermissionError):
+        return True
+    try:
+        from src.security.enforcement import PermissionDeniedError
+    except Exception:  # noqa: BLE001 - optional security dependencies
+        return False
+    return isinstance(exc, PermissionDeniedError)
 # Optional async lifecycle hooks (used by the runtime bridge for SSE/logging).
 StepHook = Callable[..., Awaitable[None]]
 
@@ -129,12 +145,16 @@ class WorkflowResult(dict):
         clarifications: Optional[List[str]] = None,
         rejected_steps: Optional[List[str]] = None,
         needs_reconciliation: Optional[List[str]] = None,
+        blocked_steps: Optional[List[str]] = None,
+        additional_failures: Optional[List[Any]] = None,
     ) -> None:
         super().__init__(step_results or {})
         self.terminal_status = terminal_status
         self.clarifications = list(clarifications or [])
         self.rejected_steps = list(rejected_steps or [])
         self.needs_reconciliation = list(needs_reconciliation or [])
+        self.blocked_steps = list(blocked_steps or [])
+        self.additional_failures = list(additional_failures or [])
 
 
 class InputResolutionError(Exception):
@@ -188,6 +208,7 @@ class TaskScheduler:
         context: Optional[dict] = None,
         initial_completed: Optional[set[str]] = None,
         initial_outputs: Optional[Dict[str, Dict[str, Any]]] = None,
+        initial_results: Optional[Dict[str, StepResult]] = None,
         on_step_start: Optional[StepHook] = None,
         on_step_end: Optional[StepHook] = None,
         commit_step_result: Optional[StepHook] = None,
@@ -221,17 +242,75 @@ class TaskScheduler:
             self._agent_to_steps.setdefault(key, []).append(s.step_id)
 
         completed: set[str] = set(initial_completed or [])
-        attempted: set[str] = set(completed)
-        results: Dict[str, StepResult] = {}
+        results: Dict[str, StepResult] = {
+            sid: result
+            for sid, result in (initial_results or {}).items()
+            if sid in smap
+        }
+        restored_step_ids = set(results)
+        attempted: set[str] = set(completed) | restored_step_ids
+        additional_failures: List[Any] = []
+
+        # A resume preflight may supply a failed result for a checkpoint that
+        # claimed completion but whose protected Artifact is no longer
+        # readable. Publish and persist that failure, but never execute the step
+        # again (it may have performed a side effect before the corruption).
+        for step_id in restored_step_ids:
+            result = results[step_id]
+            if result.status == StepStatus.SUCCEEDED:
+                continue
+            step = smap[step_id]
+            if commit_step_result is not None:
+                try:
+                    await commit_step_result(step=step, result=result)
+                except Exception:  # noqa: BLE001 - report storage failure separately
+                    additional_failures.append(
+                        make_failure("PERSISTENCE_FAILED", step_id=step_id)
+                    )
+            if on_step_end is not None:
+                try:
+                    await on_step_end(step=step, result=result)
+                except Exception:  # noqa: BLE001 - monitoring is best effort
+                    pass
 
         # Pre-flight routing: resolve the routing verdict for every not-yet-done
         # step BEFORE executing anything, and cache it. This makes a global
         # clarification enforceable (any CLARIFY halts the whole workflow before
         # a single side-effect step starts) and avoids re-routing at run time.
-        self._routes = await self._preflight_routing(graph, context, skip=completed)
+        self._routes = await self._preflight_routing(graph, context, skip=attempted)
 
-        clarify_result = self._global_clarify(results)
+        clarify_result = self._global_clarify(graph, results, completed=completed)
         if clarify_result is not None:
+            # Clarification is a pre-execution terminal path, but every declared
+            # step still receives the same durable/SSE/log lifecycle as normal
+            # Scheduler outcomes.
+            for step in graph.steps:
+                if step.step_id in restored_step_ids or step.step_id in completed:
+                    continue
+                result = clarify_result[step.step_id]
+                if commit_step_result is not None:
+                    try:
+                        await commit_step_result(step=step, result=result)
+                    except Exception:  # noqa: BLE001 - critical write failed
+                        additional_failures.append(
+                            make_failure(
+                                "PERSISTENCE_FAILED",
+                                step_id=step.step_id,
+                            )
+                        )
+                if on_step_end is not None:
+                    try:
+                        await on_step_end(step=step, result=result)
+                    except Exception:  # noqa: BLE001 - monitoring is best effort
+                        pass
+            if additional_failures:
+                clarify_result.terminal_status = WorkflowStatus.FAILED
+                clarify_result.additional_failures = additional_failures
+            clarify_result.blocked_steps = [
+                sid
+                for sid, result in clarify_result.items()
+                if result.status == StepStatus.SKIPPED
+            ]
             return clarify_result
 
         while True:
@@ -259,7 +338,49 @@ class TaskScheduler:
                     completed.add(sid)
                     self._outputs[sid] = dict(result.outputs)
 
-        return self._finalize(results)
+        # Every declared step receives an explicit terminal outcome. Steps that
+        # could not enter the runnable frontier because an upstream dependency
+        # failed are SKIPPED, not silently omitted from the result map.
+        blocked_steps = [
+            step for step in graph.steps if step.step_id not in attempted
+        ]
+        for step in blocked_steps:
+            blocked_by = [dep for dep in step.depends_on if dep not in completed]
+            error = (
+                "step blocked by failed upstream dependencies: "
+                + ", ".join(blocked_by)
+            )
+            result = StepResult(
+                step_id=step.step_id,
+                status=StepStatus.SKIPPED,
+                error=error,
+                metrics={"blocked_by": blocked_by},
+                failure=make_failure(
+                    "UPSTREAM_STEP_FAILED",
+                    step_id=step.step_id,
+                    message="Step was not executed because an upstream step failed.",
+                    details_safe={"blocked_by": blocked_by},
+                ),
+            )
+            results[step.step_id] = result
+            attempted.add(step.step_id)
+            if commit_step_result is not None:
+                try:
+                    await commit_step_result(step=step, result=result)
+                except Exception:  # noqa: BLE001 - critical write failed
+                    additional_failures.append(
+                        make_failure(
+                            "PERSISTENCE_FAILED",
+                            step_id=step.step_id,
+                        )
+                    )
+            if on_step_end is not None:
+                try:
+                    await on_step_end(step=step, result=result)
+                except Exception:  # noqa: BLE001 - monitoring is best effort
+                    pass
+
+        return self._finalize(results, additional_failures=additional_failures)
 
     async def _preflight_routing(
         self, graph: TaskGraph, context: dict, *, skip: Optional[set[str]] = None
@@ -285,7 +406,13 @@ class TaskScheduler:
                 )
         return routes
 
-    def _global_clarify(self, results: Dict[str, StepResult]) -> Optional["WorkflowResult"]:
+    def _global_clarify(
+        self,
+        graph: TaskGraph,
+        results: Dict[str, StepResult],
+        *,
+        completed: set[str],
+    ) -> Optional["WorkflowResult"]:
         """If any step needs clarification, halt the whole workflow (fail closed).
 
         Returns a terminal :class:`WorkflowResult` when a clarification is
@@ -313,15 +440,47 @@ class TaskScheduler:
                     "reason_codes": list(getattr(route, "reason_codes", []) or []),
                 },
             )
+            results[sid] = results[sid].model_copy(
+                update={
+                    "failure": failure_from_step_result(
+                        sid,
+                        results[sid].error,
+                        results[sid].metrics,
+                    )
+                }
+            )
             if clarification:
                 clarifications.append(clarification)
+        blocked_steps: List[str] = []
+        for step in graph.steps:
+            if step.step_id in results or step.step_id in completed:
+                continue
+            blocked_steps.append(step.step_id)
+            results[step.step_id] = StepResult(
+                step_id=step.step_id,
+                status=StepStatus.SKIPPED,
+                error="step blocked until workflow clarification is resolved",
+                metrics={"blocked_by": clarify_ids},
+                failure=make_failure(
+                    "CLARIFICATION_BLOCKED",
+                    step_id=step.step_id,
+                    message="Step was not executed because workflow clarification is required.",
+                    details_safe={"blocked_by": clarify_ids},
+                ),
+            )
         return WorkflowResult(
             results,
             terminal_status=WorkflowStatus.CLARIFY_REQUIRED,
             clarifications=clarifications,
+            blocked_steps=blocked_steps,
         )
 
-    def _finalize(self, results: Dict[str, StepResult]) -> "WorkflowResult":
+    def _finalize(
+        self,
+        results: Dict[str, StepResult],
+        *,
+        additional_failures: Optional[List[Any]] = None,
+    ) -> "WorkflowResult":
         """Derive the workflow-level terminal status from per-step outcomes."""
         rejected = [
             sid
@@ -332,8 +491,14 @@ class TaskScheduler:
         needs_recon = [
             sid for sid, r in results.items() if (r.metrics or {}).get("needs_reconciliation")
         ]
+        blocked = [
+            sid for sid, r in results.items() if r.status == StepStatus.SKIPPED
+        ]
         failed = [sid for sid, r in results.items() if r.status !=
                   StepStatus.SUCCEEDED]
+        primary_failed = [
+            sid for sid, r in results.items() if r.status == StepStatus.FAILED
+        ]
         succeeded = [sid for sid, r in results.items() if r.status ==
                      StepStatus.SUCCEEDED]
 
@@ -343,7 +508,7 @@ class TaskScheduler:
             status = WorkflowStatus.SUCCEEDED
         elif succeeded:
             status = WorkflowStatus.PARTIAL_FAILED
-        elif rejected and set(rejected) == set(failed):
+        elif rejected and set(rejected) == set(primary_failed):
             status = WorkflowStatus.REJECTED
         else:
             status = WorkflowStatus.FAILED
@@ -353,6 +518,8 @@ class TaskScheduler:
             terminal_status=status,
             rejected_steps=rejected,
             needs_reconciliation=needs_recon,
+            blocked_steps=blocked,
+            additional_failures=additional_failures,
         )
 
     def _select_batch(self, runnable: List[str], smap: Dict[str, TaskStep]) -> List[str]:
@@ -408,6 +575,11 @@ class TaskScheduler:
                 metrics={"crashed": True},
             )
 
+        # Attach the public failure descriptor before the critical commit so
+        # checkpoints, restored state, SSE, and task logs all carry the same
+        # structured object.
+        result = self._with_failure(step, result)
+
         # CRITICAL persistence FIRST (artifact payload + checkpoint + completion
         # state). A failure here must change the terminal status: a step whose
         # outputs/checkpoint could not be durably saved is NOT reported
@@ -428,6 +600,10 @@ class TaskScheduler:
                     metrics=metrics,
                 )
 
+        # A commit failure replaces the original outcome, so classify that new
+        # persistence/reconciliation failure as well.
+        result = self._with_failure(step, result)
+
         # Non-critical end hook (logging / SSE / monitoring): best effort only.
         if on_step_end is not None:
             try:
@@ -435,6 +611,29 @@ class TaskScheduler:
             except Exception:  # noqa: BLE001 - the end hook must not crash the batch
                 pass
         return result
+
+    def _with_failure(self, step: TaskStep, result: StepResult) -> StepResult:
+        """Attach a safe descriptor to a non-success result exactly once."""
+
+        if result.is_success or getattr(result, "failure", None) is not None:
+            return result
+        route = self._routes.get(step.step_id)
+        failure_agent = (
+            (result.metrics or {}).get("selected_agent")
+            or getattr(route, "selected_agent", None)
+            or getattr(step, "agent_name", None)
+            or step.preferred_resource_id
+        )
+        return result.model_copy(
+            update={
+                "failure": failure_from_step_result(
+                    step.step_id,
+                    result.error,
+                    result.metrics,
+                    agent_id=failure_agent,
+                )
+            }
+        )
 
     async def _execute_step_core(
         self,
@@ -611,6 +810,16 @@ class TaskScheduler:
                 return self._needs_reconciliation(
                     step, selected_agent, f"timeout after {step.timeout}s")
             except Exception as exc:  # noqa: BLE001 - indeterminate outcome
+                if _is_dispatch_permission_error(exc):
+                    return StepResult(
+                        step_id=step.step_id,
+                        status=StepStatus.FAILED,
+                        error="agent dispatch denied by policy",
+                        metrics={
+                            "failure_code": "AGENT_DISPATCH_DENIED",
+                            "selected_agent": selected_agent,
+                        },
+                    )
                 return self._needs_reconciliation(
                     step, selected_agent, f"side-effect executor error: {exc}")
             if not getattr(exec_result, "is_success", True):
@@ -650,6 +859,17 @@ class TaskScheduler:
                     last_error = f"timeout after {step.timeout}s"
                     continue
                 except Exception as exc:  # noqa: BLE001 - record and maybe retry
+                    if _is_dispatch_permission_error(exc):
+                        return StepResult(
+                            step_id=step.step_id,
+                            status=StepStatus.FAILED,
+                            error="agent dispatch denied by policy",
+                            metrics={
+                                "attempts": attempt + 1,
+                                "failure_code": "AGENT_DISPATCH_DENIED",
+                                "selected_agent": selected_agent,
+                            },
+                        )
                     last_error = str(exc)
                     continue
 
@@ -805,6 +1025,8 @@ class TaskScheduler:
                     metrics={
                         "attempts": attempts,
                         "result_error": "SCHEMA_VALIDATION_FAILED",
+                        "logical_name": logical_name,
+                        "schema_ref": artifact.schema_ref,
                     },
                 )
             outputs[logical_name] = self.store.put(artifact)

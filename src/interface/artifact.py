@@ -21,6 +21,8 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from src.contracts.workflow_failure import FailureDescriptor
+
 
 def new_artifact_id() -> str:
     """Generate a fresh artifact id."""
@@ -132,8 +134,18 @@ class StepResult(BaseModel):
     outputs: Dict[str, ArtifactRef] = Field(default_factory=dict)
     metrics: Dict[str, Any] = Field(default_factory=dict)
     error: Optional[str] = None
+    failure: Optional[FailureDescriptor] = None
 
     model_config = ConfigDict(use_enum_values=True, extra="allow")
+
+    @model_validator(mode="after")
+    def _validate_failure_state(self) -> "StepResult":
+        if self.status == StepStatus.SUCCEEDED and self.failure is not None:
+            raise ValueError("a successful StepResult cannot carry a failure")
+        # Keep the legacy text field populated during the compatibility window.
+        if self.failure is not None and self.error is None:
+            self.error = self.failure.message
+        return self
 
     @property
     def is_success(self) -> bool:

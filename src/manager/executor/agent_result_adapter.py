@@ -98,10 +98,7 @@ def _legacy_error(payload: Any) -> tuple[str, str] | None:
     error = payload.get("error")
     if error and not payload.get("outputs"):
         if isinstance(error, dict):
-            return (
-                str(error.get("code") or "BUSINESS_RESULT_ERROR"),
-                str(error.get("message") or error),
-            )
+            return "BUSINESS_RESULT_ERROR", str(error.get("message") or error)
         return "BUSINESS_RESULT_ERROR", str(error)
     return None
 
@@ -219,9 +216,12 @@ def normalize_agent_result(
     if envelope.status == AgentResultStatus.ERROR:
         assert envelope.error is not None
         raise AgentResultNormalizationError(
-            envelope.error.code,
+            "BUSINESS_RESULT_ERROR",
             envelope.error.message,
-            details=envelope.error.details,
+            details={
+                "remote_code": envelope.error.code,
+                "remote_details": envelope.error.details,
+            },
         )
     if envelope.status == AgentResultStatus.PARTIAL:
         raise AgentResultNormalizationError(
