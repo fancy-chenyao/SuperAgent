@@ -10,6 +10,21 @@ This document specifies and validates results that already follow the new
 protocol. It does not normalize legacy Agent output, change Scheduler behavior,
 or implement Artifact fan-in.
 
+## Scope of runtime enforcement
+
+Contract v1 ships the validation building blocks only. `validate_agent_result`
+and `register_agent_schemas` are not yet called on the runtime execution path;
+they are wired in by the result-normalization layer (the follow-up
+"Agent result normalization / Artifact fan-in" PR), which registers the schema
+catalog on the scheduler execution path and runs `validate_agent_result` on
+every contracted remote result before it reaches downstream steps. Until that
+layer lands, contracted results are still gated by the remote error envelope
+(`status=error` fails the step), but schema conformance is not enforced at
+runtime.
+
+`DataContractRef.required` and `cardinality` are declared for forward
+compatibility and are not enforced by v1 validation.
+
 ## Contract
 
 An `AgentContract` has a `contract_version`, `requires`, and `produces`.
@@ -26,7 +41,15 @@ Each data reference contains:
 
 `name` is a business logical name, never a tool name. `schema_ref` must resolve
 through the existing `SchemaRegistry`. Contract v1 uses exact schema versions
-and fails closed when a schema is missing or mismatched.
+and fails closed when a schema is missing or mismatched. A registry entry whose
+contract declares names without schema refs is rejected at sync time: that
+Agent is not registered, while the rest of the batch continues to load.
+
+Registry metadata may additionally declare `legacy_produces`: logical names
+that predate the contract and are still referenced by planner dependency
+chains (for example `employee.id` and `employee.name`). They are appended to
+the Agent's planner-visible `produces` but stay outside the strict contract,
+so they require no schema refs and are not validated.
 
 ## Result envelope
 
@@ -98,6 +121,10 @@ knowledge base contains statutory material, so results default to
 
 `RemoteReportAgent` requires the generic `report.sources` input and produces
 `report.markdown`. Its contract is not tied to HR-specific source names.
+Because `report.sources` is a synthetic fan-in input that no single Agent
+produces, the registry entry defers this `requires` declaration until the
+fan-in layer lands; until then the planner treats the Report Agent as
+autonomous, exactly as before this contract existed.
 
 ## Validation order
 
