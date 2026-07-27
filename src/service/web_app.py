@@ -142,7 +142,10 @@ def _parse_timestamp(raw: Any) -> Optional[datetime]:
     if text.endswith("Z"):
         text = text[:-1] + "+00:00"
     try:
-        return datetime.fromisoformat(text)
+        parsed = datetime.fromisoformat(text)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
     except Exception:
         return None
 
@@ -161,6 +164,10 @@ def _workflow_last_used(workflow: dict) -> Optional[datetime]:
         if not isinstance(msg, dict):
             continue
         ts = _parse_timestamp(msg.get("timestamp"))
+        if ts and (latest is None or ts > latest):
+            latest = ts
+    for field in ("updated_at", "created_at", "file_updated_at"):
+        ts = _parse_timestamp(workflow.get(field))
         if ts and (latest is None or ts > latest):
             latest = ts
     return latest

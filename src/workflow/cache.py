@@ -11,6 +11,7 @@ from pathlib import Path
 from collections import deque
 import re
 import threading
+from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +71,24 @@ class WorkflowCache:
             logger.error(f"Error loading workflow: {e}")
             raise e
 
+    @staticmethod
+    def _utc_now_iso() -> str:
+        return datetime.now(timezone.utc).isoformat()
+
+    @classmethod
+    def _timestamp_messages(cls, messages: list, timestamp: str) -> list:
+        """为没有时间的 Chat 消息补时间，同时保留旧 Run 页面已有时间。"""
+        normalized = []
+        for message in messages or []:
+            if not isinstance(message, dict):
+                normalized.append(message)
+                continue
+            item = dict(message)
+            if not item.get("timestamp"):
+                item["timestamp"] = timestamp
+            normalized.append(item)
+        return normalized
+
     def init_cache(self, user_id: str, lap: int, mode: str, workflow_id: str, version: int, user_input_messages: list, deep_thinking_mode: bool, search_before_planning: bool, coor_agents: list[str], load_user_workflow: bool = True):
         """Initialize workflow cache.
 
@@ -86,6 +105,9 @@ class WorkflowCache:
             load_user_workflow: Whether to load user workflows
         """
         try:
+            now = self._utc_now_iso()
+            timestamped_messages = self._timestamp_messages(
+                user_input_messages, now)
             self._load_workflow(user_id)
             with self._lock_pool[user_id]:
                 if mode == "launch":
@@ -95,7 +117,9 @@ class WorkflowCache:
                         workflow["lap"] = lap
                         workflow["workflow_id"] = workflow_id
                         workflow["version"] = version
-                        workflow["user_input_messages"] = user_input_messages
+                        workflow["user_input_messages"] = timestamped_messages
+                        workflow.setdefault("created_at", now)
+                        workflow["updated_at"] = now
                         workflow["deep_thinking_mode"] = deep_thinking_mode
                         workflow["search_before_planning"] = search_before_planning
                         workflow["coor_agents"] = coor_agents
@@ -114,7 +138,9 @@ class WorkflowCache:
                         self.cache[workflow_id]["lap"] = lap
                         self.cache[workflow_id]["workflow_id"] = workflow_id
                         self.cache[workflow_id]["version"] = version
-                        self.cache[workflow_id]["user_input_messages"] = user_input_messages
+                        self.cache[workflow_id]["user_input_messages"] = timestamped_messages
+                        self.cache[workflow_id]["created_at"] = now
+                        self.cache[workflow_id]["updated_at"] = now
                         self.cache[workflow_id]["deep_thinking_mode"] = deep_thinking_mode
                         self.cache[workflow_id]["search_before_planning"] = search_before_planning
                         self.cache[workflow_id]["coor_agents"] = coor_agents
@@ -242,15 +268,27 @@ class WorkflowCache:
             planning_steps: 规划步骤列表
             user_id: 用户ID
         """
+        workflow_to_save = None
         try:
             if user_id not in self._lock_pool:
                 self._lock_pool[user_id] = threading.Lock()
             with self._lock_pool[user_id]:
                 self.cache[workflow_id]["planning_steps"] = planning_steps
+                workflow_to_save = self.cache[workflow_id]
         except Exception as e:
             logger.error(f"Error restoring planning steps: {e}")
-            with self._lock_pool[user_id]:
-                self.cache[workflow_id]["planning_steps"] = []
+            workflow = self.cache.get(workflow_id)
+            if workflow is not None:
+                with self._lock_pool[user_id]:
+                    workflow["planning_steps"] = []
+                    workflow_to_save = workflow
+
+        # Planning and execution are separate HTTP requests. Execution reloads
+        # this workflow from disk, so an in-memory-only plan disappears before
+        # Confirm execution. Persist outside the non-reentrant per-user lock
+        # because save_workflow() acquires the same lock.
+        if workflow_to_save is not None:
+            self.save_workflow(workflow_to_save)
 
     def get_planning_steps(self, workflow_id: str):
         """获取工作流的规划步骤
@@ -439,6 +477,7 @@ class WorkflowCache:
                 self._lock_pool[user_id] = threading.Lock()
             with self._lock_pool[user_id]:
                 self.cache[workflow_id]["planning_steps"] = json.dumps(planning_steps, ensure_ascii=False)
+                self.cache[workflow_id]["updated_at"] = self._utc_now_iso()
                 workflow = self.cache[workflow_id]
 
                 with open(workflow_path, "w", encoding='utf-8') as f:
@@ -500,6 +539,9 @@ class WorkflowCache:
         try:
 
             user_id, polish_id = workflow["workflow_id"].split(":")
+            now = self._utc_now_iso()
+            workflow.setdefault("created_at", now)
+            workflow["updated_at"] = now
             workflow_path = self.workflow_dir / user_id / f"{polish_id}.json"
 
             if user_id not in self._lock_pool:
@@ -809,6 +851,9 @@ class WorkflowCache:
                 if mode == "launch":
                     # 新建模式：保存工作流并更新最新polish_id
                     workflow = self.cache[workflow_id]
+                    now = self._utc_now_iso()
+                    workflow.setdefault("created_at", now)
+                    workflow["updated_at"] = now
                     user_id, polish_id = workflow["workflow_id"].split(":")
                     workflow_path = self.workflow_dir / user_id / f"{polish_id}.json"
                     with open(workflow_path, "w", encoding='utf-8') as f:

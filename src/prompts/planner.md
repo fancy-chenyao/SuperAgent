@@ -37,7 +37,16 @@ Your task is to analyze user requirements and organize a team of agents to compl
 When `Task Scenario Profile.subtasks` is present:
 
 - Treat each `subtasks[].intent`, `goal`, `action`, `expected_capabilities`, and `depends_on` as the structured decomposition produced by the main Agent.
-- Every executable `subtasks[]` entry MUST be represented by an independent plan step assigned to an Agent that supports that intent. Do not merge different intents into one step and do not omit a leaf subtask merely because no later task depends on it.
+- Every executable `subtasks[]` entry MUST be represented exactly once, but one
+  execution step MAY cover multiple logical subtasks when the same Agent
+  supports every intent and executes all required tools in one invocation.
+- Copy all logical IDs represented by a step into `subtask_ids`, their intents
+  into `intents`, and only cross-step dependencies into `depends_on`. A
+  dependency between logical subtasks covered by the same step is internal to
+  that Agent invocation.
+- Before returning JSON, flatten all plan `subtask_ids` and verify that they
+  exactly equal the TaskProfile subtask IDs: no missing IDs, duplicates, or
+  invented IDs.
 - Preserve every `depends_on` edge as execution order: each dependency step must appear before the consuming step.
 - Before outputting JSON, compare the set of planned business intents with all `subtasks[].intent` values. If any intent is missing, revise the plan before returning it.
 - If a document generation subtask depends on `employee_information_query`, first plan an HR information query step, then plan the document generation step.
@@ -53,6 +62,13 @@ When `Task Scenario Profile.subtasks` is present:
   2. `RemoteOfficeAssistantAgent` 基于员工 ID 查询请假记录
   3. `RemoteReportAgent` 基于前两步结果生成人事情况汇总
 
+- Example: “查询员工李娜的基本信息，生成收入证明，然后发给王经理”
+  contains four logical TaskProfile subtasks but should produce three execution
+  steps:
+  1. `RemoteHRAssistantAgent` queries Li Na's employee profile and salary data in one invocation.
+  2. `RemoteDocumentGeneratorAgent` generates the income certificate.
+  3. `RemoteEmailDispatchAgent` sends the generated certificate to Manager Wang.
+
 ## Scenario Tags
 
 <<SCENARIO_TAGS_TEXT>>
@@ -67,7 +83,7 @@ When `Task Scenario Profile.subtasks` is present:
 
 The candidate list above has already passed the main Agent's permission boundary and capability scoring. You may only select agents that appear in both the routing candidates and `TEAM_MEMBERS`. Prefer the highest-scoring candidate unless a later cross-domain step explicitly requires another listed capability.
 
-## Instruction History (All User Inputs)
+## Current Resolved Request
 
 <<INSTRUCTION_HISTORY_TEXT>>
 
@@ -78,16 +94,21 @@ The candidate list above has already passed the main Agent's permission boundary
 ## Plan Generation Execution Standards
 
 - First, restate the user's requirements in your own words as a `thought`, with some of your own thinking.
-- Ensure that each agent used in the steps can complete a full task, as session continuity cannot be maintained.
+- Ensure that each step is independently executable from its declared inputs and prior outputs.
 - Always use existing agents only; never add items to "new_agents_needed".
-- Develop a detailed step-by-step plan. Each agent can only be used once in your plan.
+- Develop a detailed step-by-step plan. Because the runtime dispatches one
+  invocation per Agent, each `agent_name` may appear in at most one step; group
+  all logical subtasks assigned to that Agent into that step.
 - **CRITICAL**: Only use agents listed in `<<TEAM_MEMBERS>>`. If `<<TEAM_MEMBERS>>` is empty, respond with `{"steps": [], "new_agents_needed": []}` and explain that no agents are available for this user.
 - Specify the agent's **responsibility** and **output** in the `description` of each step. Attach a `note` if necessary.
 - Before selecting an agent, compare its capability/domain in `<<TEAM_MEMBERS_DESCRIPTION>>` and `<<RESOURCE_CATALOG>>` against the task scenario profile.
 - Prefer the most directly aligned agent for the current `task_type`, `scenario_tags`, and `expected_capabilities`.
 - If the task scenario is clearly in one domain, do not include cross-domain agents unless the user explicitly asked for a cross-domain outcome.
 - If the `coder` agent exists in `<<TEAM_MEMBERS>>`, it can handle mathematical tasks, draw mathematical charts, and has the ability to operate computer systems. If not in the team, do NOT use or suggest it.
-- Combine consecutive small steps assigned to the same agent into one larger step.
+- The execution unit is one Agent invocation. The same `agent_name` must appear
+  in at most one plan step. Put all logical TaskProfile subtasks assigned to
+  that Agent into the step's `subtask_ids` and `intents`; do not create duplicate
+  calls to the same Agent.
 - **Language requirement (STRICT)**: All outputs must be in **Chinese** (including `title`, `description`, `note`, and any `thought`). Do not use English in any field.
 - Generate the plan in the same language as the user.
 - **Data-Flow Integrity (CRITICAL)**:
@@ -154,6 +175,10 @@ interface InputMapping {
 }
 
 interface Step {
+  step_id: string;                // Unique plan step ID
+  subtask_ids: string[];          // One or more exact TaskProfile subtasks[].id values
+  intents: string[];              // Intents corresponding to subtask_ids
+  depends_on: string[];           // Upstream subtask IDs covered by OTHER steps
   agent_name: string;
   title: string;
   description: string;
@@ -271,10 +296,14 @@ Or better yet, if the query is simple and constant, you can include it in the de
 # Notes
 
 - Ensure the plan is clear and reasonable, assigning tasks to the correct agents based on their capabilities.
-- Ensure that each agent name in the steps list remains unique. Do not duplicate agent names across different planning steps to maintain clear responsibility assignment
+- Keep every `agent_name` unique in the plan. A step may cover multiple logical
+  TaskProfile subtasks through `subtask_ids` and `intents`.
 - Never request new agents. If something seems missing, re-plan with existing agents/tools and include necessary data-retrieval steps.
 - The capabilities of the various agents are limited; you need to carefully read the agent descriptions to ensure you don't assign tasks beyond their abilities.
-- Always base the plan on the full instruction history. If an instruction references an earlier step (e.g., "modify step 2"), use the current plan draft to interpret it.
+- Base the plan on the current resolved request and the structured context
+  references in `Task Scenario Profile`. Do not merge unrelated earlier user
+  requests into the current task. If the user asks to modify an existing plan,
+  use `Current Plan Draft` only for that explicit plan-edit operation.
 - If `coder` is in `<<TEAM_MEMBERS>>`, use it for mathematical calculations and chart drawing. If not available, use another suitable agent or report inability to perform calculations.
 - Always output "new_agents_needed": [] and provide steps.
 - **Search Engine Recommendations**: When conducting web searches, it is recommended to use Bing search (https://www.bing.com/search?q=keywords) or Baidu search (https://www.baidu.com/s?wd=keywords), and avoid using Google search as it may not be accessible in mainland China.

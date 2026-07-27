@@ -38,6 +38,11 @@ class TaskProfile(BaseModel):
     recognition_mode: str = "rule"
     recognition_degraded: bool = False
     recognition: dict[str, Any] = Field(default_factory=dict)
+    # 当前对话轮次解析结果。历史任务只通过显式引用进入，不参与任务边界。
+    raw_request: str = ""
+    resolved_request: str = ""
+    context_references: list[dict[str, Any]] = Field(default_factory=list)
+    context_artifacts: list[dict[str, Any]] = Field(default_factory=list)
 
     def to_legacy_scenario(self) -> dict[str, Any]:
         """兼容现有 S-ABAC 和 Planner 使用的字段命名。"""

@@ -349,8 +349,15 @@ let activeConversationId = null;
 let activeConversationCreatedAt = null;
 let coordinatorBuffer = "";
 let clarificationPending = false;
+let pendingClarificationContext = null;
 let coordinatorResponseHandled = false;
 let latestRoutingDecision = null;
+let conversationContextEntities = {};
+let conversationContextArtifacts = [];
+let currentRequestQuery = "";
+let currentResolvedRequest = "";
+let currentRequestEntities = {};
+let currentContextReferences = [];
 let runtimeCanRun = false;
 let workflowsPage = 1;
 let workflowsPageSize = 5;
@@ -719,6 +726,38 @@ const buildRoutingClarification = (eventData) => {
   return "当前任务需要确认，但系统没有生成具体缺失字段，请查看主 Agent 决策依据。";
 };
 
+const mergeConversationContextEntities = (entities) => {
+  if (!entities || typeof entities !== "object" || Array.isArray(entities)) return;
+  Object.entries(entities).forEach(([key, value]) => {
+    if (value === null || value === "" || (Array.isArray(value) && !value.length)) return;
+    conversationContextEntities[key] = Array.isArray(value) ? [...value] : value;
+  });
+};
+
+const rememberPendingClarification = (eventData, question = "") => {
+  const profile = eventData?.task_profile || {};
+  const missingFields = Array.isArray(profile.missing_fields)
+    ? profile.missing_fields.map(String).filter(Boolean)
+    : [];
+  pendingClarificationContext = {
+    base_query: profile.resolved_request
+      || profile.business_goal
+      || currentRequestQuery
+      || originalUserQuery,
+    resolved_message: profile.resolved_request || profile.business_goal || currentRequestQuery,
+    missing_fields: missingFields,
+    entities: profile.entities && typeof profile.entities === "object"
+      ? { ...profile.entities }
+      : {},
+    questions: Array.isArray(profile.clarification_questions)
+      ? profile.clarification_questions.map(String).filter(Boolean)
+      : question
+        ? [String(question)]
+        : [],
+    workflow_id: workflowIdInput?.value.trim() || "",
+  };
+};
+
 const appendActiveConversationMessage = (role, content, metadata = {}) => {
   const normalized = String(content || "").trim();
   if (!normalized) return;
@@ -744,6 +783,32 @@ const captureAssistantConversationContext = () => {
       return content ? { agentName: card.agentName || "assistant", content } : null;
     })
     .filter(Boolean);
+  const artifactResults = structuredResults
+    .filter((result) => (
+      /(report|document|research|knowledge)/i.test(result.agentName)
+      || /(file_path|file_name|markdown|报告|文档|证明|文件)/i.test(result.content)
+    ))
+    .map((result, index) => {
+      const filePathMatch = result.content.match(
+        /(?:file_path|文件路径|路径)\s*[:：]\s*["']?([^\s"',，。}]+)/i
+      );
+      return {
+        artifact_id: `${activeConversationId || "conversation"}:${Date.now()}:${index + 1}`,
+        type: /(document|docx|文档|证明)/i.test(`${result.agentName} ${result.content}`)
+          ? "document"
+          : "report",
+        title: `${result.agentName} 的执行产物`,
+        source_agent: result.agentName,
+        file_path: filePathMatch ? filePathMatch[1] : "",
+        summary: result.content.slice(0, 2000),
+      };
+    });
+  if (artifactResults.length) {
+    conversationContextArtifacts = [
+      ...conversationContextArtifacts,
+      ...artifactResults,
+    ].slice(-8);
+  }
   const cardResults = structuredResults.map((result) => `[${result.agentName}]\n${result.content}`);
   const fallback = executionOutput ? executionOutput.innerText.trim() : "";
   appendActiveConversationMessage(
@@ -786,6 +851,23 @@ const normalizeStoredConversation = (conversation) => {
     createdAt: conversation.createdAt || new Date().toISOString(),
     updatedAt: conversation.updatedAt || conversation.createdAt || new Date().toISOString(),
     workflowId: String(conversation.workflowId || ""),
+    contextEntities: conversation.contextEntities && typeof conversation.contextEntities === "object"
+      ? { ...conversation.contextEntities }
+      : {},
+    contextArtifacts: Array.isArray(conversation.contextArtifacts)
+      ? conversation.contextArtifacts.map((item) => ({ ...item }))
+      : [],
+    pendingClarification: conversation.pendingClarification && typeof conversation.pendingClarification === "object"
+      ? { ...conversation.pendingClarification }
+      : null,
+    currentRequestQuery: String(conversation.currentRequestQuery || ""),
+    currentResolvedRequest: String(conversation.currentResolvedRequest || ""),
+    currentRequestEntities: conversation.currentRequestEntities && typeof conversation.currentRequestEntities === "object"
+      ? { ...conversation.currentRequestEntities }
+      : {},
+    contextReferences: Array.isArray(conversation.contextReferences)
+      ? conversation.contextReferences.map((item) => ({ ...item }))
+      : [],
     messages,
   };
 };
@@ -846,6 +928,15 @@ const saveActiveConversation = () => {
     createdAt: activeConversationCreatedAt,
     updatedAt: now,
     workflowId: workflowIdInput?.value.trim() || "",
+    contextEntities: { ...conversationContextEntities },
+    contextArtifacts: conversationContextArtifacts.map((item) => ({ ...item })),
+    pendingClarification: pendingClarificationContext
+      ? { ...pendingClarificationContext }
+      : null,
+    currentRequestQuery,
+    currentResolvedRequest,
+    currentRequestEntities: { ...currentRequestEntities },
+    contextReferences: currentContextReferences.map((item) => ({ ...item })),
     messages: activeConversationTranscript.map((message) => ({ ...message })),
   });
   persistChatHistory(userId, conversations);
@@ -974,6 +1065,21 @@ const loadConversation = (conversation) => {
     .map((message) => message.content)
     .slice(-CHAT_HISTORY_LIMIT);
   originalUserQuery = instructionHistory[0] || "";
+  conversationContextEntities = { ...(normalized.contextEntities || {}) };
+  conversationContextArtifacts = Array.isArray(normalized.contextArtifacts)
+    ? normalized.contextArtifacts.map((item) => ({ ...item }))
+    : [];
+  pendingClarificationContext = normalized.pendingClarification
+    ? { ...normalized.pendingClarification }
+    : null;
+  clarificationPending = Boolean(pendingClarificationContext);
+  currentRequestQuery = normalized.currentRequestQuery || instructionHistory.at(-1) || "";
+  currentResolvedRequest = normalized.currentResolvedRequest || currentRequestQuery;
+  currentRequestEntities = { ...(normalized.currentRequestEntities || {}) };
+  currentContextReferences = Array.isArray(normalized.contextReferences)
+    ? normalized.contextReferences.map((item) => ({ ...item }))
+    : [];
+  originalUserQuery = currentResolvedRequest || currentRequestQuery || originalUserQuery;
   workflowIdInput.value = normalized.workflowId || "";
   messageInput.value = "";
   resizeMessageInput();
@@ -1007,8 +1113,15 @@ const resetActiveConversation = (userId = userIdInput.value.trim()) => {
   originalUserQuery = "";
   coordinatorBuffer = "";
   clarificationPending = false;
+  pendingClarificationContext = null;
   coordinatorResponseHandled = false;
   latestRoutingDecision = null;
+  conversationContextEntities = {};
+  conversationContextArtifacts = [];
+  currentRequestQuery = "";
+  currentResolvedRequest = "";
+  currentRequestEntities = {};
+  currentContextReferences = [];
   answerOutput = null;
   currentChatLifecycle = null;
   chatConversation?.replaceChildren();
@@ -2058,6 +2171,9 @@ const renderRoutingDecision = (eventData) => {
   const segments = Array.isArray(profile.segments) ? profile.segments : [];
   const intentNodes = Array.isArray(profile.intent_nodes) ? profile.intent_nodes : [];
   const confidenceFactors = Array.isArray(profile.confidence_factors) ? profile.confidence_factors : [];
+  const contextReferences = Array.isArray(profile.context_references)
+    ? profile.context_references
+    : [];
   const entities = profile.entities && typeof profile.entities === "object" && !Array.isArray(profile.entities)
     ? profile.entities
     : {};
@@ -2095,7 +2211,21 @@ const renderRoutingDecision = (eventData) => {
         ? `<div class="decision-tags">${intentNodes.map((item) => `<span title="${escapeHtml(item.text_span || "")}">${escapeHtml(item.name || "-")} · ${Math.round((item.confidence || 0) * 100)}%</span>`).join("")}</div>`
         : subIntents.length
           ? `<div class="decision-tags">${subIntents.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}</div>`
-        : '<div class="decision-empty">暂无子意图；当前结果可能是旧任务记录，或该输入被识别为单意图。</div>'}
+          : '<div class="decision-empty">暂无子意图；当前结果可能是旧任务记录，或该输入被识别为单意图。</div>'}
+    </div>`;
+  const requestContextHtml = `<div class="decision-profile-item decision-profile-wide">
+      <small>本轮请求与上下文</small>
+      <div class="decision-subtask-list">
+        <div class="decision-subtask">
+          <span>${escapeHtml(profile.resolved_request || profile.business_goal || "-")}</span>
+          <em>本轮解析请求</em>
+        </div>
+        ${contextReferences.map((item) => `
+          <div class="decision-subtask">
+            <span>${escapeHtml(item.key || "-")}：${escapeHtml(formatEntityValue(item.value))}</span>
+            <em>${escapeHtml(item.kind || "context")} · 来源：${escapeHtml(item.source || "conversation")}</em>
+          </div>`).join("")}
+      </div>
     </div>`;
   const segmentsHtml = `<div class="decision-profile-item decision-profile-wide">
       <small>任务边界 / 文本片段</small>
@@ -2189,7 +2319,7 @@ const renderRoutingDecision = (eventData) => {
       label: "意图详情",
       count: intentNodes.length || subIntents.length,
       title: "意图详情",
-      html: subIntentsHtml + segmentsHtml,
+      html: requestContextHtml + subIntentsHtml + segmentsHtml,
       hidden: !(intentNodes.length || subIntents.length || segments.length),
     },
     {
@@ -2432,14 +2562,31 @@ const applyPlannerStepsFromBuffer = (buffer, options = {}) => {
   const steps = normalizePlanSteps(parsed);
   if (!steps.length) {
     if (finalize) {
+      // The final planner message is the validated backend result. Clear any
+      // draft steps collected from planner_delta so an invalid streamed draft
+      // cannot be confirmed for execution.
+      planSteps = [];
+      plannerOnlyStepsUpdated = false;
+      renderPlanSummary(planSteps);
+      renderPlanEditor();
+      updateConfirmExecuteState();
+      const validationErrors = Array.isArray(parsed?.validation_errors)
+        ? parsed.validation_errors.filter(Boolean)
+        : [];
       const emptyStepsMessage = "Planner returned valid JSON, but no executable steps were generated.";
       const invalidJsonMessage = "Planner output is not valid JSON steps.";
-      showPlanHint(parsed ? emptyStepsMessage : invalidJsonMessage, true);
+      const validationMessage = validationErrors.length
+        ? `Plan validation failed: ${validationErrors.join("; ")}`
+        : (parsed ? emptyStepsMessage : invalidJsonMessage);
+      showPlanHint(validationMessage, true);
+      showPlanValidationHint(validationMessage, true);
       if (plannerOnlyMode) {
         showPlanNlHint(
-          parsed
-            ? "Planner completed, but the steps list is empty. Please refine the instruction and try again."
-            : "Unable to parse planner output. Please refine the instruction and try again.",
+          validationErrors.length
+            ? validationMessage
+            : parsed
+              ? "Planner completed, but the steps list is empty. Please refine the instruction and try again."
+              : "Unable to parse planner output. Please refine the instruction and try again.",
           true
         );
       }
@@ -2563,7 +2710,28 @@ const handleEvent = (eventName, payload) => {
   }
   if (eventName === "routing_decision") {
     latestRoutingDecision = payload.data || {};
+    const profile = latestRoutingDecision.task_profile || {};
+    mergeConversationContextEntities(profile.entities || {});
+    currentRequestEntities = profile.entities && typeof profile.entities === "object"
+      ? { ...profile.entities }
+      : {};
+    currentResolvedRequest = profile.resolved_request
+      || profile.business_goal
+      || currentRequestQuery;
+    currentContextReferences = Array.isArray(profile.context_references)
+      ? profile.context_references.map((item) => ({ ...item }))
+      : [];
+    const routeDecision = String(
+      latestRoutingDecision.routing_decision?.decision || ""
+    ).toUpperCase();
+    if (routeDecision === "DISPATCH") {
+      clarificationPending = false;
+      pendingClarificationContext = null;
+    } else {
+      rememberPendingClarification(latestRoutingDecision);
+    }
     renderRoutingDecision(payload.data || {});
+    saveActiveConversation();
     return;
   }
   if (eventName === "start_of_agent") {
@@ -2610,6 +2778,7 @@ const handleEvent = (eventName, payload) => {
       const question = parseClarification(response);
       if (question) {
         clarificationPending = true;
+        rememberPendingClarification(latestRoutingDecision, question);
         coordinatorResponseHandled = true;
         showAssistantText(question);
         appendActiveConversationMessage("assistant", question);
@@ -2681,29 +2850,47 @@ const handleEvent = (eventName, payload) => {
     const d = payload.data || {};
     const friendlyReason = d.reason || d.error || "Workflow could not continue.";
     const detail = d.error || friendlyReason;
+    const reasonCode = String(d.reason_code || "");
+    const errorPresentation = {
+      PLAN_STEPS_UNAVAILABLE: {
+        hint: "The confirmed plan could not be loaded by the execution service.",
+        action: "Regenerate the plan once. If this repeats, check workflow plan persistence.",
+      },
+      EXECUTION_AGENTS_UNAVAILABLE: {
+        hint: "The plan references an Agent that is not currently available.",
+        action: "Check remote Agent registration and health, then retry execution.",
+      },
+      WORKFLOW_PREPARATION_FAILED: {
+        hint: "The execution service could not prepare the confirmed plan.",
+        action: "Review the reason below before retrying.",
+      },
+    }[reasonCode] || {
+      hint: friendlyReason,
+      action: "Review the reason below before retrying.",
+    };
 
     if (currentRunContext === "executing") {
       errorStepCard(
         `<strong>Workflow paused</strong><br>` +
         `<div style="margin-top:8px;font-size:13px;color:var(--muted)">` +
-        `<div style="color:var(--warning)"><strong>Hint:</strong> The current plan left no executable steps. This can happen after permission checks or agent filtering.</div>` +
+        `<div style="color:var(--warning)"><strong>Hint:</strong> ${escapeHtml(errorPresentation.hint)}</div>` +
         `<div style="margin-top:6px;color:var(--danger)"><strong>Reason:</strong> ${escapeHtml(detail)}</div>` +
-        `<div style="margin-top:6px">Try switching the user role, adjusting available agents, or regenerating the plan.</div>` +
+        `<div style="margin-top:6px">${escapeHtml(errorPresentation.action)}</div>` +
         `</div>`
       );
     } else {
       appendOutput(
         "system",
-        `\n[workflow_error] ${friendlyReason} | No executable steps remain. Check the plan and permission filtering.\n`
+        `\n[workflow_error] ${friendlyReason} | ${detail}\n`
       );
     }
 
-    showSummaryHint("Workflow paused: no executable steps.", true);
+    showSummaryHint(`Workflow paused: ${friendlyReason}.`, true);
     setStatus("Workflow Blocked", false);
     if (currentRunContext === "executing") {
-      showPlanValidationHint("The current plan has no executable steps, so the workflow is paused.", true);
+      showPlanValidationHint(`Execution paused: ${detail}`, true);
     } else {
-      showPlanNlHint("The current plan has no executable steps, so the workflow is paused.", true);
+      showPlanNlHint(`Workflow paused: ${detail}`, true);
     }
     return;
   }
@@ -2720,6 +2907,7 @@ const handleEvent = (eventName, payload) => {
       const question = buildRoutingClarification(latestRoutingDecision);
       if (question) {
         clarificationPending = true;
+        rememberPendingClarification(latestRoutingDecision, question);
         showAssistantText(question);
         appendActiveConversationMessage("assistant", question);
         showSummaryHint("Waiting for your reply.");
@@ -2825,8 +3013,21 @@ const runWorkflow = async () => {
     setStatus("Message required", false);
     return;
   }
-
   if (activeConversationUserId !== userId) resetActiveConversation(userId);
+  const isClarificationAnswer = Boolean(
+    clarificationPending && pendingClarificationContext
+  );
+  const clarificationContextForRequest = isClarificationAnswer
+    ? { ...pendingClarificationContext }
+    : null;
+  const clarificationWorkflowId = isClarificationAnswer
+    ? (
+      pendingClarificationContext?.workflow_id
+      || workflowIdInput?.value.trim()
+      || null
+    )
+    : null;
+
   activeConversationUserId = userId;
   appendActiveConversationMessage("user", message);
   showCurrentChatTurn(message);
@@ -2843,10 +3044,22 @@ const runWorkflow = async () => {
   coordinatorResponseHandled = false;
   latestRoutingDecision = null;
   instructionHistory = [...instructionHistory, message].slice(-CHAT_HISTORY_LIMIT);
-  originalUserQuery = originalUserQuery || message;
+  if (!isClarificationAnswer) {
+    currentRequestQuery = message;
+    currentResolvedRequest = message;
+    currentRequestEntities = {};
+    currentContextReferences = [];
+  }
+  originalUserQuery = isClarificationAnswer
+    ? (
+      clarificationContextForRequest?.resolved_message
+      || clarificationContextForRequest?.base_query
+      || currentRequestQuery
+    )
+    : message;
   currentRunContext = "planning";
   currentRunHasError = false;
-  if (workflowIdInput) {
+  if (workflowIdInput && !isClarificationAnswer) {
     workflowIdInput.value = "";
   }
   runBtn.disabled = true;
@@ -2863,12 +3076,16 @@ const runWorkflow = async () => {
     instruction: message,
     instruction_history: instructionHistory,
     original_user_query: originalUserQuery,
+    turn_type: isClarificationAnswer ? "clarification_answer" : "request",
+    clarification_context: clarificationContextForRequest || {},
+    context_entities: { ...conversationContextEntities },
+    context_artifacts: conversationContextArtifacts.map((item) => ({ ...item })),
     messages: activeConversationMessages.map((item) => ({ ...item })),
     debug: debugInput.checked,
     deep_thinking_mode: deepThinkingInput.checked,
     search_before_planning: searchBeforeInput.checked,
     coor_agents: selectedCoorAgents.size ? Array.from(selectedCoorAgents) : null,
-    workflow_id: null,
+    workflow_id: clarificationWorkflowId,
     session_id: activeConversationId,
     memory_session_id: activeConversationId,
   };
@@ -2919,6 +3136,8 @@ const runWorkflow = async () => {
     userIdInput.disabled = false;
     if (newConversationBtn) newConversationBtn.disabled = false;
     if (planReady) {
+      pendingClarificationContext = null;
+      clarificationPending = false;
       showPlanHint("Planning completed. Waiting for confirmation.");
       showPlanValidationHint("Plan ready. Choose Confirm execution or Modify plan.");
       setStatus("Plan ready", true);
@@ -2975,7 +3194,16 @@ const runExecution = async () => {
     stop_after_planner: false,
     instruction: null,
     instruction_history: instructionHistory,
-    original_user_query: originalUserQuery || instructionHistory[0] || "",
+    original_user_query: currentResolvedRequest
+      || currentRequestQuery
+      || originalUserQuery
+      || instructionHistory.at(-1)
+      || "",
+    resolved_request: currentResolvedRequest || currentRequestQuery || "",
+    current_request_entities: { ...currentRequestEntities },
+    context_references: currentContextReferences.map((item) => ({ ...item })),
+    context_entities: { ...conversationContextEntities },
+    context_artifacts: conversationContextArtifacts.map((item) => ({ ...item })),
     messages: [
       ...activeConversationMessages.map((item) => ({ ...item })),
       { role: "user", content: "Execute the confirmed plan." },
@@ -4094,10 +4322,16 @@ const getWorkflowDate = (workflow) => {
     ? workflow.user_input_messages
     : [];
   const withTimestamp = messages.find((msg) => msg && msg.timestamp);
-  const timestamp = withTimestamp ? String(withTimestamp.timestamp) : "";
+  const timestamp = withTimestamp
+    ? String(withTimestamp.timestamp)
+    : String(workflow.updated_at || workflow.created_at || "");
   if (!timestamp) return "";
-  if (timestamp.includes("T")) {
-    return timestamp.split("T")[0];
+  const parsed = new Date(timestamp);
+  if (!Number.isNaN(parsed.getTime())) {
+    const year = parsed.getFullYear();
+    const month = String(parsed.getMonth() + 1).padStart(2, "0");
+    const day = String(parsed.getDate()).padStart(2, "0");
+    return `${year}-${month}-${day}`;
   }
   return timestamp.slice(0, 10);
 };
@@ -4110,6 +4344,14 @@ const getWorkflowTimestamp = (workflow) => {
   messages.forEach((msg) => {
     if (!msg || !msg.timestamp) return;
     const ts = Date.parse(String(msg.timestamp));
+    if (Number.isNaN(ts)) return;
+    if (latest === null || ts > latest) {
+      latest = ts;
+    }
+  });
+  [workflow.updated_at, workflow.created_at].forEach((value) => {
+    if (!value) return;
+    const ts = Date.parse(String(value));
     if (Number.isNaN(ts)) return;
     if (latest === null || ts > latest) {
       latest = ts;
