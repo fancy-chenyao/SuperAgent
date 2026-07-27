@@ -91,6 +91,143 @@ def _merge_entities(rule_entities: dict[str, Any], semantic_entities: dict[str, 
     return result
 
 
+def _apply_entity_overrides(
+    entities: dict[str, Any],
+    overrides: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """应用已校验的澄清/上下文实体；这些值比模型再次猜测更可靠。"""
+    result = dict(entities)
+    allowed = {
+        "people",
+        "employee_name",
+        "employee_id",
+        "recipient",
+        "location",
+        "time",
+        "count",
+        "document_type",
+        "business_object",
+        "communication.content",
+    }
+    for key, value in (overrides or {}).items():
+        if key not in allowed or value in (None, "", []):
+            continue
+        result[key] = value
+    employee_name = str(result.get("employee_name") or "").strip()
+    if employee_name:
+        people = result.get("people")
+        if not isinstance(people, list):
+            people = [people] if people else []
+        result["people"] = _unique([employee_name] + [
+            str(item) for item in people if item
+        ])
+    return result
+
+
+def _validated_semantic_context_references(
+    references: list[dict[str, Any]],
+    conversation_context: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    """只接受能在服务端上下文候选中找到来源的模型引用。"""
+    context = conversation_context if isinstance(conversation_context, dict) else {}
+    entity_candidates = (
+        context.get("entities")
+        if isinstance(context.get("entities"), dict)
+        else {}
+    )
+    artifact_candidates = [
+        item
+        for item in context.get("artifacts") or []
+        if isinstance(item, dict)
+    ]
+    artifact_keys = {
+        str(value)
+        for item in artifact_candidates
+        for value in (
+            item.get("artifact_id"),
+            item.get("id"),
+            item.get("title"),
+        )
+        if value not in (None, "")
+    }
+    validated: list[dict[str, Any]] = []
+    for item in references:
+        if not isinstance(item, dict):
+            continue
+        kind = str(item.get("kind") or "")
+        key = str(item.get("key") or "")
+        value = item.get("value")
+        if kind == "entity":
+            candidate = entity_candidates.get(key)
+            if candidate in (None, "", []):
+                continue
+            candidate_values = (
+                [str(entry) for entry in candidate]
+                if isinstance(candidate, list)
+                else [str(candidate)]
+            )
+            if str(value) not in candidate_values and str(value) != str(candidate):
+                continue
+        elif kind == "artifact":
+            serialized = str(value)
+            if key not in artifact_keys and not any(
+                artifact_key in serialized for artifact_key in artifact_keys
+            ):
+                continue
+        else:
+            continue
+        validated.append(dict(item))
+    return validated
+
+
+def _remove_unreferenced_context_entities(
+    entities: dict[str, Any],
+    conversation_context: dict[str, Any] | None,
+    references: list[dict[str, Any]],
+    user_query: str,
+) -> dict[str, Any]:
+    """防止模型在没有声明引用时把旧实体带入一个无关的新问题。"""
+    result = dict(entities)
+    context = conversation_context if isinstance(conversation_context, dict) else {}
+    candidates = (
+        context.get("entities")
+        if isinstance(context.get("entities"), dict)
+        else {}
+    )
+    referenced_keys = {
+        str(item.get("key") or "")
+        for item in references
+        if str(item.get("kind") or "") == "entity"
+    }
+    for key, candidate in candidates.items():
+        if key in referenced_keys or key not in result:
+            continue
+        values = candidate if isinstance(candidate, list) else [candidate]
+        inherited_values = [
+            str(value).strip()
+            for value in values
+            if str(value or "").strip()
+        ]
+        if not inherited_values:
+            continue
+        if any(value in user_query for value in inherited_values):
+            continue
+        current_value = result.get(key)
+        if isinstance(current_value, list):
+            remaining = [
+                value
+                for value in current_value
+                if str(value) not in inherited_values
+            ]
+            if remaining:
+                result[key] = remaining
+            else:
+                result.pop(key, None)
+        elif str(current_value) in inherited_values:
+            result.pop(key, None)
+    return result
+
+
 def _candidate(
     name: str,
     *,
@@ -503,26 +640,50 @@ async def profile_task(
     metadata: dict[str, Any] | None = None,
     recognition_mode: str | None = None,
     semantic_provider: SemanticIntentProvider | None = None,
+    entity_overrides: dict[str, Any] | None = None,
+    context_references: list[dict[str, Any]] | None = None,
+    context_artifacts: list[dict[str, Any]] | None = None,
+    conversation_context: dict[str, Any] | None = None,
+    raw_request: str | None = None,
 ) -> TaskProfile:
     """通过规则、语义或混合识别生成向后兼容的结构化任务画像。"""
     metadata = metadata or {}
-    segments = segment_query(user_query)
     recognizer = HybridIntentRecognizer(
         mode=recognition_mode,
         semantic_provider=semantic_provider,
+        conversation_context=conversation_context,
     )
     recognition = await recognizer.recognize(user_query)
+    recognition.context_references = _validated_semantic_context_references(
+        recognition.context_references,
+        conversation_context,
+    )
+    recognition.entities = _remove_unreferenced_context_entities(
+        recognition.entities,
+        conversation_context,
+        recognition.context_references,
+        user_query,
+    )
+    # 只有模型同时给出可追溯的上下文引用时，才采用其消解文本；
+    # 普通新问题始终以用户本轮原文为任务边界。
+    resolved_query = str(
+        recognition.resolved_request
+        if recognition.context_references and recognition.resolved_request
+        else user_query
+    ).strip()
+    segments = segment_query(resolved_query)
     if recognition.mode in {"hybrid", "semantic"} and not recognition.degraded:
         # 语义模型负责开放语境中的实体分类；不要在这里再次把规则误判覆盖回来。
         entities = _merge_entities({}, recognition.entities)
     else:
         entities = _merge_entities(extract_entities(user_query), recognition.entities)
+    entities = _apply_entity_overrides(entities, entity_overrides)
     recognition.entities = entities
     recognition = _enrich_inferred_dependencies(recognition, entities)
     recognition = _annotate_rule_conditions(user_query, recognition)
     executable = [item for item in recognition.intents if not item.negated]
 
-    subtasks = _build_subtasks(executable, user_query, segments, entities)
+    subtasks = _build_subtasks(executable, resolved_query, segments, entities)
     intent_nodes = _build_intent_nodes(recognition.intents, segments)
     legacy_intent = executable[0].name if executable else "general_assistance"
     sub_intents = [item.name for item in executable]
@@ -540,9 +701,9 @@ async def profile_task(
         tags.extend(definition.get("tags") or [])
         scopes.extend(definition.get("scope") or [])
 
-    action, irreversible = _overall_action(executable, user_query)
+    action, irreversible = _overall_action(executable, resolved_query)
     clarification = ClarificationAnalyzer().analyze(
-        user_query=user_query,
+        user_query=resolved_query,
         recognition=recognition,
         entities=entities,
         subtasks=subtasks,
@@ -566,12 +727,43 @@ async def profile_task(
     recognition_payload["needs_clarification"] = needs_clarification
     recognition_payload["clarification_questions"] = clarification_questions
     recognition_payload["clarification_analysis"] = clarification.model_dump()
+    merged_context_references: list[dict[str, Any]] = []
+    seen_context_references: set[tuple[str, str, str]] = set()
+    for item in list(context_references or []) + list(recognition.context_references):
+        if not isinstance(item, dict):
+            continue
+        key = (
+            str(item.get("kind") or ""),
+            str(item.get("key") or ""),
+            str(item.get("mention") or ""),
+        )
+        if key in seen_context_references:
+            continue
+        seen_context_references.add(key)
+        merged_context_references.append(dict(item))
+
+    referenced_artifact_text = " ".join(
+        str(item)
+        for item in merged_context_references
+        if str(item.get("kind") or "") == "artifact"
+    )
+    selected_context_artifacts = [
+        dict(item)
+        for item in (context_artifacts or [])
+        if isinstance(item, dict)
+        and str(
+            item.get("artifact_id")
+            or item.get("id")
+            or item.get("title")
+            or ""
+        ) in referenced_artifact_text
+    ]
 
     return TaskProfile(
         task_id=task_id,
         intent=legacy_intent,
         task_type=task_type,
-        business_goal=user_query,
+        business_goal=resolved_query,
         action=action,
         entities=entities,
         data_scope=_unique(scopes) or ["general"],
@@ -603,4 +795,8 @@ async def profile_task(
         recognition_mode=recognition.mode,
         recognition_degraded=recognition.degraded,
         recognition=recognition_payload,
+        raw_request=str(raw_request or user_query),
+        resolved_request=resolved_query,
+        context_references=merged_context_references,
+        context_artifacts=selected_context_artifacts,
     )

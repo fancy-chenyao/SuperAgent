@@ -1,6 +1,7 @@
 from typing import Dict, List, AsyncGenerator, Optional
 from dotenv import load_dotenv
 import json
+from datetime import datetime, timezone
 from pydantic import BaseModel
 
 load_dotenv()
@@ -18,6 +19,7 @@ from src.manager.registry import ToolRegistry
 from src.memory import get_memory_manager
 from src.service.env import MEMORY_ENABLED
 from src.memory.utils import redact_secrets
+from src.orchestrator.context_resolver import resolve_conversation_request
 
 
 logger = logging.getLogger(__name__)
@@ -58,6 +60,78 @@ class Server:
             }
             for message in request.messages
         ]
+        latest_user_message = next(
+            (
+                str(item["content"])
+                for item in reversed(incoming_messages)
+                if str(item.get("role") or "").lower() == "user"
+                and str(item.get("content") or "").strip()
+            ),
+            "",
+        )
+        if request.workmode == "production":
+            resolved_request = resolve_conversation_request(
+                current_message=(
+                    request.resolved_request
+                    or request.original_user_query
+                    or request.instruction
+                    or latest_user_message
+                ),
+                context_entities=(
+                    request.current_request_entities
+                    or request.context_entities
+                ),
+                context_artifacts=request.context_artifacts,
+            )
+        else:
+            resolved_request = resolve_conversation_request(
+                current_message=request.instruction or latest_user_message,
+                turn_type=request.turn_type,
+                clarification_context=request.clarification_context,
+                context_entities=request.context_entities,
+                context_artifacts=request.context_artifacts,
+            )
+        if request.resolved_request:
+            resolved_request.resolved_message = str(request.resolved_request).strip()
+        if request.current_request_entities:
+            resolved_request.entity_overrides = {
+                **resolved_request.entity_overrides,
+                **dict(request.current_request_entities),
+            }
+        if request.context_references:
+            from src.contracts import ContextReference
+            request_context_references = [
+                ContextReference.model_validate(item)
+                for item in request.context_references
+                if isinstance(item, dict)
+            ]
+            existing_reference_keys = {
+                (
+                    item.kind,
+                    item.key,
+                    json.dumps(
+                        item.value,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        default=str,
+                    ),
+                )
+                for item in resolved_request.context_references
+            }
+            resolved_request.context_references.extend(
+                item
+                for item in request_context_references
+                if (
+                    item.kind,
+                    item.key,
+                    json.dumps(
+                        item.value,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        default=str,
+                    ),
+                ) not in existing_reference_keys
+            )
         memory_manager = None
         memory_metadata = {}
         memory_session_id = ""
@@ -78,7 +152,7 @@ class Server:
                 session_id=request.memory_session_id or request.session_id,
                 workflow_id=request.workflow_id,
                 request_enabled=request.memory_enabled,
-                retrieval_query=request.original_user_query,
+                retrieval_query=resolved_request.resolved_message,
                 attachments={
                     "current_plan": current_plan,
                     "extra": {"workflow_id": request.workflow_id},
@@ -114,6 +188,18 @@ class Server:
             memory_session_id=memory_session_id,
             memory_context=memory_metadata,
             skill_reuse_enabled=request.skill_reuse_enabled,
+            current_request=resolved_request.resolved_message,
+            raw_request=resolved_request.raw_message,
+            entity_overrides=resolved_request.entity_overrides,
+            context_references=[
+                item.model_dump()
+                for item in resolved_request.context_references
+            ],
+            context_artifacts=resolved_request.artifact_inputs,
+            conversation_context={
+                "entities": dict(request.context_entities or {}),
+                "artifacts": list(resolved_request.artifact_inputs),
+            },
             request_input_messages=[
                 {"role": item["role"], "content": redact_secrets(item["content"])}
                 for item in incoming_messages
@@ -302,13 +388,32 @@ class Server:
             workflows.extend(default_workflows)
             workflowJsons = []
             for workflow in workflows:
+                updated_at = workflow.get("updated_at")
+                created_at = workflow.get("created_at")
+                if not updated_at:
+                    try:
+                        workflow_user_id, polish_id = str(
+                            workflow["workflow_id"]).split(":", 1)
+                        workflow_path = (
+                            workflow_cache.workflow_dir
+                            / workflow_user_id
+                            / f"{polish_id}.json"
+                        )
+                        updated_at = datetime.fromtimestamp(
+                            workflow_path.stat().st_mtime,
+                            tz=timezone.utc,
+                        ).isoformat()
+                    except (KeyError, OSError, ValueError):
+                        updated_at = None
                 workflowJsons.append({
                     "workflow_id": workflow["workflow_id"],
                     "version": workflow["version"],
                     "lap": workflow["lap"],
                     "user_input_messages": workflow["user_input_messages"],
                     "deep_thinking_mode": workflow["deep_thinking_mode"],
-                    "search_before_planning": workflow["search_before_planning"]
+                    "search_before_planning": workflow["search_before_planning"],
+                    "created_at": created_at,
+                    "updated_at": updated_at,
                 })
             return [workflowJson for workflowJson in workflowJsons]
         except Exception as e:

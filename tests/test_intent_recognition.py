@@ -110,6 +110,68 @@ def test_invalid_semantic_schema_degrades_to_rule() -> None:
     assert result.primary_intent == "employee_information_query"
 
 
+def test_semantic_context_resolution_keeps_only_current_task_boundary() -> None:
+    payload = _payload(
+        "document_generation",
+        [_candidate("document_generation", 0.93, text_span="帮她写一份请假书")],
+        entities={"employee_name": "李娜", "people": ["李娜"]},
+    )
+    payload.update({
+        "resolved_request": "帮李娜写一份请假书",
+        "context_references": [{
+            "kind": "entity",
+            "key": "employee_name",
+            "value": "李娜",
+            "mention": "她",
+            "source": "conversation_context",
+        }],
+    })
+    profile = _run(profile_task(
+        "帮她写一份请假书",
+        task_id="context-reference",
+        recognition_mode="hybrid",
+        semantic_provider=FakeSemanticProvider(payload),
+        conversation_context={
+            "entities": {"employee_name": "李娜", "people": ["李娜"]},
+            "artifacts": [],
+        },
+    ))
+
+    assert profile.resolved_request == "帮李娜写一份请假书"
+    assert [item["text"] for item in profile.segments] == ["帮李娜写一份请假书"]
+    assert profile.entities["employee_name"] == "李娜"
+    assert len(profile.context_references) == 1
+
+
+def test_unreferenced_old_entity_is_removed_from_unrelated_new_request() -> None:
+    payload = _payload(
+        "weather_query",
+        [_candidate("weather_query", 0.96, text_span="查询北京明天天气")],
+        entities={
+            "location": "北京",
+            "time": "明天",
+            "employee_name": "李娜",
+            "people": ["李娜"],
+        },
+    )
+    payload["resolved_request"] = "搜索李娜的信息，查询北京明天天气"
+    profile = _run(profile_task(
+        "查询北京明天天气",
+        task_id="unrelated-new-request",
+        recognition_mode="hybrid",
+        semantic_provider=FakeSemanticProvider(payload),
+        conversation_context={
+            "entities": {"employee_name": "李娜", "people": ["李娜"]},
+            "artifacts": [],
+        },
+    ))
+
+    assert profile.resolved_request == "查询北京明天天气"
+    assert [item["text"] for item in profile.segments] == ["查询北京明天天气"]
+    assert "employee_name" not in profile.entities
+    assert "people" not in profile.entities
+
+
 def test_unknown_semantic_label_degrades_to_rule() -> None:
     provider = FakeSemanticProvider(_payload("invented_intent", [_candidate("invented_intent", 0.99)]))
     result = _run(HybridIntentRecognizer(mode="hybrid", semantic_provider=provider).recognize("查询李娜的基本信息"))

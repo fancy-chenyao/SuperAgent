@@ -1,4 +1,6 @@
 import logging
+import hashlib
+import json
 import time
 from typing import Any, Dict, List, Optional
 
@@ -11,6 +13,9 @@ logger.setLevel(logging.WARNING)
 
 class LocalExecutor(AgentExecutor):
     """Executor for local agents using LangGraph react-agent runtime."""
+
+    _RESEARCH_TOOL_CALL_BUDGET = 6
+    _REPEATED_TOOL_CALL_LIMIT = 2
 
     def __init__(self):
         super().__init__()
@@ -77,6 +82,132 @@ class LocalExecutor(AgentExecutor):
 
         return resolved
 
+    @staticmethod
+    def _uses_research_tool_loop(tools: List[Any]) -> bool:
+        """研究型搜索工具需要受控循环，避免搜索/抓取失败后无限重试。"""
+        names = {
+            str(getattr(tool, "name", "") or "").strip()
+            for tool in tools
+        }
+        return "tavily_tool" in names
+
+    @staticmethod
+    def _tool_call_signatures(messages: List[Any]) -> Dict[str, str]:
+        """建立 tool_call_id -> 稳定调用签名，供重复调用检测使用。"""
+        signatures: Dict[str, str] = {}
+        for message in messages:
+            for call in getattr(message, "tool_calls", []) or []:
+                if not isinstance(call, dict):
+                    continue
+                call_id = str(call.get("id") or "")
+                if not call_id:
+                    continue
+                payload = {
+                    "name": str(call.get("name") or ""),
+                    "args": call.get("args") or {},
+                }
+                signatures[call_id] = json.dumps(
+                    payload, ensure_ascii=False, sort_keys=True, default=str
+                )
+        return signatures
+
+    async def _invoke_bounded_research_agent(
+        self,
+        *,
+        react_agent: Any,
+        llm: Any,
+        prompt: str,
+        state: Dict[str, Any],
+        config: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """执行有边界的研究工具循环，并基于已获取材料强制收敛为答案。"""
+        from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
+
+        latest_state: Dict[str, Any] = state
+        observed_tool_messages: set[str] = set()
+        repeated_result_counts: Dict[str, int] = {}
+        stop_reason = ""
+
+        async for snapshot in react_agent.astream(
+            state, config=config, stream_mode="values"
+        ):
+            if isinstance(snapshot, dict):
+                latest_state = snapshot
+            messages = list(latest_state.get("messages") or [])
+            call_signatures = self._tool_call_signatures(messages)
+
+            for message in messages:
+                if not isinstance(message, ToolMessage):
+                    continue
+                message_key = str(
+                    getattr(message, "tool_call_id", "")
+                    or getattr(message, "id", "")
+                    or id(message)
+                )
+                if message_key in observed_tool_messages:
+                    continue
+                observed_tool_messages.add(message_key)
+                signature = call_signatures.get(
+                    str(getattr(message, "tool_call_id", "") or "")
+                )
+                if signature:
+                    result_payload = json.dumps(
+                        getattr(message, "content", ""),
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        default=str,
+                    )
+                    result_digest = hashlib.sha256(
+                        result_payload.encode("utf-8")
+                    ).hexdigest()
+                    progress_key = f"{signature}:{result_digest}"
+                    repeated_result_counts[progress_key] = (
+                        repeated_result_counts.get(progress_key, 0) + 1
+                    )
+
+            if len(observed_tool_messages) >= self._RESEARCH_TOOL_CALL_BUDGET:
+                stop_reason = (
+                    f"已达到研究工具调用预算 "
+                    f"{self._RESEARCH_TOOL_CALL_BUDGET} 次"
+                )
+            elif any(
+                count >= self._REPEATED_TOOL_CALL_LIMIT
+                for count in repeated_result_counts.values()
+            ):
+                stop_reason = (
+                    "检测到相同研究工具、参数和返回内容重复，未产生新信息"
+                )
+
+            # 只在 ToolMessage 已经返回后停止，保证每个 assistant tool_call
+            # 都有对应 tool result，避免最终模型调用出现消息协议错误。
+            if stop_reason and messages and isinstance(messages[-1], ToolMessage):
+                break
+
+        messages = list(latest_state.get("messages") or [])
+        if not stop_reason:
+            return latest_state
+
+        logger.warning(
+            "Research tool loop stopped safely: %s; tool_results=%s",
+            stop_reason,
+            len(observed_tool_messages),
+        )
+        final_instruction = HumanMessage(
+            content=(
+                f"研究工具调用阶段已结束：{stop_reason}。"
+                "不要再调用任何工具。请仅依据上方已经获得的搜索与抓取结果，"
+                "直接生成最终中文答复；若材料不足，明确说明未核实或缺失的部分，"
+                "不要编造内容。"
+            )
+        )
+        final_messages = [
+            SystemMessage(content=prompt),
+            *messages,
+            final_instruction,
+        ]
+        final_response = await llm.ainvoke(final_messages)
+        return {"messages": [*messages, final_response]}
+
     async def execute(
         self,
         agent: Any,
@@ -118,7 +249,16 @@ class LocalExecutor(AgentExecutor):
                 "recursion_limit": int(MAX_STEPS),
             }
             state = {"messages": messages}
-            response = await react_agent.ainvoke(state, config=config)
+            if self._uses_research_tool_loop(secure_tools):
+                response = await self._invoke_bounded_research_agent(
+                    react_agent=react_agent,
+                    llm=llm,
+                    prompt=prompt,
+                    state=state,
+                    config=config,
+                )
+            else:
+                response = await react_agent.ainvoke(state, config=config)
 
             duration = time.time() - start_time
             result_messages = response.get("messages", [])
@@ -190,7 +330,16 @@ class LocalExecutor(AgentExecutor):
             }
 
             state = {"messages": messages}
-            response = await react_agent.ainvoke(state, config=config)
+            if self._uses_research_tool_loop(secure_tools):
+                response = await self._invoke_bounded_research_agent(
+                    react_agent=react_agent,
+                    llm=llm,
+                    prompt=prompt,
+                    state=state,
+                    config=config,
+                )
+            else:
+                response = await react_agent.ainvoke(state, config=config)
 
             duration = time.time() - start_time
             result_messages = response.get("messages", [])

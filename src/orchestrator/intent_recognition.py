@@ -51,6 +51,8 @@ class IntentRecognitionResult(BaseModel):
     mode: Literal["rule", "semantic", "hybrid"] = "rule"
     degraded: bool = False
     degradation_reason: str | None = None
+    resolved_request: str | None = None
+    context_references: list[dict[str, Any]] = Field(default_factory=list)
 
     @property
     def executable_intents(self) -> list[IntentCandidate]:
@@ -71,6 +73,16 @@ class SemanticEntities(BaseModel):
     business_object: str | None = None
 
 
+class SemanticContextReference(BaseModel):
+    """语义模型确认当前请求实际使用的上下文项。"""
+
+    kind: Literal["entity", "artifact"]
+    key: str
+    value: Any
+    mention: str
+    source: Literal["conversation_context"] = "conversation_context"
+
+
 class SemanticIntentPayload(BaseModel):
     primary_intent: str = Field(
         default="general_assistance",
@@ -81,6 +93,8 @@ class SemanticIntentPayload(BaseModel):
     ambiguities: list[str] = Field(default_factory=list)
     needs_clarification: bool = False
     clarification_questions: list[str] = Field(default_factory=list)
+    resolved_request: str | None = None
+    context_references: list[SemanticContextReference] = Field(default_factory=list)
 
     @field_validator("primary_intent")
     @classmethod
@@ -112,10 +126,32 @@ def _query_fingerprint(text: str) -> str:
 class LLMSemanticIntentProvider:
     """复用项目 Basic LLM，并强制 Pydantic 结构化输出。"""
 
-    def __init__(self, *, timeout_seconds: float | None = None) -> None:
-        from src.service.env import INTENT_SEMANTIC_TIMEOUT_SECONDS
+    def __init__(
+        self,
+        *,
+        timeout_seconds: float | None = None,
+        conversation_context: dict[str, Any] | None = None,
+    ) -> None:
+        from src.service.env import (
+            INTENT_CONTEXT_SEMANTIC_TIMEOUT_SECONDS,
+            INTENT_SEMANTIC_TIMEOUT_SECONDS,
+        )
 
-        self.timeout_seconds = timeout_seconds or INTENT_SEMANTIC_TIMEOUT_SECONDS
+        self.conversation_context = (
+            dict(conversation_context)
+            if isinstance(conversation_context, dict)
+            else {}
+        )
+        configured_timeout = timeout_seconds or INTENT_SEMANTIC_TIMEOUT_SECONDS
+        has_context_candidates = any(
+            value not in (None, "", [], {})
+            for value in self.conversation_context.values()
+        )
+        self.timeout_seconds = (
+            max(configured_timeout, INTENT_CONTEXT_SEMANTIC_TIMEOUT_SECONDS)
+            if has_context_candidates
+            else configured_timeout
+        )
 
     @staticmethod
     def is_configured() -> bool:
@@ -132,6 +168,11 @@ class LLMSemanticIntentProvider:
         schema_text = json.dumps(
             SemanticIntentPayload.model_json_schema(),
             ensure_ascii=False,
+        )
+        context_text = json.dumps(
+            self.conversation_context,
+            ensure_ascii=False,
+            default=str,
         )
         system_prompt = f"""你是任务理解组件，不负责执行任务。请从用户输入中识别用户最终目标、显式要求的动作、隐含前置动作、实体、否定关系、条件关系和缺失信息。
 
@@ -156,6 +197,17 @@ class LLMSemanticIntentProvider:
 3. 用户没有说明员工时，不得猜测 employee_name 或 employee_id；
 4. “给出提醒/建议/提示”表示期望的回答形式，不等于创建或查询日程提醒；
 5. 只有“设置提醒、创建提醒、查询日程、查看待办”等明确表达才使用 schedule_management。
+
+对话上下文处理规则：
+1. 下方“上下文候选”不是当前任务，禁止把其中的旧意图、旧动作或旧任务边界直接加入本轮；
+2. 由你根据完整语义判断当前输入是否包含指代、省略或对既有产物的引用，不得依赖固定代词表；
+3. 只有当前输入确实引用某个上下文实体或产物时，才可使用该值，并在 context_references 中记录 kind、key、value、mention，source 固定为 conversation_context；
+4. 如果引用关系唯一且明确，将指代消解后的完整本轮请求写入 resolved_request；
+5. 如果可能指向多个对象，不要猜测，保留原请求并生成 clarification_questions；
+6. 用户提出无关的新问题时，context_references 必须为空，resolved_request 必须只表达当前新问题。
+
+上下文候选（仅供指代消解，不是待执行任务）：
+{context_text or "{}"}
 
 允许的 intent name（必须逐字使用其中之一）：
 {', '.join(sorted(SUPPORTED_INTENTS))}
@@ -309,7 +361,7 @@ def extract_entities(text: str) -> dict[str, Any]:
     people: list[str] = []
     # 从动作与属格上下文中抽取姓名，不依赖固定人名表。
     patterns = (
-        r"(?:查询|查一下|查看|看看|帮|为|把|取消|生成)(?:员工)?([\u4e00-\u9fff]{2,4}?)(?=的|生成|写|开|明天|后天|本周|下周|本月|下月|日程|在职|收入|请假|休假)",
+        r"(?:查询|查一下|查看|看看|帮|为|取消|生成)(?:员工)?([\u4e00-\u9fff]{2,4}?)(?=的|生成|写|开|明天|后天|本周|下周|本月|下月|日程|在职|收入|请假|休假)",
         r"(?:安排|预约)([\u4e00-\u9fff]{2,3})(?:和|与)([\u4e00-\u9fff]{2,3})(?=明天|后天|开会|的?会议)",
         r"(?:安排)?与([\u4e00-\u9fff]{2,3})(?=的?会议)",
     )
@@ -536,6 +588,11 @@ class SemanticIntentRecognizer:
             needs_clarification=payload.needs_clarification,
             clarification_questions=payload.clarification_questions,
             mode="semantic",
+            resolved_request=payload.resolved_request,
+            context_references=[
+                item.model_dump()
+                for item in payload.context_references
+            ],
         )
 
 
@@ -751,6 +808,8 @@ class IntentFusion:
             needs_clarification=needs_clarification,
             clarification_questions=questions,
             mode="hybrid",
+            resolved_request=semantic.resolved_request,
+            context_references=semantic.context_references,
         )
 
 
@@ -760,6 +819,7 @@ class HybridIntentRecognizer:
         *,
         mode: str | None = None,
         semantic_provider: SemanticIntentProvider | None = None,
+        conversation_context: dict[str, Any] | None = None,
     ) -> None:
         from src.service.env import (
             INTENT_AGREEMENT_BONUS,
@@ -775,6 +835,7 @@ class HybridIntentRecognizer:
         self.mode = normalized_mode
         self.rule = RuleIntentRecognizer()
         self.semantic_provider = semantic_provider
+        self.conversation_context = dict(conversation_context or {})
         self.fusion = IntentFusion(
             semantic_accept_threshold=INTENT_SEMANTIC_ACCEPT_THRESHOLD,
             semantic_high_risk_threshold=INTENT_SEMANTIC_HIGH_RISK_THRESHOLD,
@@ -788,7 +849,9 @@ class HybridIntentRecognizer:
 
         provider = self.semantic_provider
         if provider is None:
-            provider = LLMSemanticIntentProvider()
+            provider = LLMSemanticIntentProvider(
+                conversation_context=self.conversation_context,
+            )
         # 规则和语义模块相互独立；混合/语义模式下并行运行，融合前互不覆盖。
         rule_task = asyncio.create_task(self.rule.recognize(user_query))
         semantic_task = asyncio.create_task(

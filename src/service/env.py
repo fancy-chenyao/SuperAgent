@@ -141,6 +141,9 @@ INTENT_CONFLICT_THRESHOLD = _parse_float("INTENT_CONFLICT_THRESHOLD", 0.75)
 INTENT_SEMANTIC_TIMEOUT_SECONDS = _parse_float(
     "INTENT_SEMANTIC_TIMEOUT_SECONDS", 20.0
 )
+INTENT_CONTEXT_SEMANTIC_TIMEOUT_SECONDS = _parse_float(
+    "INTENT_CONTEXT_SEMANTIC_TIMEOUT_SECONDS", 35.0
+)
 
 # Agent memory. The deployment-level switch is authoritative; individual
 # requests may opt out but cannot force memory on when it is globally disabled.
