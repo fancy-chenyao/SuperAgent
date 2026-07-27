@@ -839,6 +839,7 @@ async def _process_workflow(
                 if entry.get("step", 0) < resume_step and entry.get("event") != "workflow_end"
             ]
             existing_logger.status = "running"
+            existing_logger.finished_at = None
             existing_logger.error = None
             existing_logger._step_counter = {"__global__": resume_step - 1}
             task_logger = existing_logger
@@ -1295,10 +1296,9 @@ async def _process_workflow(
                     "scheduler gate: fail-closed (category=%s): %s", category, detail
                 )
                 state["workflow_execution_failed"] = True
-                task_logger.log_error(
+                task_logger.log_workflow_terminal(
+                    WorkflowStatus.FAILED,
                     error=f"scheduler gate fail-closed: {category}: {detail}",
-                    node_name="scheduler_gate",
-                    step=step_count,
                 )
                 if state.get("workflow_mode") == "production":
                     try:

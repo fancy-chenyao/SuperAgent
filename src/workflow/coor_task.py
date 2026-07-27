@@ -1284,6 +1284,27 @@ async def planner_node(state: State) -> Command[Literal["publisher", "__end__"]]
                 logger.info(
                     "[PERF] Applied fallback planner steps for obvious single-agent task")
 
+        if steps:
+            # Recover data-flow ordering the Planner drops for autonomous remote
+            # agents (the prompt tells it to leave `inputs` empty when an agent
+            # has no "Requires" field, e.g. a report/summary agent). The task
+            # profile's subtasks already carry the correct depends_on DAG, so
+            # use it as a fail-safe correction. Baking the edges into the
+            # persisted planning steps keeps the production snapshot
+            # re-derivation (which sees only planning_steps) byte-identical to
+            # the approved graph.
+            try:
+                from src.orchestration.plan_to_task_graph import (
+                    derive_step_dependencies,
+                )
+
+                subtasks = (state.get("task_profile") or {}).get("subtasks")
+                steps = derive_step_dependencies(steps, subtasks)
+            except Exception as dep_exc:  # noqa: BLE001 - never break planning
+                logger.warning(
+                    "scheduler wiring: dependency correction skipped: %s", dep_exc
+                )
+
         if steps is not None:
             cache.restore_planning_steps(
                 state["workflow_id"], steps, state["user_id"])

@@ -130,16 +130,36 @@ class MainAgentRoutingProvider:
         decision_kind = str(getattr(decision, "decision", "DISPATCH") or "DISPATCH").upper()
         selected = getattr(decision, "selected_agent", None)
         clarification: Optional[str] = None
+        reason_codes = list(getattr(decision, "reason_codes", []) or [])
         if decision_kind != "DISPATCH":
             selected = None
             questions = list(getattr(profile, "clarification_questions", []) or [])
             clarification = "; ".join(questions) if questions else None
+        else:
+            # Per-step assignment: the candidate scoring above runs against the
+            # GLOBAL ``user_query``, which is identical for every step of a
+            # multi-agent plan. Without this, each step would collapse onto the
+            # same top-scoring agent (e.g. an HR-query step and a
+            # knowledge-lookup step both routed to the knowledge agent). Honor
+            # the plan's per-step ``preferred_resource_id`` when it is among the
+            # candidate agents -- those already passed the main agent's
+            # permission / online / capability gate, so this narrows within the
+            # authorized set and never bypasses the decision.
+            preferred = getattr(step, "preferred_resource_id", None)
+            if preferred and preferred != selected:
+                candidate_ids = {
+                    getattr(c, "agent_id", None)
+                    for c in getattr(decision, "candidate_agents", []) or []
+                }
+                if preferred in candidate_ids:
+                    selected = preferred
+                    reason_codes = ["HONOR_PREFERRED_RESOURCE", *reason_codes]
         return RoutingResult(
             selected_agent=selected,
             decision=decision_kind,
             clarification=clarification,
             confidence=float(getattr(decision, "confidence", 0.0) or 0.0),
-            reason_codes=list(getattr(decision, "reason_codes", []) or []),
+            reason_codes=reason_codes,
             raw=decision,
         )
 

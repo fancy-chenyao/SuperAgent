@@ -111,6 +111,16 @@ def _sse_format(event: str, data: dict[str, Any]) -> str:
     return message
 
 
+def _finalize_disconnected_task(task_id: Optional[str], reason: str) -> None:
+    """Best-effort close a task whose SSE consumer disappeared."""
+    if not task_id:
+        return
+    task_log = TaskLogger.load(task_id)
+    if task_log is None or task_log.status != "running":
+        return
+    task_log.log_workflow_terminal("FAILED", error=reason)
+
+
 def _parse_workflow_id(workflow_id: str) -> tuple[str, str]:
     if ":" not in workflow_id:
         raise HTTPException(status_code=400, detail="workflow_id must be in 'user:polish' format")
@@ -375,14 +385,25 @@ def create_app() -> FastAPI:
         server = Server()
 
         async def event_stream() -> AsyncGenerator[str, None]:
+            active_task_id: Optional[str] = None
+            disconnected = False
             try:
                 async for event in server._run_agent_workflow(body):
+                    event_data = event.get("data") or {}
+                    active_task_id = event_data.get("task_id") or active_task_id
                     if await request.is_disconnected():
+                        disconnected = True
                         break
                     event_type = event.get("event", "message")
                     yield _sse_format(event_type, event)
             except asyncio.CancelledError:
-                return
+                disconnected = True
+            finally:
+                if disconnected:
+                    _finalize_disconnected_task(
+                        active_task_id,
+                        "client disconnected before workflow completion",
+                    )
 
         return StreamingResponse(
             event_stream(),
@@ -884,16 +905,27 @@ def create_app() -> FastAPI:
         server = Server()
 
         async def event_stream() -> AsyncGenerator[str, None]:
+            active_task_id: Optional[str] = body.task_id
+            disconnected = False
             try:
                 async for event in server._run_agent_workflow_with_resume(
                     agent_request, resume_step=body.resume_step, task_id=body.task_id
                 ):
+                    event_data = event.get("data") or {}
+                    active_task_id = event_data.get("task_id") or active_task_id
                     if await request.is_disconnected():
+                        disconnected = True
                         break
                     event_type = event.get("event", "message")
                     yield _sse_format(event_type, event)
             except asyncio.CancelledError:
-                return
+                disconnected = True
+            finally:
+                if disconnected:
+                    _finalize_disconnected_task(
+                        active_task_id,
+                        "client disconnected before resumed workflow completion",
+                    )
 
         return StreamingResponse(
             event_stream(),

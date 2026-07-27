@@ -1,4 +1,4 @@
-﻿const statusIndicator = document.getElementById("statusIndicator");
+const statusIndicator = document.getElementById("statusIndicator");
 const readinessBanner = document.getElementById("readinessBanner");
 const readinessTitle = document.getElementById("readinessTitle");
 const readinessComponents = document.getElementById("readinessComponents");
@@ -306,8 +306,11 @@ let currentAbortController = null;
 let planningOutputBlocks = new Map();
 let executionOutputBlocks = new Map();
 let executionStepCards = [];       // Step cards for execution log: {id, agentName, displayName, status, content, startTime, endTime, summary}
+let executionStepCardsByKey = new Map();
 let currentStepCard = null;        // Currently active (running) step card
 let executionStepCount = 0;        // Monotonic step counter
+let finalResultReceived = false;
+let latestFinalResultText = "";
 let activeDecisionDetailTab = null;
 let flowSteps = [];
 let activeStepIndex = -1;
@@ -356,7 +359,7 @@ let workflowsPage = 1;
 let workflowsPageSize = 5;
 let workflowsTotal = 0;
 let workflowsTotalPages = 0;
-const PLANNER_ONLY_TIMEOUT_MS = 50000;
+const PLANNER_ONLY_TIMEOUT_MS = 180000;
 const CHAT_HISTORY_LIMIT = 10;
 const CHAT_HISTORY_KEY_PREFIX = "cooragent.conversations.v2";
 const LEGACY_CHAT_HISTORY_KEY_PREFIX = "cooragent.chatHistory.v1";
@@ -585,7 +588,8 @@ const updateChatExecutionProgress = (status, detail = "") => {
   const total = Math.max(planSteps.length, executionStepCards.length, 1);
   const completed = executionStepCards.filter((card) => card.status === "done").length;
   const hasError = executionStepCards.some((card) => card.status === "error");
-  const current = status === "completed" ? total : Math.min(completed + (currentStepCard ? 1 : 0), total);
+  const running = executionStepCards.filter((card) => card.status === "running").length;
+  const current = status === "completed" ? total : Math.min(completed + running, total);
   const percentage = status === "completed" ? 100 : Math.round((completed / total) * 100);
   lifecycle.progressSection.classList.remove("hidden", "running", "completed", "error");
   lifecycle.progressSection.classList.add(hasError || status === "error" ? "error" : status);
@@ -600,8 +604,12 @@ const updateChatExecutionProgress = (status, detail = "") => {
 };
 
 const syncAnswerFromExecutionLog = () => {
-  if (!answerOutput || !executionOutput || answerSyncFrame !== null) return;
+  if (!answerOutput || !executionOutput || answerSyncFrame !== null || finalResultReceived) return;
   answerSyncFrame = requestAnimationFrame(() => {
+    if (finalResultReceived) {
+      answerSyncFrame = null;
+      return;
+    }
     const lifecycle = ensureChatLifecycle();
     if (!lifecycle || !executionOutput.childNodes.length) {
       answerSyncFrame = null;
@@ -738,6 +746,10 @@ const appendActiveConversationMessage = (role, content, metadata = {}) => {
 };
 
 const captureAssistantConversationContext = () => {
+  if (latestFinalResultText) {
+    appendActiveConversationMessage("assistant", latestFinalResultText);
+    return;
+  }
   const structuredResults = executionStepCards
     .map((card) => {
       const content = String(card.content || "").trim();
@@ -1604,14 +1616,25 @@ tabs.forEach((tab) => {
 
 const clearStepCards = () => {
   executionStepCards = [];
+  executionStepCardsByKey = new Map();
   currentStepCard = null;
   executionStepCount = 0;
+  finalResultReceived = false;
+  latestFinalResultText = "";
   if (executionOutput) executionOutput.innerHTML = "";
 };
 
-const createStepCard = (displayName, subAgentName) => {
+const createStepCard = (displayName, subAgentName, eventKey = "", stepId = "") => {
+  const normalizedKey = String(eventKey || stepId || "");
+  if (normalizedKey && executionStepCardsByKey.has(normalizedKey)) {
+    const existing = executionStepCardsByKey.get(normalizedKey);
+    currentStepCard = existing;
+    return existing;
+  }
   const card = {
     id: ++executionStepCount,
+    eventKey: normalizedKey,
+    stepId: String(stepId || ""),
     agentName: subAgentName || displayName,
     displayName: displayName,
     status: "running",
@@ -1621,6 +1644,8 @@ const createStepCard = (displayName, subAgentName) => {
     summary: "",
   };
   executionStepCards.push(card);
+  if (normalizedKey) executionStepCardsByKey.set(normalizedKey, card);
+  if (card.stepId) executionStepCardsByKey.set(card.stepId, card);
   currentStepCard = card;
   renderAllStepCards();
   updateChatExecutionProgress("running", `正在执行第 ${card.id}/${Math.max(planSteps.length, card.id)} 个步骤：${card.agentName}`);
@@ -1630,14 +1655,47 @@ const createStepCard = (displayName, subAgentName) => {
   return card;
 };
 
-const appendStepContent = (content) => {
-  if (!currentStepCard) return;
-  currentStepCard.content += content;
-  const cardEl = executionOutput?.querySelector(`[data-step-id="${currentStepCard.id}"]`);
+const findStepCard = (data = {}) => {
+  const keys = [data.agent_id, data.step_id].map((value) => String(value || "")).filter(Boolean);
+  for (const key of keys) {
+    const card = executionStepCardsByKey.get(key);
+    if (card) return card;
+  }
+  return null;
+};
+
+const isExecutionAgentEvent = (agentName) => {
+  const normalized = String(agentName || "").toLowerCase();
+  return normalized.includes("agent_proxy") || normalized.startsWith("scheduler");
+};
+
+const formatStepResultContent = (data) => {
+  const outputs = data && typeof data.outputs === "object" && data.outputs
+    ? data.outputs
+    : {};
+  const outputNames = Object.keys(outputs);
+  let value = outputs;
+  if (outputNames.length === 1) {
+    value = outputs[outputNames[0]];
+  }
+  if (outputNames.length > 0) {
+    return typeof value === "string" ? value : JSON.stringify(value, null, 2);
+  }
+  const unavailable = Object.keys(data?.unavailable_outputs || {});
+  if (unavailable.length > 0) {
+    return `结果已生成，但以下输出未通过读取校验：${unavailable.join(", ")}`;
+  }
+  return data?.error || "该步骤未返回可展示的结果。";
+};
+
+const appendStepContent = (content, card = currentStepCard) => {
+  if (!card) return;
+  card.content += content;
+  const cardEl = executionOutput?.querySelector(`[data-step-id="${card.id}"]`);
   if (cardEl) {
     const bodyEl = cardEl.querySelector(".step-card-body");
     if (bodyEl && !bodyEl.classList.contains("hidden")) {
-      bodyEl.textContent = currentStepCard.content;
+      bodyEl.textContent = card.content;
     }
   }
   if (autoScrollEnabled && executionOutput) {
@@ -1645,28 +1703,72 @@ const appendStepContent = (content) => {
   }
 };
 
-const finalizeStepCard = () => {
-  if (!currentStepCard) return;
-  currentStepCard.status = "done";
-  currentStepCard.endTime = Date.now();
-  currentStepCard.summary = generateStepSummary(currentStepCard);
-  currentStepCard = null;
+const finalizeStepCard = (card = currentStepCard) => {
+  if (!card) return;
+  if (card.status === "running") {
+    card.status = "done";
+    card.endTime = Date.now();
+    card.summary = generateStepSummary(card);
+  }
+  if (currentStepCard === card) currentStepCard = null;
   renderAllStepCards();
   updateChatExecutionProgress("running");
 };
 
-const errorStepCard = (errMsg) => {
-  if (currentStepCard) {
-    currentStepCard.status = "error";
-    currentStepCard.endTime = Date.now();
+const errorStepCard = (errMsg, card = currentStepCard) => {
+  if (card) {
+    card.status = "error";
+    card.endTime = Date.now();
     const plainText = errMsg.replace(/<[^>]*>/g, "").trim();
-    currentStepCard.summary = plainText.substring(0, 80) || "Execution error";
-    currentStepCard.content = errMsg;
-    currentStepCard._isHtml = true;
-    currentStepCard = null;
+    card.summary = plainText.substring(0, 80) || "Execution error";
+    card.content = errMsg;
+    card._isHtml = true;
+    if (currentStepCard === card) currentStepCard = null;
   }
   renderAllStepCards();
   updateChatExecutionProgress("error", "执行过程中发生错误，请查看结果详情。");
+};
+
+const finalizeRunningStepCards = () => {
+  executionStepCards
+    .filter((card) => card.status === "running")
+    .forEach((card) => {
+      card.status = "done";
+      card.endTime = Date.now();
+      card.summary = generateStepSummary(card);
+    });
+  currentStepCard = null;
+  renderAllStepCards();
+};
+
+const formatFinalResultContent = (data = {}) => {
+  if (data.available && data.result !== undefined && data.result !== null) {
+    return typeof data.result === "string"
+      ? data.result
+      : JSON.stringify(data.result, null, 2);
+  }
+  const unavailable = Array.isArray(data.unavailable_artifacts)
+    ? data.unavailable_artifacts
+    : [];
+  if (unavailable.length) {
+    return "最终结果已生成，但当前用户无权读取或结果未通过 Schema 校验。";
+  }
+  return "工作流未产生可展示的最终结果。";
+};
+
+const renderFinalResult = (data = {}) => {
+  latestFinalResultText = formatFinalResultContent(data);
+  finalResultReceived = true;
+  const lifecycle = ensureChatLifecycle();
+  if (!lifecycle) return;
+  lifecycle.resultSection.classList.remove("hidden");
+  lifecycle.resultTitle.textContent = "最终结果";
+  lifecycle.resultContent.replaceChildren();
+  const content = document.createElement("pre");
+  content.className = "chat-final-result-content-text";
+  content.textContent = latestFinalResultText;
+  lifecycle.resultContent.appendChild(content);
+  scrollChatToLatest();
 };
 
 const generateStepSummary = (card) => {
@@ -2567,8 +2669,9 @@ const handleEvent = (eventName, payload) => {
     return;
   }
   if (eventName === "start_of_agent") {
-    const agentName = payload.data?.agent_name || payload.agent_name || "agent";
-    const subAgentName = payload.data?.sub_agent_name || null;
+    const data = payload.data || {};
+    const agentName = data.agent_name || payload.agent_name || "agent";
+    const subAgentName = data.sub_agent_name || null;
     if (!plannerOnlyMode) {
       pushFlowStep(agentName);
     }
@@ -2582,17 +2685,47 @@ const handleEvent = (eventName, payload) => {
       coordinatorBuffer = "";
     }
     if (!plannerOnlyMode) {
-      const isExecAgent = currentRunContext === "executing" && agentName.includes("agent_proxy");
+      const isExecAgent = currentRunContext === "executing" && isExecutionAgentEvent(agentName);
       if (isExecAgent) {
-        createStepCard(agentName, subAgentName);
+        createStepCard(agentName, subAgentName, data.agent_id, data.step_id);
       } else if (currentRunContext !== "executing") {
         appendOutput("system", `\n[start_of_agent] ${agentName}\n`);
       }
     }
     return;
   }
+  if (eventName === "step_result") {
+    const data = payload.data || {};
+    const status = String(data.status || "").toUpperCase();
+    if (currentRunContext === "executing") {
+      let card = findStepCard(data);
+      if (!card) {
+        const agentName = data.agent_name || data.step_id || "scheduler";
+        card = createStepCard(
+          `scheduler【${agentName}】`,
+          agentName,
+          data.agent_id,
+          data.step_id,
+        );
+      }
+      const content = formatStepResultContent(data);
+      if (status && status !== "SUCCEEDED") {
+        errorStepCard(content, card);
+      } else {
+        appendStepContent(content, card);
+      }
+    }
+    return;
+  }
+  if (eventName === "final_result") {
+    if (currentRunContext === "executing") {
+      renderFinalResult(payload.data || {});
+    }
+    return;
+  }
   if (eventName === "end_of_agent") {
-    const agentName = payload.data?.agent_name || payload.agent_name || "agent";
+    const data = payload.data || {};
+    const agentName = data.agent_name || payload.agent_name || "agent";
     if (!plannerOnlyMode) {
       finishActiveStep();
       renderFlowSteps();
@@ -2622,9 +2755,9 @@ const handleEvent = (eventName, payload) => {
       }
     }
     if (!plannerOnlyMode) {
-      const isExecAgent = currentRunContext === "executing" && agentName.includes("agent_proxy");
+      const isExecAgent = currentRunContext === "executing" && isExecutionAgentEvent(agentName);
       if (isExecAgent) {
-        finalizeStepCard();
+        finalizeStepCard(findStepCard(data) || currentStepCard);
       } else if (currentRunContext !== "executing") {
         appendOutput("system", `\n[end_of_agent] ${agentName}\n`);
       }
@@ -2729,10 +2862,11 @@ const handleEvent = (eventName, payload) => {
       }
     }
     if (currentRunContext === "executing") {
-      finalizeStepCard();
+      finalizeRunningStepCards();
     }
     switch (status) {
       case "SUCCEEDED":
+        currentRunHasError = false;
         showSummaryHint("Workflow completed.");
         if (currentRunContext === "executing") {
           updateChatExecutionProgress("completed");
@@ -2743,31 +2877,47 @@ const handleEvent = (eventName, payload) => {
         showPlanHint("Plan execution completed.");
         break;
       case "PARTIAL_FAILED":
+        currentRunHasError = true;
         showSummaryHint("Workflow partially failed.", true);
         showPlanValidationHint("Some steps failed. Review the execution log; you can recover from Task History.", true);
+        updateChatExecutionProgress("error", "部分步骤失败，已保留可用结果。");
+        setStatus("Partially Failed", false);
         break;
       case "FAILED":
+        currentRunHasError = true;
         showSummaryHint("Workflow failed.", true);
         showPlanValidationHint("Execution failed. You can recover from Task History.", true);
+        updateChatExecutionProgress("error", "工作流执行失败。");
+        setStatus("Failed", false);
         if (payload.data && payload.data.error) {
           appendOutput("system", `\n[workflow failed] ${payload.data.error}\n`);
         }
         break;
       case "CLARIFY_REQUIRED": {
+        currentRunHasError = true;
         const qs = (payload.data && payload.data.clarifications || []).join("; ");
         showSummaryHint("Clarification required.", true);
         showPlanNlHint(qs ? `Clarification required: ${qs}` : "Clarification required before execution.", true);
+        updateChatExecutionProgress("error", "执行前需要补充信息。");
+        setStatus("Clarification Required", false);
         break;
       }
       case "REJECTED":
+        currentRunHasError = true;
         showSummaryHint("Request rejected.", true);
         showPlanValidationHint("The request was rejected by routing (no capable/authorized agent).", true);
+        updateChatExecutionProgress("error", "请求已被路由策略拒绝。");
+        setStatus("Rejected", false);
         break;
       case "NEEDS_RECONCILIATION":
+        currentRunHasError = true;
         showSummaryHint("Needs reconciliation.", true);
         showPlanValidationHint("A side effect may have completed but could not be confirmed. Manual reconciliation required; automatic retry is disabled.", true);
+        updateChatExecutionProgress("error", "外部副作用状态不确定，需要人工核对。");
+        setStatus("Needs Reconciliation", false);
         break;
       default:
+        currentRunHasError = false;
         // Legacy publisher/while path emits no status -> treat as completed.
         showSummaryHint("Workflow completed.");
         if (currentRunContext === "executing") {
@@ -3024,7 +3174,7 @@ const runExecution = async () => {
       setEmptyAnswerMessage("执行失败，请查看执行日志。");
     }
   } finally {
-    if (executionStreamCompleted && !currentRunHasError) {
+    if (executionStreamCompleted && (latestFinalResultText || !currentRunHasError)) {
       captureAssistantConversationContext();
     } else if (currentRunHasError) {
       appendActiveConversationMessage("assistant", "执行失败，请查看执行日志。");
@@ -4432,9 +4582,12 @@ const formatDateTime = (isoStr) => {
 };
 
 const statusBadgeClass = (status) => {
-  if (status === "completed") return "badge-success";
-  if (status === "failed") return "badge-error";
-  if (status === "running") return "badge-info";
+  const normalized = String(status || "").toUpperCase();
+  if (normalized === "COMPLETED" || normalized === "SUCCEEDED") return "badge-success";
+  if (normalized === "RUNNING") return "badge-info";
+  if (["FAILED", "PARTIAL_FAILED", "REJECTED", "NEEDS_RECONCILIATION"].includes(normalized)) {
+    return "badge-error";
+  }
   return "badge-muted";
 };
 
@@ -4819,8 +4972,17 @@ const resumeTask = async () => {
         appendResume(`\n[end] ${payload.data?.agent_name || ""}\n`);
         return;
       }
+      if (eventName === "step_result") {
+        const data = payload.data || {};
+        appendResume(`\n[step ${data.step_id || "?"} ${data.status || ""}]\n${formatStepResultContent(data)}\n`);
+        return;
+      }
+      if (eventName === "final_result") {
+        appendResume(`\n[final result]\n${formatFinalResultContent(payload.data || {})}\n`);
+        return;
+      }
       if (eventName === "end_of_workflow") {
-        appendResume("\n[workflow completed]\n");
+        appendResume(`\n[workflow ${payload.data?.status || "completed"}]\n`);
         return;
       }
       if (eventName === "error") {

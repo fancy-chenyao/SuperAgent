@@ -32,7 +32,10 @@ _DEFAULT_DIR = "store/plan_snapshots"
 
 
 def _safe(name: str) -> str:
-    return "".join(c if c.isalnum() or c in ("-", "_", ":") else "_" for c in str(name or "wf"))
+    # NOTE: ':' is intentionally excluded from the whitelist -- it is an illegal
+    # filename character on Windows (drive separator) and caused WinError 123
+    # when a workflow_id like 'hr_manager:<hash>' was used as a filename.
+    return "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in str(name or "wf"))
 
 
 def _canonical(obj: Any) -> str:

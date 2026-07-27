@@ -10,7 +10,7 @@ Log structure per task (stored as JSON):
     "user_query": "...",
     "created_at": "...",
     "finished_at": "...",
-    "status": "running|completed|failed",
+    "status": "running|completed|failed|<canonical scheduler terminal status>",
     "history": [
         {
             "step": 0,
@@ -36,6 +36,16 @@ from config.global_variables import checkpoints_dir
 
 logger = logging.getLogger(__name__)
 
+SCHEDULER_TERMINAL_STATUSES = {
+    "SUCCEEDED",
+    "FAILED",
+    "PARTIAL_FAILED",
+    "CLARIFY_REQUIRED",
+    "REJECTED",
+    "NEEDS_RECONCILIATION",
+}
+
+
 # Task logs are stored alongside checkpoints in a sibling directory
 def _get_task_logs_dir() -> Path:
     logs_dir = checkpoints_dir.parent / "task_logs"
@@ -57,6 +67,7 @@ class TaskLogger:
         self.workflow_id = workflow_id
         self.user_query = user_query
         self.created_at = datetime.now().isoformat()
+        self.finished_at: Optional[str] = None
         self.history: List[Dict[str, Any]] = []
         self.status = "running"
         self.error: Optional[str] = None
@@ -151,16 +162,39 @@ class TaskLogger:
 
     def log_workflow_end(self) -> None:
         """Log workflow successful completion."""
+        if self.status != "running":
+            return
         self.status = "completed"
+        self.finished_at = datetime.now().isoformat()
         self.log_event(node_name="system", event="workflow_end", content="Workflow completed successfully.")
-        self._flush()
+
+    def log_workflow_terminal(self, status: Any, error: Optional[str] = None) -> None:
+        """Persist one canonical Scheduler terminal status exactly once."""
+        normalized = str(getattr(status, "value", status) or "").upper()
+        if normalized not in SCHEDULER_TERMINAL_STATUSES:
+            raise ValueError(f"unsupported scheduler terminal status: {normalized!r}")
+        if self.status != "running":
+            return
+
+        self.status = normalized
+        self.finished_at = datetime.now().isoformat()
+        self.error = error
+        content = f"Scheduler workflow ended with status {normalized}."
+        if error:
+            content += f" {error}"
+        self.log_event(
+            node_name="scheduler",
+            event="workflow_end",
+            content=content,
+            extra={"terminal_status": normalized},
+        )
 
     def log_error(self, error: str, node_name: str = "system", step: Optional[int] = None) -> None:
         """Log an error event."""
         self.status = "failed"
+        self.finished_at = datetime.now().isoformat()
         self.error = error
         self.log_event(node_name=node_name, event="error", content=error, step=step)
-        self._flush()
 
     def set_execution_phase(self, execution_phase: str) -> None:
         """设置执行阶段"""
@@ -240,7 +274,7 @@ class TaskLogger:
             "agent_capability_bindings": self.agent_capability_bindings,
             "skill_execution_evidence": self.skill_execution_evidence,
             "created_at": self.created_at,
-            "finished_at": datetime.now().isoformat() if self.status != "running" else None,
+            "finished_at": self.finished_at,
             "status": self.status,
             "history": self.history,
             "error": self.error,
@@ -269,6 +303,7 @@ class TaskLogger:
             inst.workflow_id = data.get("workflow_id", "")
             inst.user_query = data.get("user_query", "")
             inst.created_at = data.get("created_at", "")
+            inst.finished_at = data.get("finished_at")
             inst.history = data.get("history", [])
             inst.status = data.get("status", "unknown")
             inst.error = data.get("error")

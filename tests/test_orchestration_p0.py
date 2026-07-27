@@ -28,6 +28,11 @@ def _isolate_stores(tmp_path, monkeypatch):
     monkeypatch.setenv("ARTIFACT_PAYLOAD_STORE_DIR",
                        str(tmp_path / "artifacts"))
     monkeypatch.setenv("RECEIPT_STORE_DIR", str(tmp_path / "receipts"))
+    # These acceptance cases use the synthetic subject ``u1``. Keep them
+    # independent of a developer's local S-ABAC opt-in setting.
+    monkeypatch.setattr(
+        "src.service.env.S_ABAC_ENABLED", False, raising=False
+    )
 
 
 class _RecordingExecutor:

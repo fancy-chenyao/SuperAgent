@@ -157,6 +157,42 @@ def _wangqiang_state(include_email: bool) -> dict:
     }
 
 
+def _disable_s_abac(monkeypatch) -> None:
+    """Turn S-ABAC off for the duration of the test (auto-restored on teardown).
+
+    This test targets the Scheduler / remote-Agent / Artifact data flow, NOT the
+    security policy. Its synthetic subject (``integration_user``) is deliberately
+    not a configured demo user, so the S-ABAC layers would otherwise fail the run
+    regardless of policy config. We neutralize BOTH enforcement points so the test
+    never breaks on demo-user config changes:
+
+    1. ``enforce_agent_dispatch`` -- its ungated ``subject_for_user`` pre-check
+       raises ``UnknownSecurityUserError`` before the ``S_ABAC_ENABLED`` gate is
+       reached, so flipping the flag alone is insufficient.
+    2. ``PolicyEngineArtifactGuard.can_read`` -- the fan-in read guard denies both
+       an unknown user (S-ABAC on) AND HIGH/CRITICAL artifacts (S-ABAC off,
+       fail-closed), so it must be neutralized to the permissive ``AllowAllGuard``
+       behavior for this data-flow test.
+
+    ``monkeypatch`` restores every patch automatically after the test.
+    """
+    import src.security.enforcement as enforcement
+    import src.orchestration.artifact_guard as artifact_guard
+
+    monkeypatch.setattr(enforcement, "S_ABAC_ENABLED", False, raising=False)
+
+    async def _noop_enforce(agent, context):  # noqa: ANN001 - mirrors real signature
+        return {"allowed": True, "reason": "S-ABAC disabled for integration test"}
+
+    monkeypatch.setattr(enforcement, "enforce_agent_dispatch", _noop_enforce)
+
+    monkeypatch.setattr(
+        artifact_guard.PolicyEngineArtifactGuard,
+        "can_read",
+        lambda self, **kwargs: True,
+    )
+
+
 def _run_scenario(monkeypatch, include_email: bool) -> tuple[list, dict]:
     import config.global_variables as g
     from src.manager import agent_manager
@@ -166,6 +202,8 @@ def _run_scenario(monkeypatch, include_email: bool) -> tuple[list, dict]:
     # Enable the Phase-3 flag for fidelity (run_scheduler_workflow is called directly).
     monkeypatch.setattr(
         g, "orchestration_scheduler_enabled", True, raising=False)
+    # Keep the test focused on data flow, not on demo-user security config.
+    _disable_s_abac(monkeypatch)
 
     state = _wangqiang_state(include_email)
     required = [HR_AGENT, DOC_AGENT] + ([EMAIL_AGENT] if include_email else [])

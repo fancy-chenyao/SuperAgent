@@ -508,7 +508,7 @@ class TaskScheduler:
                 step_ctx["execution_context"] = None
 
         try:
-            inputs, upstream_sensitivities = self._resolve_inputs(
+            inputs, upstream_sensitivities, upstream_refs = self._resolve_inputs(
                 step, step_ctx, consumer_agent=selected_agent
             )
         except InputResolutionError as exc:
@@ -526,6 +526,7 @@ class TaskScheduler:
                 },
             )
         step_ctx["upstream_sensitivities"] = upstream_sensitivities
+        step_ctx["upstream_artifact_refs"] = upstream_refs
 
         # Idempotency + crash-safety for side-effect steps: a single ATOMIC
         # claim replaces the old separate get()+put(STARTED) so two instances
@@ -736,6 +737,19 @@ class TaskScheduler:
             context=context.get("execution_context"),
             upstream_sensitivities=context.get("upstream_sensitivities"),
         )
+        upstream_refs = list(context.get("upstream_artifact_refs") or [])
+        if upstream_refs:
+            lineage = list(artifact.derived_from or [])
+            seen = {
+                (ref.artifact_id, ref.version, ref.selector)
+                for ref in lineage
+            }
+            for ref in upstream_refs:
+                key = (ref.artifact_id, ref.version, ref.selector)
+                if key not in seen:
+                    lineage.append(ref)
+                    seen.add(key)
+            artifact = artifact.model_copy(update={"derived_from": lineage})
         ref = self.store.put(artifact)
         names = list(step.expected_outputs) or [artifact.logical_name]
         outputs = {name: ref for name in names}
@@ -771,17 +785,22 @@ class TaskScheduler:
         )
         return result
 
-    def _find_source_step(self, src_agent: Optional[str]) -> Optional[str]:
-        """Resolve an agent name in a binding to a concrete producer step id.
+    def _find_source_step(self, source: Optional[str]) -> Optional[str]:
+        """Resolve a step id or agent name to a concrete producer step id.
 
         A given agent may drive several steps, so bind to the most recent one
         that has already produced outputs. Returns ``None`` when no step for the
         agent has produced output yet (the caller fails closed rather than
         falling back to an arbitrary declared step).
         """
-        if not src_agent:
+        if not source:
             return None
-        step_ids = self._agent_to_steps.get(src_agent)
+        # Planner bindings call this field ``source_step`` and may correctly
+        # carry the producer's step_id. Prefer that exact identity before the
+        # backward-compatible agent-name lookup.
+        if source in self._outputs:
+            return source
+        step_ids = self._agent_to_steps.get(source)
         if not step_ids:
             return None
         for sid in reversed(step_ids):
@@ -843,7 +862,7 @@ class TaskScheduler:
 
     def _resolve_inputs(
         self, step: TaskStep, context: dict, *, consumer_agent: Optional[str] = None
-    ) -> tuple[Dict[str, Any], list]:
+    ) -> tuple[Dict[str, Any], list, list]:
         """Resolve a step's declared inputs to concrete values (fail closed).
 
         Two input forms are resolved, in order:
@@ -860,6 +879,7 @@ class TaskScheduler:
         """
         resolved: Dict[str, Any] = {}
         upstream_sensitivities: list = []
+        upstream_refs: list = []
         subject = context.get("subject")
         scenario = context.get("scenario")
 
@@ -881,11 +901,12 @@ class TaskScheduler:
                 )
                 resolved[param] = value
                 upstream_sensitivities.append(sensitivity)
+                upstream_refs.append(ref)
 
         # 2) Planner-derived symbolic input bindings.
         bindings = getattr(step, "input_bindings", None)
         if not isinstance(bindings, list):
-            return resolved, upstream_sensitivities
+            return resolved, upstream_sensitivities, upstream_refs
         for binding in bindings:
             if not isinstance(binding, dict):
                 continue
@@ -937,6 +958,7 @@ class TaskScheduler:
                 )
                 resolved[param] = value
                 upstream_sensitivities.append(sensitivity)
+                upstream_refs.append(ref)
             except ArtifactAccessDenied as exc:
                 if optional:
                     continue
@@ -967,4 +989,4 @@ class TaskScheduler:
                 raise InputResolutionError(
                     param=param, source=src_agent, reason="selector_error", detail=str(exc)
                 ) from exc
-        return resolved, upstream_sensitivities
+        return resolved, upstream_sensitivities, upstream_refs

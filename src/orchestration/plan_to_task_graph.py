@@ -153,6 +153,70 @@ def _step_id_for(index: int, raw: Dict[str, Any]) -> str:
     return str(explicit) if explicit else f"step_{index + 1}"
 
 
+def derive_step_dependencies(
+    planning_steps: List[Dict[str, Any]],
+    subtasks: Optional[List[Dict[str, Any]]],
+) -> List[Dict[str, Any]]:
+    """Recover dropped data-flow edges from the task profile's ``subtasks``.
+
+    The Planner expresses ordering through ``inputs[].source_step``. But the
+    planner prompt tells it to leave ``inputs`` EMPTY for *autonomous* remote
+    agents (those without a ``Requires`` field). A report/summary step that
+    consumes upstream query outputs is exactly such an autonomous agent, so its
+    dependency is lost and the scheduler runs it in parallel with -- instead of
+    after -- the steps it depends on.
+
+    The task profile's ``subtasks`` already carry the correct ``depends_on`` DAG
+    (computed by the intent profiler). When the Planner declared NO explicit
+    dependency on ANY step, and the plan aligns 1:1 with the subtasks (same
+    count, emitted in the same topological order), copy each subtask's backward
+    ``depends_on`` edges onto the matching plan step as ``depends_on`` expressed
+    as upstream ``agent_name`` values -- which :func:`plan_to_task_graph`
+    already resolves to concrete ``step_id`` references.
+
+    This is a pure, best-effort *correction*: it never overrides an explicit
+    Planner edge and returns ``planning_steps`` unchanged whenever it cannot map
+    confidently, so conversion is byte-identical for every plan that already
+    carries its own dependencies.
+    """
+    if not planning_steps or not subtasks:
+        return planning_steps
+    steps = [s for s in planning_steps if isinstance(s, dict)]
+    if len(steps) != len(planning_steps):
+        return planning_steps  # non-dict entries -> refuse to guess
+    # Trust the Planner: if it declared ANY dependency edge, keep its DAG as-is.
+    for step in steps:
+        if step.get("depends_on") or step.get("inputs"):
+            return planning_steps
+    subs = [t for t in subtasks if isinstance(t, dict)]
+    if len(subs) != len(steps):
+        return planning_steps  # cannot align plan steps to subtasks confidently
+
+    index_by_subtask_id: Dict[str, int] = {}
+    for i, task in enumerate(subs):
+        sid = task.get("id")
+        if sid:
+            index_by_subtask_id[str(sid)] = i
+
+    augmented: List[Dict[str, Any]] = [dict(s) for s in steps]
+    changed = False
+    for i, task in enumerate(subs):
+        dep_agents: List[str] = []
+        for dep_id in task.get("depends_on") or []:
+            j = index_by_subtask_id.get(str(dep_id))
+            # Only backward edges (upstream step precedes this one). Skipping
+            # forward/unknown references keeps the derived graph a valid DAG.
+            if j is None or j >= i:
+                continue
+            dep_agent = augmented[j].get("agent_name")
+            if dep_agent and dep_agent not in dep_agents:
+                dep_agents.append(dep_agent)
+        if dep_agents:
+            augmented[i]["depends_on"] = dep_agents
+            changed = True
+    return augmented if changed else planning_steps
+
+
 def plan_to_task_graph(
     planning_steps: List[Dict[str, Any]],
     *,
@@ -161,6 +225,7 @@ def plan_to_task_graph(
     goal: str = "",
     agent_produces: Optional[Dict[str, List[str]]] = None,
     write_agents: Optional[set[str]] = None,
+    subtasks: Optional[List[Dict[str, Any]]] = None,
 ) -> TaskGraph:
     """Build (and validate) a :class:`TaskGraph` from ``planning_steps``.
 
@@ -173,6 +238,10 @@ def plan_to_task_graph(
             ``expected_outputs`` when a step does not declare it.
         write_agents: agent names whose steps should default to
             ``operation_mode="write"`` when the step does not declare a mode.
+        subtasks: optional task-profile ``subtasks`` used as a fail-safe to
+            recover dependency edges the Planner drops for autonomous agents
+            (see :func:`derive_step_dependencies`). Ignored when the plan
+            already declares its own edges.
 
     Returns:
         A validated :class:`TaskGraph` (raises ``TaskGraphValidationError`` if the
@@ -180,6 +249,8 @@ def plan_to_task_graph(
     """
     agent_produces = agent_produces or {}
     write_agents = write_agents or set()
+    if subtasks:
+        planning_steps = derive_step_dependencies(planning_steps, subtasks)
 
     steps: List[TaskStep] = []
     # Map agent_name -> most-recent prior step_id (source_step references agents).
