@@ -160,12 +160,15 @@ def test_legacy_produces_coexist_with_contract(tmp_path) -> None:
 
 def test_mock_registry_requires_are_satisfiable() -> None:
     """Regression (M-1): every agent's requires must be produced by another
-    agent in mock_remote_registry.json, or legacy plans become unsolvable."""
+    agent in mock_remote_registry.json, or legacy plans become unsolvable.
+    Synthetic fan-in inputs are assembled by the planner from multiple
+    upstream Artifacts, so no single agent declares them in produces."""
+    synthetic_fanin_inputs = {"report.sources"}
     registry_path = Path(__file__).resolve().parents[1] / "mock_remote_registry.json"
     entries = json.loads(registry_path.read_text(encoding="utf-8-sig"))["resources"]
     agents = [item for item in entries if item.get("type") == "agent"]
 
-    all_produced: set[str] = set()
+    all_produced: set[str] = set(synthetic_fanin_inputs)
     for item in agents:
         metadata = item.get("metadata", {})
         all_produced.update(metadata.get("produces", []))

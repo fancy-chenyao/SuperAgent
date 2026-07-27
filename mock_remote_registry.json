@@ -207,9 +207,11 @@
         "llm_type": "basic",
         "prompt": "remote report agent",
         "contract_version": "1.0",
-        "requires": [],
+        "requires": ["report.sources"],
         "produces": ["report.markdown"],
-        "input_schema_refs": {},
+        "input_schema_refs": {
+          "report.sources": "report.sources@v1"
+        },
         "output_schema_refs": {
           "report.markdown": "report.markdown@v1"
         },
