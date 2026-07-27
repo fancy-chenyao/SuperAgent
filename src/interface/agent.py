@@ -118,8 +118,16 @@ class Agent(BaseModel):
 
         if self.agent_contract is not None:
             self.contract_version = self.agent_contract.contract_version
-            self.requires = [ref.name for ref in self.agent_contract.requires]
-            self.produces = [ref.name for ref in self.agent_contract.produces]
+            contract_requires = [ref.name for ref in self.agent_contract.requires]
+            contract_produces = [ref.name for ref in self.agent_contract.produces]
+            # Contract names are authoritative, but legacy logical names that
+            # predate the contract (planner dependency chains) must survive.
+            self.requires = contract_requires + [
+                name for name in self.requires if name not in contract_requires
+            ]
+            self.produces = contract_produces + [
+                name for name in self.produces if name not in contract_produces
+            ]
             self.input_schema_refs = dict(self.agent_contract.input_schema_refs)
             self.output_schema_refs = dict(self.agent_contract.output_schema_refs)
 
