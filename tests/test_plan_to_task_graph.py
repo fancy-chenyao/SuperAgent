@@ -6,6 +6,8 @@ scenario (query -> generate proof -> send email) with a fake executor.
 
 import asyncio
 
+import pytest
+
 from src.interface.task_graph import TaskGraphValidationError
 from src.manager.executor.base import ExecuteResult, ExecutionStatus
 from src.orchestration.plan_to_task_graph import (
@@ -87,6 +89,102 @@ def test_converter_explicit_step_id_and_independent_steps():
     assert "alpha" in smap
     assert smap["alpha"].depends_on == []
     assert g.step_map()["step_2"].depends_on == []
+
+
+def test_converter_resolves_step_and_subtask_references_before_building_edges():
+    graph = plan_to_task_graph(
+        [
+            {
+                "step_id": "consumer",
+                "subtask_ids": ["subtask_consumer"],
+                "agent_name": "ConsumerAgent",
+                "depends_on": ["subtask_source"],
+            },
+            {
+                "step_id": "source",
+                "subtask_ids": ["subtask_source"],
+                "agent_name": "SourceAgent",
+            },
+        ],
+        task_id="forward-reference",
+    )
+
+    assert graph.step_map()["consumer"].depends_on == ["source"]
+    assert graph.topological_order() == ["source", "consumer"]
+
+
+def test_converter_rejects_unknown_dependency_instead_of_dropping_it():
+    with pytest.raises(
+        TaskGraphValidationError,
+        match="depends on unknown step 'missing_step'",
+    ):
+        plan_to_task_graph(
+            [
+                {
+                    "step_id": "consumer",
+                    "agent_name": "ConsumerAgent",
+                    "depends_on": ["missing_step"],
+                }
+            ],
+            task_id="unknown-dependency",
+        )
+
+
+def test_converter_rejects_unknown_input_source_instead_of_running_early():
+    with pytest.raises(
+        TaskGraphValidationError,
+        match="depends on unknown step 'missing_source'",
+    ):
+        plan_to_task_graph(
+            [
+                {
+                    "step_id": "consumer",
+                    "agent_name": "ConsumerAgent",
+                    "inputs": [
+                        {
+                            "parameter_name": "payload",
+                            "source_step": "missing_source",
+                        }
+                    ],
+                }
+            ],
+            task_id="unknown-input-source",
+        )
+
+
+def test_converter_keeps_legacy_agent_reference_to_most_recent_prior_step():
+    graph = plan_to_task_graph(
+        [
+            {"step_id": "query_1", "agent_name": "SharedAgent"},
+            {"step_id": "query_2", "agent_name": "SharedAgent"},
+            {
+                "step_id": "report",
+                "agent_name": "ReportAgent",
+                "depends_on": ["SharedAgent"],
+            },
+        ],
+        task_id="legacy-agent-reference",
+    )
+
+    assert graph.step_map()["report"].depends_on == ["query_2"]
+
+
+def test_converter_normalizes_single_subtask_and_intent_values():
+    graph = plan_to_task_graph(
+        [
+            {
+                "step_id": "query",
+                "agent_name": "RemoteHRAssistantAgent",
+                "subtask_ids": "subtask_1",
+                "intents": "employee_information_query",
+            }
+        ],
+        task_id="normalized-list-fields",
+    )
+
+    step = graph.step_map()["query"]
+    assert step.subtask_ids == ["subtask_1"]
+    assert step.intents == ["employee_information_query"]
 
 
 def test_converter_preserves_structured_execution_contract():
