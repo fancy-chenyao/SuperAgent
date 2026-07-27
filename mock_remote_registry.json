@@ -45,6 +45,7 @@
         "contract_version": "1.0",
         "requires": [],
         "produces": ["employee.info", "employee.salary"],
+        "legacy_produces": ["employee.id", "employee.name"],
         "input_schema_refs": {},
         "output_schema_refs": {
           "employee.info": "employee.info@v1",
@@ -206,11 +207,9 @@
         "llm_type": "basic",
         "prompt": "remote report agent",
         "contract_version": "1.0",
-        "requires": ["report.sources"],
+        "requires": [],
         "produces": ["report.markdown"],
-        "input_schema_refs": {
-          "report.sources": "report.sources@v1"
-        },
+        "input_schema_refs": {},
         "output_schema_refs": {
           "report.markdown": "report.markdown@v1"
         },
