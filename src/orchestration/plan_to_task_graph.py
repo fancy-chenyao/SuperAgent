@@ -161,7 +161,7 @@ def _step_id_for(index: int, raw: Dict[str, Any]) -> str:
 
 def _subtask_ids_for(raw: Dict[str, Any]) -> List[str]:
     values = raw.get("subtask_ids")
-    if values is None:
+    if not values:
         values = [raw.get("subtask_id")] if raw.get("subtask_id") else []
     elif not isinstance(values, list):
         values = [values]
@@ -170,7 +170,7 @@ def _subtask_ids_for(raw: Dict[str, Any]) -> List[str]:
 
 def _list_field(raw: Dict[str, Any], plural: str, singular: str) -> List[Any]:
     values = raw.get(plural)
-    if values is None:
+    if not values:
         value = raw.get(singular)
         return [value] if value else []
     return values if isinstance(values, list) else [values]

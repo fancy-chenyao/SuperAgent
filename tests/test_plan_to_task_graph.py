@@ -187,6 +187,32 @@ def test_converter_normalizes_single_subtask_and_intent_values():
     assert step.intents == ["employee_information_query"]
 
 
+def test_converter_falls_back_from_empty_plural_fields_to_singular_values():
+    graph = plan_to_task_graph(
+        [
+            {
+                "step_id": "query",
+                "agent_name": "RemoteHRAssistantAgent",
+                "subtask_ids": [],
+                "subtask_id": "subtask_1",
+                "intents": [],
+                "intent": "employee_information_query",
+            },
+            {
+                "step_id": "report",
+                "agent_name": "RemoteReportAgent",
+                "depends_on": ["subtask_1"],
+            },
+        ],
+        task_id="empty-plural-field-fallback",
+    )
+
+    query_step = graph.step_map()["query"]
+    assert query_step.subtask_ids == ["subtask_1"]
+    assert query_step.intents == ["employee_information_query"]
+    assert graph.step_map()["report"].depends_on == ["query"]
+
+
 def test_converter_preserves_structured_execution_contract():
     graph = plan_to_task_graph(
         [

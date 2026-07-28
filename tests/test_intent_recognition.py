@@ -316,6 +316,28 @@ def test_schedule_meeting_entities_do_not_treat_quantifier_as_person() -> None:
     assert "一次" not in entities["people"]
 
 
+def test_leave_query_subject_does_not_include_colloquial_prefixes() -> None:
+    cases = {
+        "查一下张三最近有没有请假": "张三",
+        "帮我看看李娜最近有没有请假": "李娜",
+        "请问张三有没有请假记录": "张三",
+    }
+
+    for query, expected_name in cases.items():
+        entities = extract_entities(query)
+        assert entities["employee_name"] == expected_name
+        assert expected_name in entities["people"]
+
+
+def test_leave_policy_questions_do_not_create_leave_record_tasks() -> None:
+    for query in ("公司有没有请假制度", "是否有休假政策"):
+        result = _run(RuleIntentRecognizer().recognize(query))
+        executable_names = {item.name for item in result.executable_intents}
+
+        assert "knowledge_lookup" in executable_names
+        assert "leave_record_query" not in executable_names
+
+
 def test_synonym_expression_and_inferred_salary_are_distinguished() -> None:
     provider = FakeSemanticProvider(
         _payload(

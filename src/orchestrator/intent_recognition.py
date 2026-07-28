@@ -328,6 +328,14 @@ _PERSON_STOP_WORDS = {
     "一次", "一场", "一个", "会议", "参会人", "收件人",
 }
 
+_LEAVE_QUERY_SUBJECT_PATTERN = (
+    r"(?:^|[，,。；;\s])"
+    r"(?:(?:请问|帮我(?:查(?:一下)?|看(?:一下|看)?|确认(?:一下)?)?|"
+    r"查(?:询|一下)?|查看|看看|看一下)\s*)?"
+    r"(?:员工)?([\u4e00-\u9fff]{2,4})"
+    r"(?=(?:最近|本月|本周|这段时间)?(?:有没有|是否|有无).{0,8}(?:请假|休假))"
+)
+
 
 def is_person_candidate(value: Any) -> bool:
     candidate = str(value or "").strip()
@@ -366,7 +374,7 @@ def extract_entities(text: str) -> dict[str, Any]:
     people: list[str] = []
     # 从动作与属格上下文中抽取姓名，不依赖固定人名表。
     patterns = (
-        r"([\u4e00-\u9fff]{2,4}?)(?=(?:最近|本月|本周|这段时间)?(?:有没有|是否|有无).{0,8}(?:请假|休假))",
+        _LEAVE_QUERY_SUBJECT_PATTERN,
         r"(?:查询|查一下|查看|看看|帮|为|取消|生成)(?:员工)?([\u4e00-\u9fff]{2,4}?)(?=的|生成|写|开|明天|后天|本周|下周|本月|下月|日程|在职|收入|请假|休假)",
         r"(?:安排|预约)([\u4e00-\u9fff]{2,3})(?:和|与)([\u4e00-\u9fff]{2,3})(?=明天|后天|开会|的?会议)",
         r"(?:安排)?与([\u4e00-\u9fff]{2,3})(?=的?会议)",
@@ -388,7 +396,7 @@ def extract_entities(text: str) -> dict[str, Any]:
         if recipient_person not in people:
             people.append(recipient_person)
     leave_subject_match = re.search(
-        r"([\u4e00-\u9fff]{2,4}?)(?=(?:最近|本月|本周|这段时间)?(?:有没有|是否|有无).{0,8}(?:请假|休假))",
+        _LEAVE_QUERY_SUBJECT_PATTERN,
         raw,
     )
     if leave_subject_match:
@@ -494,10 +502,16 @@ class RuleIntentRecognizer:
             keywords = tuple(definition.get("keywords") or ())
             matches = _find_keyword_spans(text, keywords)
             for pattern in definition.get("patterns") or ():
-                matches.extend(
-                    (match.start(), match.group(0))
-                    for match in re.finditer(str(pattern), text, flags=re.IGNORECASE)
-                )
+                for match in re.finditer(str(pattern), text, flags=re.IGNORECASE):
+                    pattern_scope = text[
+                        match.start(): min(len(text), match.end() + 6)
+                    ]
+                    if any(
+                        re.search(str(exclusion), pattern_scope, flags=re.IGNORECASE)
+                        for exclusion in definition.get("pattern_exclusions") or ()
+                    ):
+                        continue
+                    matches.append((match.start(), match.group(0)))
             matches = sorted(set(matches))
             if not matches:
                 continue
