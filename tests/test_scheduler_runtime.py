@@ -9,12 +9,14 @@ import json
 
 import pytest
 
+from src.contracts.agent_contract import AgentContract, DataContractRef
 from src.interface.artifact import ArtifactRef, StepResult, StepStatus
 from src.interface.task_graph import TaskGraph, TaskSpec, TaskStep
 from src.manager.executor.base import ExecuteResult, ExecutionStatus
 from src.orchestration.providers import StubRoutingProvider
 from src.orchestration.runtime import (
     _public_step_metrics,
+    _required_step_outputs,
     build_task_graph_from_state,
     has_task_graph,
     run_scheduler_workflow,
@@ -63,6 +65,26 @@ def _two_step_state():
         ],
     )
     return {"workflow_id": "wf1", "user_id": "u1", "task_graph": graph, "messages": []}
+
+
+def test_resume_requires_only_required_contract_outputs():
+    contract = AgentContract(
+        produces=[
+            DataContractRef(name="employee.info", schema_ref="employee.info@v1"),
+            DataContractRef(
+                name="employee.salary",
+                schema_ref="employee.salary@v1",
+                required=False,
+            ),
+        ]
+    )
+    step = TaskStep(
+        step_id="hr",
+        expected_outputs=["employee.info", "employee.salary"],
+        agent_contract=contract,
+    )
+
+    assert _required_step_outputs(step) == ["employee.info"]
 
 
 def test_public_step_metrics_excludes_result_and_remote_diagnostics():

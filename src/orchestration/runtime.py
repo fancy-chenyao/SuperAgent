@@ -74,6 +74,15 @@ def has_task_graph(state: dict) -> bool:
     return bool(state.get("task_graph"))
 
 
+def _required_step_outputs(step: Any) -> list[str]:
+    """Return outputs whose absence invalidates a resumed successful step."""
+
+    contract = getattr(step, "agent_contract", None)
+    if contract is not None:
+        return [ref.name for ref in contract.produces if ref.required]
+    return list(getattr(step, "expected_outputs", []) or [])
+
+
 def _restore_outputs(state: dict, completed: set[str]) -> dict:
     """Rebuild ``{step_id: {param: ArtifactRef}}`` for completed steps on resume.
 
@@ -799,7 +808,7 @@ async def run_scheduler_workflow(
     stale_completed: set[str] = set()
     for step_id in list(initial_results):
         step = step_map.get(step_id)
-        expected = list(getattr(step, "expected_outputs", []) or []) if step else []
+        expected = _required_step_outputs(step) if step else []
         refs = initial_outputs.get(step_id, {})
         if expected and (
             any(name not in refs for name in expected)
