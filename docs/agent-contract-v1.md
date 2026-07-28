@@ -51,6 +51,11 @@ chains (for example `employee.id` and `employee.name`). They are appended to
 the Agent's planner-visible `produces` but stay outside the strict contract,
 so they require no schema refs and are not validated.
 
+Optional Contract entries remain in `requires` or `produces` and are listed by
+name in `optional_requires` or `optional_produces`. Names in either optional
+list must also exist in the corresponding Contract list; otherwise that Agent
+entry is rejected during registry synchronization.
+
 ## Result envelope
 
 Every contracted Agent returns:

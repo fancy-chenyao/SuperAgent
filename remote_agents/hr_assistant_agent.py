@@ -95,6 +95,7 @@ class RemoteHRAssistantAgent(BaseRemoteAgent):
                     DataContractRef(
                         name="employee.salary",
                         schema_ref="employee.salary@v1",
+                        required=False,
                     ),
                 ],
             ),

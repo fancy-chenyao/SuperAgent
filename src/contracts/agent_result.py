@@ -142,4 +142,16 @@ def validate_agent_result(
                 )
             )
 
+    if parsed.status == AgentResultStatus.SUCCESS:
+        for ref in agent_contract.produces:
+            if ref.required and ref.name not in parsed.outputs:
+                errors.append(
+                    AgentContractValidationError(
+                        code="MISSING_REQUIRED_OUTPUT",
+                        message=f"required output {ref.name!r} is missing",
+                        logical_name=ref.name,
+                        schema_ref=ref.schema_ref,
+                    )
+                )
+
     return AgentContractValidationResult(valid=not errors, errors=errors)
