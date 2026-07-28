@@ -150,6 +150,20 @@ def _agent_capability_bindings(agent_cards: Any) -> dict[str, list[str]]:
     return bindings
 
 
+def _current_agent_contracts(agent_cards: Any) -> dict[str, dict[str, Any]]:
+    """Extract only current trusted registry Contracts from serialized cards."""
+
+    contracts: dict[str, dict[str, Any]] = {}
+    for card in agent_cards if isinstance(agent_cards, list) else []:
+        if not isinstance(card, dict):
+            continue
+        agent_id = str(card.get("agent_id") or card.get("name") or "").strip()
+        contract = card.get("agent_contract")
+        if agent_id and isinstance(contract, dict):
+            contracts[agent_id] = contract
+    return contracts
+
+
 async def _execute_node_with_runtime_events(
     state: State, node_func, enable_runtime_events: bool
 ):
@@ -228,6 +242,9 @@ def load_production_task_graph(state: dict, execution_phase: str) -> tuple[bool,
         planning_steps=current_steps,
         goal=state.get("original_user_query", "")
         or state.get("USER_QUERY", ""),
+        current_agent_contracts=_current_agent_contracts(
+            state.get("agent_cards")
+        ),
     )
     if task_graph is None:
         logger.warning("plan snapshot rejected for %s: %s",
