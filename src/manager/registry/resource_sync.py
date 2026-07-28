@@ -1,10 +1,14 @@
 ﻿import asyncio
+import logging
 from pathlib import Path
 from typing import Any, Dict, Iterable, List
 
+from src.contracts.agent_contract import AgentContract, DataContractRef
 from src.interface.agent import Agent, AgentSource, LLMType
 from src.interface.mcp import Tool
 from src.manager.registry.resource_registry import ResourceRegistry, ResourceSpec
+
+logger = logging.getLogger(__name__)
 
 
 def _safe_attr(obj: Any, name: str, default=None):
@@ -120,10 +124,71 @@ async def sync_remote_agents(resource_registry: ResourceRegistry, agent_registry
                     )
                 )
 
-        # Extract requires and produces from metadata
+        # Extract the explicit v1 contract while retaining legacy string lists.
+        contract_version = metadata.get("contract_version")
         requires = metadata.get("requires", [])
         produces = metadata.get("produces", [])
+        # Legacy logical names kept for pre-contract planner dependencies
+        # (e.g. employee.id/employee.name). They join Agent.produces but are
+        # deliberately excluded from the strict contract below.
+        legacy_produces = metadata.get("legacy_produces", [])
+        optional_requires = {
+            str(name) for name in metadata.get("optional_requires", []) or []
+        }
+        optional_produces = {
+            str(name) for name in metadata.get("optional_produces", []) or []
+        }
+        input_schema_refs = metadata.get("input_schema_refs", {})
+        output_schema_refs = metadata.get("output_schema_refs", {})
         parameter_mapping = metadata.get("parameter_mapping", {})
+        agent_contract = None
+        if contract_version:
+            missing_input_refs = [
+                name for name in requires if name not in input_schema_refs
+            ]
+            missing_output_refs = [
+                name for name in produces if name not in output_schema_refs
+            ]
+            unknown_optional_requires = optional_requires - set(requires)
+            unknown_optional_produces = optional_produces - set(produces)
+            if (
+                missing_input_refs
+                or missing_output_refs
+                or unknown_optional_requires
+                or unknown_optional_produces
+            ):
+                # Fail closed for this Agent only: refuse to register it, but
+                # never let one bad registry entry break the whole batch.
+                logger.error(
+                    "Invalid Agent contract for %s: missing schema refs for "
+                    "requires=%s, produces=%s; unknown optional requires=%s, "
+                    "produces=%s; agent not registered",
+                    agent_name,
+                    missing_input_refs,
+                    missing_output_refs,
+                    sorted(unknown_optional_requires),
+                    sorted(unknown_optional_produces),
+                )
+                continue
+            agent_contract = AgentContract(
+                contract_version=contract_version,
+                requires=[
+                    DataContractRef(
+                        name=name,
+                        schema_ref=input_schema_refs[name],
+                        required=name not in optional_requires,
+                    )
+                    for name in requires
+                ],
+                produces=[
+                    DataContractRef(
+                        name=name,
+                        schema_ref=output_schema_refs[name],
+                        required=name not in optional_produces,
+                    )
+                    for name in produces
+                ],
+            )
 
         agent = Agent(
             user_id=default_user_id,
@@ -137,7 +202,12 @@ async def sync_remote_agents(resource_registry: ResourceRegistry, agent_registry
             endpoint=spec.endpoint,
             api_key=(spec.auth or {}).get("api_key"),
             requires=requires,
-            produces=produces,
+            produces=produces
+            + [name for name in legacy_produces if name not in produces],
+            contract_version=contract_version,
+            input_schema_refs=input_schema_refs,
+            output_schema_refs=output_schema_refs,
+            agent_contract=agent_contract,
             parameter_mapping=parameter_mapping,
         )
 

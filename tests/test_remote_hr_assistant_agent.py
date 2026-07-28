@@ -60,9 +60,11 @@ def test_basic_employee_query_does_not_call_salary_tool():
     )
 
     assert [name for name, _arguments in calls] == ["remote_person_info_tool"]
-    assert result == [
+    assert result["status"] == "success"
+    assert result["outputs"]["employee.info"]["records"] == [
         {"idvId": "employee-1", "name": "王强", "department": "营业部"}
     ]
+    assert "employee.salary" not in result["outputs"]
 
 
 def test_explicit_salary_query_calls_salary_tool_and_merges_result():
@@ -102,4 +104,7 @@ def test_explicit_salary_query_calls_salary_tool_and_merges_result():
         "remote_person_info_tool",
         "remote_salary_info_tool",
     ]
-    assert result[0]["monthly_salary"] == 100
+    assert (
+        result["outputs"]["employee.salary"]["records"][0]["monthly_salary"]
+        == 100
+    )

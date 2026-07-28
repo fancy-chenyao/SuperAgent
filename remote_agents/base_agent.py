@@ -5,15 +5,75 @@ from typing import Any, Dict, List, Optional
 from abc import ABC, abstractmethod
 import logging
 
+from src.contracts.agent_contract import AgentContract
+from src.contracts.agent_result import (
+    AgentResultEnvelope,
+    AgentResultError,
+    AgentResultMetadata,
+    AgentResultStatus,
+)
+
 logger = logging.getLogger(__name__)
 
 
 class BaseRemoteAgent(ABC):
     """Base class for all remote agents."""
 
-    def __init__(self, name: str, prompt: str):
+    def __init__(
+        self,
+        name: str,
+        prompt: str,
+        contract: AgentContract | None = None,
+    ):
         self.name = name
         self.prompt = prompt
+        self.contract = contract
+
+    def result_envelope(
+        self,
+        *,
+        outputs: Dict[str, Any] | None = None,
+        error: AgentResultError | None = None,
+    ) -> Dict[str, Any]:
+        outputs = outputs or {}
+        if outputs and error:
+            status = AgentResultStatus.PARTIAL
+        elif error:
+            status = AgentResultStatus.ERROR
+        else:
+            status = AgentResultStatus.SUCCESS
+        contract_version = self.contract.contract_version if self.contract else "1.0"
+        envelope = AgentResultEnvelope(
+            contract_version=contract_version,
+            status=status,
+            outputs=outputs,
+            error=error,
+            metadata=AgentResultMetadata(
+                producer_agent=self.name,
+                schema_version=contract_version,
+            ),
+        )
+        return envelope.model_dump(mode="json")
+
+    @staticmethod
+    def execution_error(
+        exc: Exception,
+        *,
+        tool_name: str,
+    ) -> AgentResultError:
+        if isinstance(exc, TimeoutError):
+            return AgentResultError(
+                code="REMOTE_TOOL_TIMEOUT",
+                message=str(exc) or f"{tool_name} timed out",
+                retryable=True,
+                details={"tool": tool_name},
+            )
+        return AgentResultError(
+            code="REMOTE_TOOL_ERROR",
+            message=str(exc) or f"{tool_name} failed",
+            retryable=False,
+            details={"tool": tool_name},
+        )
 
     @abstractmethod
     async def execute(

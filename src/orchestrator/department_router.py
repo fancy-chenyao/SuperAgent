@@ -158,6 +158,7 @@ def build_agent_cards(agents: Iterable[Any]) -> list[AgentCard]:
         tools = _tool_names(agent)
         source = getattr(agent, "source", "local")
         source_value = getattr(source, "value", source)
+        agent_contract = getattr(agent, "agent_contract", None)
         cards.append(
             AgentCard(
                 agent_id=name,
@@ -179,6 +180,16 @@ def build_agent_cards(agents: Iterable[Any]) -> list[AgentCard]:
                 status="ONLINE",
                 description=str(getattr(agent, "description", "") or ""),
                 source=str(source_value),
+                contract_version=getattr(agent, "contract_version", None),
+                requires=list(agent_contract.requires) if agent_contract else [],
+                produces=list(agent_contract.produces) if agent_contract else [],
+                input_schema_refs=dict(
+                    getattr(agent, "input_schema_refs", {}) or {}
+                ),
+                output_schema_refs=dict(
+                    getattr(agent, "output_schema_refs", {}) or {}
+                ),
+                agent_contract=agent_contract,
             )
         )
     return cards
