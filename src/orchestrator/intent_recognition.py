@@ -330,9 +330,9 @@ _PERSON_STOP_WORDS = {
 
 _LEAVE_QUERY_SUBJECT_PATTERN = (
     r"(?:^|[，,。；;\s])"
-    r"(?:(?:请问|帮我(?:查(?:一下)?|看(?:一下|看)?|确认(?:一下)?)?|"
-    r"查(?:询|一下)?|查看|看看|看一下)\s*)?"
-    r"(?:员工)?([\u4e00-\u9fff]{2,4})"
+    r"(?:(?:请问(?:一下)?|请(?:帮我|帮忙)?|麻烦(?:帮我|帮忙)?|帮我|帮忙)\s*)?"
+    r"(?:(?:查(?:询|一下|下)?|查看|看看|看(?:一下)?|确认(?:一下)?)\s*)?"
+    r"(?:员工)?([\u4e00-\u9fff]{2,4}?)"
     r"(?=(?:最近|本月|本周|这段时间)?(?:有没有|是否|有无).{0,8}(?:请假|休假))"
 )
 
@@ -454,6 +454,47 @@ def _find_keyword_spans(text: str, keywords: tuple[str, ...]) -> list[tuple[int,
     return sorted(matches)
 
 
+def _clause_for_match(text: str, start: int, match_text: str) -> str:
+    """返回一次意图命中所在的完整分句，用于判断业务语境。"""
+    clause_start = 0
+    clause_end = len(text)
+    match_end = start + len(match_text)
+    boundaries = re.finditer(
+        r"[，,。；;]|\bthen\b|\band\b|然后|之后|并且|同时|最后|否则",
+        text,
+        flags=re.IGNORECASE,
+    )
+    for boundary in boundaries:
+        if boundary.end() <= start:
+            clause_start = boundary.end()
+            continue
+        if boundary.start() >= match_end:
+            clause_end = boundary.start()
+            break
+    return text[clause_start:clause_end].strip()
+
+
+def _exclude_context_matches(
+    text: str,
+    matches: list[tuple[int, str]],
+    exclusions: tuple[str, ...],
+) -> list[tuple[int, str]]:
+    if not exclusions:
+        return matches
+    return [
+        (position, matched_text)
+        for position, matched_text in matches
+        if not any(
+            re.search(
+                exclusion,
+                _clause_for_match(text, position, matched_text),
+                flags=re.IGNORECASE,
+            )
+            for exclusion in exclusions
+        )
+    ]
+
+
 def _is_negated(text: str, start: int, keyword: str) -> bool:
     before = text[max(0, start - 12):start]
     negators = ("不要", "不需要", "无需", "禁止", "别", "不涉及", "不必", "不可", "不允许")
@@ -502,16 +543,15 @@ class RuleIntentRecognizer:
             keywords = tuple(definition.get("keywords") or ())
             matches = _find_keyword_spans(text, keywords)
             for pattern in definition.get("patterns") or ():
-                for match in re.finditer(str(pattern), text, flags=re.IGNORECASE):
-                    pattern_scope = text[
-                        match.start(): min(len(text), match.end() + 6)
-                    ]
-                    if any(
-                        re.search(str(exclusion), pattern_scope, flags=re.IGNORECASE)
-                        for exclusion in definition.get("pattern_exclusions") or ()
-                    ):
-                        continue
-                    matches.append((match.start(), match.group(0)))
+                matches.extend(
+                    (match.start(), match.group(0))
+                    for match in re.finditer(str(pattern), text, flags=re.IGNORECASE)
+                )
+            matches = _exclude_context_matches(
+                text,
+                matches,
+                tuple(str(item) for item in definition.get("context_exclusions") or ()),
+            )
             matches = sorted(set(matches))
             if not matches:
                 continue

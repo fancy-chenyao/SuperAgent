@@ -321,21 +321,41 @@ def test_leave_query_subject_does_not_include_colloquial_prefixes() -> None:
         "查一下张三最近有没有请假": "张三",
         "帮我看看李娜最近有没有请假": "李娜",
         "请问张三有没有请假记录": "张三",
+        "请问一下张三有没有请假": "张三",
+        "请帮我查一下张三最近有没有请假": "张三",
     }
 
     for query, expected_name in cases.items():
         entities = extract_entities(query)
         assert entities["employee_name"] == expected_name
-        assert expected_name in entities["people"]
+        assert entities["people"] == [expected_name]
 
 
 def test_leave_policy_questions_do_not_create_leave_record_tasks() -> None:
-    for query in ("公司有没有请假制度", "是否有休假政策"):
+    cases = (
+        "公司有没有请假相关的管理制度",
+        "是否有关于休假的员工管理政策",
+        "有没有请假方面的新政策",
+    )
+
+    for query in cases:
         result = _run(RuleIntentRecognizer().recognize(query))
         executable_names = {item.name for item in result.executable_intents}
 
         assert "knowledge_lookup" in executable_names
         assert "leave_record_query" not in executable_names
+
+
+def test_leave_policy_exclusion_is_scoped_to_its_clause() -> None:
+    result = _run(
+        RuleIntentRecognizer().recognize(
+            "公司有没有请假制度，并且查询张三的请假记录"
+        )
+    )
+
+    assert "leave_record_query" in {
+        item.name for item in result.executable_intents
+    }
 
 
 def test_synonym_expression_and_inferred_salary_are_distinguished() -> None:
