@@ -353,6 +353,11 @@ def extract_entities(text: str) -> dict[str, Any]:
         r"(?:发给|发送给|寄给|转给|抄送给?|交给|通知)([\w.@\-\u4e00-\u9fff]{2,30}?)(?=$|[，,。；;]|然后|并且|并发|再)",
         raw,
     )
+    if not recipient_match:
+        recipient_match = re.search(
+            r"(?:给|向)([\w.@\-\u4e00-\u9fff]{2,30}?)(?=(?:发送|发一封|发邮件|寄送|通知))",
+            raw,
+        )
     if recipient_match:
         recipient = recipient_match.group(1).strip("，。；;,. ")
         if recipient:
@@ -361,6 +366,7 @@ def extract_entities(text: str) -> dict[str, Any]:
     people: list[str] = []
     # 从动作与属格上下文中抽取姓名，不依赖固定人名表。
     patterns = (
+        r"([\u4e00-\u9fff]{2,4}?)(?=(?:最近|本月|本周|这段时间)?(?:有没有|是否|有无).{0,8}(?:请假|休假))",
         r"(?:查询|查一下|查看|看看|帮|为|取消|生成)(?:员工)?([\u4e00-\u9fff]{2,4}?)(?=的|生成|写|开|明天|后天|本周|下周|本月|下月|日程|在职|收入|请假|休假)",
         r"(?:安排|预约)([\u4e00-\u9fff]{2,3})(?:和|与)([\u4e00-\u9fff]{2,3})(?=明天|后天|开会|的?会议)",
         r"(?:安排)?与([\u4e00-\u9fff]{2,3})(?=的?会议)",
@@ -381,6 +387,17 @@ def extract_entities(text: str) -> dict[str, Any]:
         recipient_person = str(entities["recipient"])
         if recipient_person not in people:
             people.append(recipient_person)
+    leave_subject_match = re.search(
+        r"([\u4e00-\u9fff]{2,4}?)(?=(?:最近|本月|本周|这段时间)?(?:有没有|是否|有无).{0,8}(?:请假|休假))",
+        raw,
+    )
+    if leave_subject_match:
+        leave_subject = leave_subject_match.group(1)
+        if is_person_candidate(leave_subject):
+            entities["employee_name"] = leave_subject
+            if leave_subject not in people:
+                people.append(leave_subject)
+
     if people:
         entities["people"] = people
         recipient = str(entities.get("recipient") or "")
@@ -476,6 +493,12 @@ class RuleIntentRecognizer:
                 continue
             keywords = tuple(definition.get("keywords") or ())
             matches = _find_keyword_spans(text, keywords)
+            for pattern in definition.get("patterns") or ():
+                matches.extend(
+                    (match.start(), match.group(0))
+                    for match in re.finditer(str(pattern), text, flags=re.IGNORECASE)
+                )
+            matches = sorted(set(matches))
             if not matches:
                 continue
             if name == "employee_information_query" and re.search(
