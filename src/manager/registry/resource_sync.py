@@ -132,6 +132,12 @@ async def sync_remote_agents(resource_registry: ResourceRegistry, agent_registry
         # (e.g. employee.id/employee.name). They join Agent.produces but are
         # deliberately excluded from the strict contract below.
         legacy_produces = metadata.get("legacy_produces", [])
+        optional_requires = {
+            str(name) for name in metadata.get("optional_requires", []) or []
+        }
+        optional_produces = {
+            str(name) for name in metadata.get("optional_produces", []) or []
+        }
         input_schema_refs = metadata.get("input_schema_refs", {})
         output_schema_refs = metadata.get("output_schema_refs", {})
         parameter_mapping = metadata.get("parameter_mapping", {})
@@ -143,15 +149,25 @@ async def sync_remote_agents(resource_registry: ResourceRegistry, agent_registry
             missing_output_refs = [
                 name for name in produces if name not in output_schema_refs
             ]
-            if missing_input_refs or missing_output_refs:
+            unknown_optional_requires = optional_requires - set(requires)
+            unknown_optional_produces = optional_produces - set(produces)
+            if (
+                missing_input_refs
+                or missing_output_refs
+                or unknown_optional_requires
+                or unknown_optional_produces
+            ):
                 # Fail closed for this Agent only: refuse to register it, but
                 # never let one bad registry entry break the whole batch.
                 logger.error(
                     "Invalid Agent contract for %s: missing schema refs for "
-                    "requires=%s, produces=%s; agent not registered",
+                    "requires=%s, produces=%s; unknown optional requires=%s, "
+                    "produces=%s; agent not registered",
                     agent_name,
                     missing_input_refs,
                     missing_output_refs,
+                    sorted(unknown_optional_requires),
+                    sorted(unknown_optional_produces),
                 )
                 continue
             agent_contract = AgentContract(
@@ -160,7 +176,7 @@ async def sync_remote_agents(resource_registry: ResourceRegistry, agent_registry
                     DataContractRef(
                         name=name,
                         schema_ref=input_schema_refs[name],
-                        required=True,
+                        required=name not in optional_requires,
                     )
                     for name in requires
                 ],
@@ -168,7 +184,7 @@ async def sync_remote_agents(resource_registry: ResourceRegistry, agent_registry
                     DataContractRef(
                         name=name,
                         schema_ref=output_schema_refs[name],
-                        required=True,
+                        required=name not in optional_produces,
                     )
                     for name in produces
                 ],

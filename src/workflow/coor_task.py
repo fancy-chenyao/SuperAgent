@@ -373,6 +373,32 @@ def _first_step_index_for_intent(steps: list[dict], intent: str) -> int:
     return len(steps)
 
 
+def _string_list(value) -> list[str]:
+    """把 Planner 的单值/数组字段统一为去重后的非空字符串列表。"""
+    if value is None:
+        return []
+    raw_items = value if isinstance(value, (list, tuple, set)) else [value]
+    return list(dict.fromkeys(
+        str(item).strip() for item in raw_items if str(item).strip()
+    ))
+
+
+def _step_subtask_ids(step: dict) -> list[str]:
+    """兼容新版 subtask_ids 与旧版 subtask_id。"""
+    ids = _string_list(step.get("subtask_ids"))
+    if ids:
+        return ids
+    return _string_list(step.get("subtask_id"))
+
+
+def _step_declared_intents(step: dict) -> list[str]:
+    """兼容新版 intents 与旧版 intent。"""
+    intents = _string_list(step.get("intents"))
+    if intents:
+        return intents
+    return _string_list(step.get("intent"))
+
+
 def _validate_plan_against_task_profile(steps: list, state: State) -> list[str]:
     """检查 Planner 是否忠实覆盖画像，不自动补写或复制任何计划步骤。"""
     if not isinstance(steps, list):
@@ -388,6 +414,112 @@ def _validate_plan_against_task_profile(steps: list, state: State) -> list[str]:
         for item in subtasks
         if isinstance(item, dict) and item.get("id")
     }
+    # 当前执行器的调度单位是 Agent 调用，同一 Agent 的多个 assigned_steps
+    # 会随同一份 execution brief 一起交给 Agent。把同一 Agent 拆成多个计划步骤
+    # 不会形成更细粒度执行，反而可能重复调用同一组工具，因此统一要求合并。
+    step_indexes_by_agent: dict[str, list[int]] = {}
+    for index, step in enumerate(steps):
+        if not isinstance(step, dict):
+            continue
+        agent_name = str(step.get("agent_name") or "").strip()
+        if agent_name:
+            step_indexes_by_agent.setdefault(agent_name, []).append(index)
+    for agent_name, indexes in step_indexes_by_agent.items():
+        if len(indexes) > 1:
+            errors.append(
+                f"Agent {agent_name} 被拆成了 {len(indexes)} 个执行步骤；"
+                "当前执行器按 Agent 调用，请合并为一个步骤"
+            )
+
+    # 结构化计划中，TaskProfile 子任务是“逻辑任务”，Planner step 是“执行单元”。
+    # 同一个 Agent 能一次完成多个兼容逻辑任务时，允许一个 step 覆盖多个
+    # subtask_ids；但每个逻辑子任务仍必须且只能被覆盖一次。
+    structured_steps = [
+        step for step in steps
+        if isinstance(step, dict) and _step_subtask_ids(step)
+    ]
+    if structured_steps:
+        if len(structured_steps) != len(steps):
+            errors.append(
+                "计划步骤不能混用有 subtask_ids/subtask_id 和无逻辑子任务标识的两种结构"
+            )
+
+        step_by_subtask_id: dict[str, dict] = {}
+        step_index_by_subtask_id: dict[str, int] = {}
+        for index, step in enumerate(steps):
+            if not isinstance(step, dict):
+                continue
+            covered_ids = _step_subtask_ids(step)
+            if not covered_ids:
+                continue
+            for subtask_id in covered_ids:
+                if subtask_id in step_by_subtask_id:
+                    errors.append(f"子任务 {subtask_id} 被多个执行步骤重复覆盖")
+                    continue
+                if subtask_id not in subtask_by_id:
+                    errors.append(
+                        f"计划引用了 TaskProfile 中不存在的子任务 {subtask_id}"
+                    )
+                    continue
+                step_by_subtask_id[subtask_id] = step
+                step_index_by_subtask_id[subtask_id] = index
+
+        for subtask_id in subtask_by_id:
+            if subtask_id not in step_by_subtask_id:
+                errors.append(f"缺少对子任务 {subtask_id} 的执行覆盖")
+
+        # 按执行步骤校验它覆盖的意图集合，以及跨执行步骤的依赖关系。
+        # 同一步内部的逻辑依赖由该 Agent 在一次调用中完成，不应再形成图上的自依赖。
+        for index, step in enumerate(steps):
+            if not isinstance(step, dict):
+                continue
+            covered_ids = [
+                subtask_id for subtask_id in _step_subtask_ids(step)
+                if subtask_id in subtask_by_id
+            ]
+            if not covered_ids:
+                continue
+
+            expected_intents = {
+                str(subtask_by_id[subtask_id].get("intent") or "")
+                for subtask_id in covered_ids
+                if str(subtask_by_id[subtask_id].get("intent") or "")
+            }
+            planned_intents = set(_step_declared_intents(step))
+            if planned_intents != expected_intents:
+                errors.append(
+                    f"执行步骤 {step.get('step_id') or index + 1} 的 intents 应为 "
+                    f"{sorted(expected_intents)}，实际为 {sorted(planned_intents)}"
+                )
+
+            covered_set = set(covered_ids)
+            expected_dependencies: set[str] = set()
+            for subtask_id in covered_ids:
+                expected_dependencies.update(
+                    _string_list(subtask_by_id[subtask_id].get("depends_on"))
+                )
+            # 同一步内的前后关系由 Agent 内部完成，只保留跨步骤依赖。
+            expected_dependencies.difference_update(covered_set)
+            planned_dependencies = set(
+                _string_list(step.get("depends_on")))
+            if planned_dependencies != expected_dependencies:
+                errors.append(
+                    f"执行步骤 {step.get('step_id') or index + 1} 的 depends_on 应为 "
+                    f"{sorted(expected_dependencies)}，实际为 {sorted(planned_dependencies)}"
+                )
+
+            for dependency_id in expected_dependencies:
+                dependency_index = step_index_by_subtask_id.get(
+                    dependency_id, len(steps)
+                )
+                if dependency_index >= index:
+                    errors.append(
+                        f"子任务 {dependency_id} 所在执行步骤必须在 "
+                        f"{step.get('step_id') or index + 1} 之前完成"
+                    )
+
+        return list(dict.fromkeys(errors))
+
     for subtask in subtasks:
         if not isinstance(subtask, dict):
             continue
@@ -405,9 +537,10 @@ def _validate_plan_against_task_profile(steps: list, state: State) -> list[str]:
                 continue
             dependency_index = _first_step_index_for_intent(
                 steps, dependency_intent)
-            if dependency_index >= current_index:
+            # 两个逻辑意图可由同一 Agent 在同一步内完成；仅后置才是错误。
+            if dependency_index > current_index:
                 errors.append(
-                    f"意图 {dependency_intent} 必须在 {intent} 之前完成，不能合并或后置"
+                    f"意图 {dependency_intent} 必须在 {intent} 之前或同一执行步骤内完成"
                 )
     return list(dict.fromkeys(errors))
 
@@ -508,10 +641,13 @@ async def _validate_plan_data_flow(steps: list, user_id: str) -> tuple[bool, lis
                 source_found = False
                 for prev_idx in range(step_idx):
                     prev_step = steps[prev_idx]
-                    if (
-                        prev_step.get("agent_name") == source_step
-                        or prev_step.get("step_id") == source_step
-                    ):
+                    source_references = {
+                        str(prev_step.get("agent_name") or ""),
+                        str(prev_step.get("step_id") or ""),
+                        str(prev_step.get("subtask_id") or ""),
+                    }
+                    source_references.update(_step_subtask_ids(prev_step))
+                    if str(source_step) in source_references:
                         source_found = True
                         source_agent = prev_step.get("agent_name")
                         source_metadata = agent_metadata.get(source_agent)
@@ -1237,16 +1373,48 @@ async def planner_node(state: State) -> Command[Literal["publisher", "__end__"]]
 
                         error_summary = "\n".join(
                             f"- {err}" for err in validation_errors)
+                        required_subtask_contract = [
+                            {
+                                "subtask_id": str(item.get("id") or ""),
+                                "intent": str(item.get("intent") or ""),
+                                "depends_on": [
+                                    str(dep) for dep in (item.get("depends_on") or [])
+                                ],
+                            }
+                            for item in (
+                                (state.get("task_profile") or {}).get("subtasks") or []
+                            )
+                            if isinstance(item, dict) and item.get("id")
+                        ]
+                        required_subtask_contract_text = json.dumps(
+                            required_subtask_contract,
+                            ensure_ascii=False,
+                            indent=2,
+                        )
+                        # The retry must repair the plan structure, not merely
+                        # paraphrase the same invalid merged steps.
                         fix_note = (
-                            f"你生成的计划与任务画像或数据流不一致，请修正：\n\n{error_summary}\n\n"
-                            "修正要求：\n"
-                            "0. TaskProfile 中每个不同的业务意图必须由能力匹配的 Agent 形成独立步骤，不得把请假记录查询合并进员工基础信息查询\n"
-                            "1. 如果某个Agent需要的参数（在'Requires'字段中）没有来源，你必须在它之前添加一个步骤来获取这些数据\n"
-                            "2. 每个有'Requires'字段的Agent都必须在inputs中明确映射所有必需参数\n"
-                            "3. 每个InputMapping的source_step必须是之前步骤中存在的agent_name\n"
-                            "4. 每个InputMapping的source_output必须在source_step的'Produces'字段中\n"
-                            "5. 如果用户只提供了姓名但Agent需要employee_id，你必须先添加RemoteHRAssistantAgent来查询员工信息\n\n"
-                            "请输出修正后的完整计划，仅输出JSON格式，不要解释。"
+                            "The generated plan does not match TaskProfile or its data dependencies.\n\n"
+                            f"Validation errors:\n{error_summary}\n\n"
+                            "Required logical subtask contract (cover every item exactly once):\n"
+                            f"{required_subtask_contract_text}\n\n"
+                            "Return a corrected JSON object with a `steps` array only.\n"
+                            "Requirements:\n"
+                            "1. Each executable step must contain `step_id`, `subtask_ids`, "
+                            "`intents`, and `depends_on`. Across the whole plan, every contract "
+                            "subtask_id must appear exactly once.\n"
+                            "2. The current executor dispatches by Agent invocation. Every Agent "
+                            "name may therefore appear in at most one executable step; put all "
+                            "logical subtasks assigned to that Agent into that step.\n"
+                            "3. `intents` must exactly match the intents of that step's "
+                            "`subtask_ids`. `depends_on` contains only dependencies belonging to "
+                            "other executable steps; omit dependencies internal to the same step.\n"
+                            "4. Preserve execution order for all external dependencies.\n"
+                            "5. Use only available Agent names from the supplied catalog.\n"
+                            "6. For every Agent `requires` field, add complete input mappings from "
+                            "an earlier step and use outputs declared by that source Agent.\n"
+                            "Do not create duplicate execution steps for the same Agent.\n"
+                            "Do not include explanations outside the JSON."
                         )
 
                         fix_payload = deepcopy(retry_messages)
@@ -1338,8 +1506,15 @@ async def planner_node(state: State) -> Command[Literal["publisher", "__end__"]]
         if steps is not None:
             cache.restore_planning_steps(
                 state["workflow_id"], steps, state["user_id"])
-            message_content = json.dumps(
-                {"steps": steps}, indent=2, ensure_ascii=False)
+            # The final planner message is authoritative for the frontend.
+            # Preserve validation errors when a streamed draft was rejected;
+            # otherwise the browser keeps showing the raw draft and enables
+            # Confirm execution even though the backend stored zero steps.
+            if plan_validation_failed:
+                message_content = raw_content
+            else:
+                message_content = json.dumps(
+                    {"steps": steps}, indent=2, ensure_ascii=False)
             if state.get("stop_after_planner") and state["workflow_mode"] == "launch":
                 goto = "__end__"
         else:

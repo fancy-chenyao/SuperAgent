@@ -80,3 +80,32 @@ def test_validation_rejects_unknown_schema_and_version_mismatch() -> None:
         "CONTRACT_VERSION_MISMATCH",
         "UNREGISTERED_SCHEMA",
     }
+
+
+def test_validation_rejects_missing_required_output() -> None:
+    registry = SchemaRegistry()
+    registry.register(
+        "policy.info@v1",
+        {"required": ["answer"], "properties": {"answer": {"type": "string"}}},
+    )
+    registry.register(
+        "report.markdown@v1",
+        {"required": ["markdown"], "properties": {"markdown": {"type": "string"}}},
+    )
+    contract = AgentContract(
+        produces=[
+            DataContractRef(name="policy.info", schema_ref="policy.info@v1"),
+            DataContractRef(name="report.markdown", schema_ref="report.markdown@v1"),
+        ]
+    )
+    envelope = AgentResultEnvelope(
+        status="success",
+        outputs={"policy.info": {"answer": "ok"}},
+        metadata=_metadata(),
+    )
+
+    result = validate_agent_result(envelope, contract, registry)
+
+    assert not result.valid
+    assert result.errors[0].code == "MISSING_REQUIRED_OUTPUT"
+    assert result.errors[0].logical_name == "report.markdown"

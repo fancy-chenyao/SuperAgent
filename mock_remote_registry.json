@@ -45,6 +45,7 @@
         "contract_version": "1.0",
         "requires": [],
         "produces": ["employee.info", "employee.salary"],
+        "optional_produces": ["employee.salary"],
         "legacy_produces": ["employee.id", "employee.name"],
         "input_schema_refs": {},
         "output_schema_refs": {

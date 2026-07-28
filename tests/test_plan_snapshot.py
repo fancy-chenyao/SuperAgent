@@ -1,5 +1,6 @@
 """T11: PlanSnapshot hashing, persistence and consistency validation (C5)."""
 
+from src.contracts.agent_contract import AgentContract, DataContractRef
 from src.orchestration.plan_snapshot import (
     CONVERTER_VERSION,
     SCHEMA_VERSION,
@@ -248,3 +249,59 @@ def test_saved_snapshot_carries_converter_version_and_hash(tmp_path):
     assert snap["snapshot_hash"]
     loaded = load_plan_snapshot("wf-1", base_dir=tmp_path)
     assert loaded["snapshot_hash"] == snap["snapshot_hash"]
+
+
+def test_verify_uses_current_trusted_agent_contract(tmp_path):
+    contract = AgentContract(
+        produces=[
+            DataContractRef(name="employee.info", schema_ref="employee.info@v1")
+        ]
+    )
+    graph = plan_to_task_graph(
+        [_STEPS[0]],
+        task_id="wf-1",
+        subject="u1",
+        agent_contracts={"RemoteHRAssistantAgent": contract},
+    ).model_dump()
+    snap = save_plan_snapshot(
+        workflow_id="wf-1",
+        user_id="u1",
+        planning_steps=[_STEPS[0]],
+        task_graph=graph,
+        base_dir=tmp_path,
+    )
+
+    accepted, accepted_reason = verify_snapshot_for_execution(
+        snap,
+        workflow_id="wf-1",
+        user_id="u1",
+        planning_steps=[_STEPS[0]],
+        current_agent_contracts={
+            "RemoteHRAssistantAgent": contract.model_dump(mode="json")
+        },
+    )
+    missing, missing_reason = verify_snapshot_for_execution(
+        snap,
+        workflow_id="wf-1",
+        user_id="u1",
+        planning_steps=[_STEPS[0]],
+        current_agent_contracts={},
+    )
+    changed_contract = AgentContract(
+        produces=[
+            DataContractRef(name="employee.info", schema_ref="employee.info@v2")
+        ]
+    )
+    changed, changed_reason = verify_snapshot_for_execution(
+        snap,
+        workflow_id="wf-1",
+        user_id="u1",
+        planning_steps=[_STEPS[0]],
+        current_agent_contracts={
+            "RemoteHRAssistantAgent": changed_contract.model_dump(mode="json")
+        },
+    )
+
+    assert accepted is not None and accepted_reason == "ok"
+    assert missing is None and "current Agent contract missing" in missing_reason
+    assert changed is None and "task_graph mismatch" in changed_reason

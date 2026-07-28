@@ -122,6 +122,7 @@ def test_legacy_produces_coexist_with_contract(tmp_path) -> None:
             "contract_version": "1.0",
             "requires": [],
             "produces": ["employee.info", "employee.salary"],
+            "optional_produces": ["employee.salary"],
             "legacy_produces": ["employee.id", "employee.name"],
             "input_schema_refs": {},
             "output_schema_refs": {
@@ -151,11 +152,40 @@ def test_legacy_produces_coexist_with_contract(tmp_path) -> None:
         "employee.info",
         "employee.salary",
     ]
+    assert [ref.required for ref in agent.agent_contract.produces] == [True, False]
     card = build_agent_cards([agent])[0]
     assert [ref.name for ref in card.produces] == [
         "employee.info",
         "employee.salary",
     ]
+    assert [ref.required for ref in card.produces] == [True, False]
+
+
+def test_unknown_optional_contract_name_fails_closed(tmp_path) -> None:
+    resources = ResourceRegistry()
+    agents = AgentRegistry(tmp_path / "agents", tmp_path / "prompts")
+    spec = ResourceSpec(
+        type="agent",
+        name="BrokenOptionalContractAgent",
+        server_id="remote-demo",
+        endpoint="http://127.0.0.1:8010/agent",
+        metadata={
+            "contract_version": "1.0",
+            "produces": ["policy.info"],
+            "optional_produces": ["missing.output"],
+            "output_schema_refs": {"policy.info": "policy.info@v1"},
+        },
+    )
+
+    async def scenario():
+        await resources.register(spec, persist=False)
+        count = await sync_remote_agents(resources, agents)
+        return count, await agents.get("BrokenOptionalContractAgent")
+
+    count, agent = asyncio.run(scenario())
+
+    assert count == 0
+    assert agent is None
 
 
 def test_mock_registry_requires_are_satisfiable() -> None:

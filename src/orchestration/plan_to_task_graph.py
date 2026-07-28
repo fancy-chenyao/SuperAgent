@@ -157,7 +157,7 @@ def _derive_operation_mode(
 
 
 def _step_id_for(index: int, raw: Dict[str, Any]) -> str:
-    explicit = raw.get("step_id")
+    explicit = raw.get("step_id") or raw.get("subtask_id")
     return str(explicit) if explicit else f"step_{index + 1}"
 
 
@@ -265,8 +265,9 @@ def plan_to_task_graph(
         planning_steps = derive_step_dependencies(planning_steps, subtasks)
 
     steps: List[TaskStep] = []
-    # Map agent_name -> most-recent prior step_id (source_step references agents).
-    agent_to_step: Dict[str, str] = {}
+    # Resolve references by step_id/subtask_id first, while retaining the
+    # legacy agent_name -> most-recent prior step mapping.
+    reference_to_step: Dict[str, str] = {}
 
     for idx, raw in enumerate(planning_steps or []):
         if not isinstance(raw, dict):
@@ -276,6 +277,10 @@ def plan_to_task_graph(
 
         inputs = raw.get("inputs") or []
         depends_on: List[str] = []
+        for dependency_ref in raw.get("depends_on") or []:
+            resolved = reference_to_step.get(str(dependency_ref))
+            if resolved and resolved not in depends_on:
+                depends_on.append(resolved)
         for binding in inputs:
             if not isinstance(binding, dict):
                 continue
@@ -287,6 +292,10 @@ def plan_to_task_graph(
                         "source_step/source_output"
                     )
                 source_bindings = sources
+            elif sources is not None:
+                raise TaskGraphValidationError(
+                    "source_artifacts must be a list"
+                )
             else:
                 source_bindings = [binding]
             for source_binding in source_bindings:
@@ -297,13 +306,9 @@ def plan_to_task_graph(
                 source_step = source_binding.get("source_step")
                 if not source_step:
                     continue
-                resolved = agent_to_step.get(str(source_step), str(source_step))
+                resolved = reference_to_step.get(str(source_step))
                 if resolved and resolved not in depends_on:
                     depends_on.append(resolved)
-        for dependency in raw.get("depends_on") or []:
-            resolved = agent_to_step.get(str(dependency), str(dependency))
-            if resolved and resolved not in depends_on:
-                depends_on.append(resolved)
 
         # The registry-provided contract is trusted platform metadata. Planner
         # output is untrusted and must never replace it with a weaker contract.
@@ -374,13 +379,26 @@ def plan_to_task_graph(
                 contract.model_dump(mode="json") if contract else None
             ),
             verification_contract=dict(raw.get("verification_contract") or {}),
+            subtask_ids=raw.get("subtask_ids", []) or (
+                [raw.get("subtask_id")] if raw.get("subtask_id") else []
+            ),
+            intents=raw.get("intents", []) or (
+                [raw.get("intent")] if raw.get("intent") else []
+            ),
             # trusted classification audit trail
             operation_mode_source=operation_mode_source,
             operation_mode_reason=operation_mode_reason,
         )
         steps.append(step)
+        reference_to_step[step_id] = step_id
+        subtask_ids = raw.get("subtask_ids")
+        if not isinstance(subtask_ids, list):
+            subtask_ids = [raw.get("subtask_id")] if raw.get("subtask_id") else []
+        for subtask_id in subtask_ids:
+            if subtask_id:
+                reference_to_step[str(subtask_id)] = step_id
         if agent_name:
-            agent_to_step[agent_name] = step_id
+            reference_to_step[agent_name] = step_id
 
     graph = TaskGraph(spec=TaskSpec(
         task_id=task_id, goal=goal, subject=subject), steps=steps)

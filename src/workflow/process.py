@@ -150,6 +150,20 @@ def _agent_capability_bindings(agent_cards: Any) -> dict[str, list[str]]:
     return bindings
 
 
+def _current_agent_contracts(agent_cards: Any) -> dict[str, dict[str, Any]]:
+    """Extract only current trusted registry Contracts from serialized cards."""
+
+    contracts: dict[str, dict[str, Any]] = {}
+    for card in agent_cards if isinstance(agent_cards, list) else []:
+        if not isinstance(card, dict):
+            continue
+        agent_id = str(card.get("agent_id") or card.get("name") or "").strip()
+        contract = card.get("agent_contract")
+        if agent_id and isinstance(contract, dict):
+            contracts[agent_id] = contract
+    return contracts
+
+
 async def _execute_node_with_runtime_events(
     state: State, node_func, enable_runtime_events: bool
 ):
@@ -228,6 +242,9 @@ def load_production_task_graph(state: dict, execution_phase: str) -> tuple[bool,
         planning_steps=current_steps,
         goal=state.get("original_user_query", "")
         or state.get("USER_QUERY", ""),
+        current_agent_contracts=_current_agent_contracts(
+            state.get("agent_cards")
+        ),
     )
     if task_graph is None:
         logger.warning("plan snapshot rejected for %s: %s",
@@ -563,6 +580,12 @@ async def run_agent_workflow(
     memory_context: dict[str, Any] | None = None,
     skill_reuse_enabled: bool | None = None,
     request_input_messages: list | None = None,
+    current_request: str | None = None,
+    raw_request: str | None = None,
+    entity_overrides: dict[str, Any] | None = None,
+    context_references: list[dict[str, Any]] | None = None,
+    context_artifacts: list[dict[str, Any]] | None = None,
+    conversation_context: dict[str, Any] | None = None,
 ):
     """Run the agent workflow with the given user input.
 
@@ -612,6 +635,16 @@ async def run_agent_workflow(
         try:
             await _prepare_execution_graph(workflow_id, user_id, resume_step=resume_step)
         except RuntimeError as exc:
+            error_text = str(exc)
+            if error_text == "no planning steps found for execution":
+                reason_code = "PLAN_STEPS_UNAVAILABLE"
+                reason = "Confirmed planning steps could not be loaded for execution"
+            elif error_text.startswith("missing agents for execution:"):
+                reason_code = "EXECUTION_AGENTS_UNAVAILABLE"
+                reason = "One or more planned agents are unavailable"
+            else:
+                reason_code = "WORKFLOW_PREPARATION_FAILED"
+                reason = "Workflow preparation failed"
             logger.warning(
                 "S-ABAC workflow preparation blocked execution: %s", exc)
             yield {
@@ -619,8 +652,9 @@ async def run_agent_workflow(
                 "data": {
                     "workflow_id": workflow_id,
                     "task_id": task_id or CheckpointManager.generate_task_id(workflow_id),
-                    "error": str(exc),
-                    "reason": "No executable planning steps after permission filtering",
+                    "error": error_text,
+                    "reason": reason,
+                    "reason_code": reason_code,
                 },
             }
             return
@@ -643,11 +677,14 @@ async def run_agent_workflow(
         coor_agents=coor_agents,
     )
     registered_agents = await agent_manager.agent_registry.list()
-    instruction_history_for_route = cache.get_instruction_history(workflow_id) or [
-    ]
-    routing_query = "\n".join(
-        str(item) for item in instruction_history_for_route if str(item).strip()
-    ) or original_user_query or user_input_messages[-1]["content"]
+    # 对话历史只用于显示、审计和记忆，不得再拼接后交给任务边界识别。
+    # 当前请求已经由 ConversationContextResolver 完成澄清回填和指代消解。
+    routing_query = (
+        str(current_request or "").strip()
+        or str(instruction or "").strip()
+        or str(original_user_query or "").strip()
+        or str(user_input_messages[-1]["content"])
+    )
     task_profile_model, agent_cards, routing_decision_model = await make_routing_decision(
         user_query=routing_query,
         task_id=task_id,
@@ -658,6 +695,11 @@ async def run_agent_workflow(
             "workflow_mode": str(workmode),
             "s_abac_enabled": S_ABAC_ENABLED,
         },
+        entity_overrides=dict(entity_overrides or {}),
+        context_references=list(context_references or []),
+        context_artifacts=list(context_artifacts or []),
+        conversation_context=dict(conversation_context or {}),
+        raw_request=raw_request or routing_query,
     )
     routing_decision = routing_decision_model.model_dump()
     routing_decision_for_prompt = dict(routing_decision)
@@ -707,10 +749,12 @@ async def run_agent_workflow(
             "TEAM_MEMBERS_DESCRIPTION": team_members_description,
             "TOOLS": tools_description,
             "RESOURCE_CATALOG": resource_catalog,
-            "USER_QUERY": original_user_query or user_input_messages[-1]["content"],
-            "execution_user_query": user_input_messages[-1]["content"],
-            "original_user_query": original_user_query or user_input_messages[-1]["content"],
-            "messages": user_input_messages,
+            "USER_QUERY": routing_query,
+            "execution_user_query": routing_query,
+            "original_user_query": routing_query,
+            # LLM 工作节点只处理本轮已解析请求。完整聊天记录已经由记忆系统
+            # 独立保存，不能作为多条 user message 再次进入 Planner。
+            "messages": [{"role": "user", "content": routing_query}],
             "deep_thinking_mode": deep_thinking_mode,
             "search_before_planning": search_before_planning,
             "workflow_id": workflow_id,
@@ -718,7 +762,8 @@ async def run_agent_workflow(
             "polish_instruction": polish_instruction,
             "initialized": False,
             "stop_after_planner": stop_after_planner,
-            "instruction_history": cache.get_instruction_history(workflow_id),
+            # Planner 只接收当前已解析请求；完整会话历史保留在 cache/memory。
+            "instruction_history": [routing_query],
             "task_profile": task_profile,
             "task_profile_reason": task_profile.get("reason", ""),
             "scenario_tags": task_profile.get("scenario_tags", []),

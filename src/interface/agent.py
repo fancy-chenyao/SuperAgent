@@ -1,5 +1,5 @@
 ﻿from enum import Enum, unique
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Literal, Optional
 
 try:
     from langgraph.graph import MessagesState
@@ -159,6 +159,14 @@ class AgentRequest(BaseModel):
     memory_session_id: Optional[str] = None
     memory_enabled: Optional[bool] = None
     skill_reuse_enabled: Optional[bool] = None
+    # Chat 每轮请求的结构化上下文。旧客户端不传时继续按普通请求处理。
+    turn_type: Literal["request", "clarification_answer"] = "request"
+    clarification_context: Dict[str, Any] = Field(default_factory=dict)
+    context_entities: Dict[str, Any] = Field(default_factory=dict)
+    context_artifacts: List[Dict[str, Any]] = Field(default_factory=list)
+    resolved_request: Optional[str] = None
+    current_request_entities: Dict[str, Any] = Field(default_factory=dict)
+    context_references: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 class listAgentRequest(BaseModel):
