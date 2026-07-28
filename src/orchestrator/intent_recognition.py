@@ -325,8 +325,32 @@ def segment_query(text: str) -> list[dict[str, Any]]:
 _PERSON_STOP_WORDS = {
     "员工", "人员", "人事", "基本", "个人", "相关", "这个", "那个", "公司", "部门",
     "收入", "在职", "请假", "分析", "明天", "今天", "后天", "本周", "下周", "本月", "下月",
-    "一次", "一场", "一个", "会议", "参会人", "收件人",
+    "最近", "一次", "一场", "一个", "会议", "参会人", "收件人",
 }
+_GENERIC_PERSON_PREFIXES = (
+    "我们",
+    "咱们",
+    "大家",
+    "全体",
+    "所有",
+    "员工",
+    "人员",
+    "部门",
+    "公司",
+)
+_ORGANIZATION_SUBJECT_SUFFIXES = (
+    "部门",
+    "公司",
+    "团队",
+    "小组",
+    "中心",
+    "办公室",
+    "事业部",
+    "分部",
+    "处室",
+    "科室",
+    "部",
+)
 
 _LEAVE_QUERY_SUBJECT_PATTERN = (
     r"(?:^|[，,。；;\s])"
@@ -339,7 +363,11 @@ _LEAVE_QUERY_SUBJECT_PATTERN = (
 
 def is_person_candidate(value: Any) -> bool:
     candidate = str(value or "").strip()
-    return 2 <= len(candidate) <= 8 and candidate not in _PERSON_STOP_WORDS
+    if not 2 <= len(candidate) <= 8 or candidate in _PERSON_STOP_WORDS:
+        return False
+    if candidate.startswith(_GENERIC_PERSON_PREFIXES):
+        return False
+    return not candidate.endswith(_ORGANIZATION_SUBJECT_SUFFIXES)
 
 
 def extract_entities(text: str) -> dict[str, Any]:
@@ -542,15 +570,21 @@ class RuleIntentRecognizer:
                 continue
             keywords = tuple(definition.get("keywords") or ())
             matches = _find_keyword_spans(text, keywords)
+            pattern_matches: list[tuple[int, str]] = []
             for pattern in definition.get("patterns") or ():
-                matches.extend(
+                pattern_matches.extend(
                     (match.start(), match.group(0))
                     for match in re.finditer(str(pattern), text, flags=re.IGNORECASE)
                 )
-            matches = _exclude_context_matches(
-                text,
-                matches,
-                tuple(str(item) for item in definition.get("context_exclusions") or ()),
+            matches.extend(
+                _exclude_context_matches(
+                    text,
+                    pattern_matches,
+                    tuple(
+                        str(item)
+                        for item in definition.get("context_exclusions") or ()
+                    ),
+                )
             )
             matches = sorted(set(matches))
             if not matches:

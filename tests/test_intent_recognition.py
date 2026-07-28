@@ -331,6 +331,19 @@ def test_leave_query_subject_does_not_include_colloquial_prefixes() -> None:
         assert entities["people"] == [expected_name]
 
 
+def test_generic_leave_subjects_do_not_become_employee_names() -> None:
+    for query in (
+        "员工最近有没有请假",
+        "我们部门最近有没有请假",
+        "大家最近有没有请假",
+        "销售部最近有没有请假",
+    ):
+        entities = extract_entities(query)
+
+        assert "employee_name" not in entities
+        assert not entities.get("people")
+
+
 def test_leave_policy_questions_do_not_create_leave_record_tasks() -> None:
     cases = (
         "公司有没有请假相关的管理制度",
@@ -344,6 +357,18 @@ def test_leave_policy_questions_do_not_create_leave_record_tasks() -> None:
 
         assert "knowledge_lookup" in executable_names
         assert "leave_record_query" not in executable_names
+
+
+def test_explicit_leave_record_keyword_survives_policy_context() -> None:
+    for query in (
+        "根据公司请假制度查询张三的请假记录",
+        "按照休假政策查询李娜的休假记录",
+    ):
+        result = _run(RuleIntentRecognizer().recognize(query))
+        executable_names = {item.name for item in result.executable_intents}
+
+        assert "knowledge_lookup" in executable_names
+        assert "leave_record_query" in executable_names
 
 
 def test_leave_policy_exclusion_is_scoped_to_its_clause() -> None:
