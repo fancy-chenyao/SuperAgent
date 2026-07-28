@@ -9,6 +9,7 @@ from .agent_result import (
     AgentResultStatus,
     validate_agent_result,
 )
+from .conversation_context import ContextReference, ResolvedRequest
 from .routing_decision import ExcludedAgent, RoutingCandidate, RoutingDecision
 from .task_profile import TaskProfile
 
@@ -23,7 +24,9 @@ __all__ = [
     "AgentResultMetadata",
     "AgentResultStatus",
     "validate_agent_result",
+    "ContextReference",
     "ExcludedAgent",
+    "ResolvedRequest",
     "RoutingCandidate",
     "RoutingDecision",
     "TaskProfile",
