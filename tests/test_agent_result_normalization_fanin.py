@@ -185,6 +185,59 @@ def test_builtin_schema_registration_does_not_replace_existing_schema():
     assert registry.has("policy.info@v1")
 
 
+def test_fan_in_schema_backfill_does_not_replace_existing_schema(monkeypatch):
+    """The fan-in assembly backfill must only fill missing built-in schemas,
+    never replace a stricter schema already registered under the same ref."""
+    from src.orchestration import schema_registry as registry_module
+
+    fresh = SchemaRegistry()
+    strict_schema = {
+        "required": ["sentinel"],
+        "properties": {"sentinel": {"type": "string"}},
+    }
+    fresh.register("employee.info@v1", strict_schema)
+    monkeypatch.setattr(registry_module, "_DEFAULT_REGISTRY", fresh)
+
+    report_contract = AgentContract(
+        requires=[
+            DataContractRef(name="report.sources", schema_ref="report.sources@v1")
+        ],
+        produces=[
+            DataContractRef(name="report.markdown", schema_ref="report.markdown@v1")
+        ],
+    )
+    step = TaskStep(
+        step_id="report",
+        operation_mode="read",
+        agent_contract=report_contract,
+        input_bindings=[
+            {
+                "parameter_name": "report.sources",
+                "source_artifacts": [
+                    {"source_step": "hr", "source_output": "employee.info"}
+                ],
+                "assembly": {"schema_ref": "report.sources@v1"},
+            }
+        ],
+    )
+    scheduler = TaskScheduler(execute_step=lambda **kwargs: None)
+    employee_ref = scheduler.store.put(
+        Artifact(
+            logical_name="employee.info",
+            schema_ref="employee.info@v1",
+            payload={"records": []},
+            schema_valid=True,
+        )
+    )
+    scheduler._outputs = {"hr": {"employee.info": employee_ref}}
+
+    resolved, _refs, _sensitivities = scheduler._resolve_inputs(step, {})
+
+    assert fresh.get("employee.info@v1") == strict_schema
+    assert fresh.has("report.sources@v1")
+    assert len(resolved["report.sources"]["sources"]) == 1
+
+
 def test_side_effect_normalization_failure_does_not_complete_success_receipt():
     schema_ref = "test.side-effect-result@v1"
     get_schema_registry().register(

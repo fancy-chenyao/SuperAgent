@@ -305,3 +305,82 @@ def test_verify_uses_current_trusted_agent_contract(tmp_path):
     assert accepted is not None and accepted_reason == "ok"
     assert missing is None and "current Agent contract missing" in missing_reason
     assert changed is None and "task_graph mismatch" in changed_reason
+
+
+def test_verify_rejects_contract_stripped_snapshot(tmp_path):
+    """A snapshot without Contract fields (taken before the Agent adopted a
+    Contract, or stripped and resealed by a tamperer) must NOT let a currently
+    contracted Agent execute on the schema-free legacy path."""
+    contractless_graph = plan_to_task_graph(
+        [_STEPS[0]], task_id="wf-1", subject="u1"
+    ).model_dump()
+    snap = save_plan_snapshot(
+        workflow_id="wf-1",
+        user_id="u1",
+        planning_steps=[_STEPS[0]],
+        task_graph=contractless_graph,
+        base_dir=tmp_path,
+    )
+    contract = AgentContract(
+        produces=[
+            DataContractRef(name="employee.info", schema_ref="employee.info@v1")
+        ]
+    )
+
+    rejected, reason = verify_snapshot_for_execution(
+        snap,
+        workflow_id="wf-1",
+        user_id="u1",
+        planning_steps=[_STEPS[0]],
+        current_agent_contracts={
+            "RemoteHRAssistantAgent": contract.model_dump(mode="json")
+        },
+    )
+
+    assert rejected is None and "task_graph mismatch" in reason
+
+
+def test_verify_rejects_resealed_expected_outputs_tampering(tmp_path):
+    """expected_outputs must come from the current registry, never echoed from
+    the snapshot: a resealed snapshot with tampered outputs is rejected."""
+    snap = _saved_snapshot(tmp_path, steps=[_STEPS[0]])
+    snap["task_graph"]["steps"][0]["expected_outputs"] = ["tampered.output"]
+    _reseal(snap)
+
+    tg, reason = _verify(snap, planning_steps=[_STEPS[0]])
+
+    assert tg is None and "task_graph mismatch" in reason
+
+
+def test_verify_uses_current_registry_produces(tmp_path):
+    """The rebuild's agent_produces is sourced from the trusted registry: the
+    same mapping accepts, a drifted (empty) mapping rejects."""
+    produces = {"RemoteHRAssistantAgent": ["employee.info"]}
+    graph = plan_to_task_graph(
+        [_STEPS[0]], task_id="wf-1", subject="u1", agent_produces=produces
+    ).model_dump()
+    snap = save_plan_snapshot(
+        workflow_id="wf-1",
+        user_id="u1",
+        planning_steps=[_STEPS[0]],
+        task_graph=graph,
+        base_dir=tmp_path,
+    )
+
+    accepted, accepted_reason = verify_snapshot_for_execution(
+        snap,
+        workflow_id="wf-1",
+        user_id="u1",
+        planning_steps=[_STEPS[0]],
+        current_agent_produces=produces,
+    )
+    drifted, drifted_reason = verify_snapshot_for_execution(
+        snap,
+        workflow_id="wf-1",
+        user_id="u1",
+        planning_steps=[_STEPS[0]],
+        current_agent_produces={},
+    )
+
+    assert accepted is not None and accepted_reason == "ok"
+    assert drifted is None and "task_graph mismatch" in drifted_reason

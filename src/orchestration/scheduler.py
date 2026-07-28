@@ -1112,11 +1112,14 @@ class TaskScheduler:
                 if target_schema:
                     registry = get_schema_registry()
                     if not registry.has(target_schema):
-                        from src.contracts.agent_schema_catalog import (
-                            register_agent_schemas,
+                        # Only fill missing built-in schemas: callers may have
+                        # registered a stricter schema under the same versioned
+                        # reference, which must never be silently replaced.
+                        from src.manager.executor.agent_result_adapter import (
+                            _register_missing_agent_schemas,
                         )
 
-                        register_agent_schemas(registry)
+                        _register_missing_agent_schemas(registry)
                     valid, errors = registry.validate(assembled, target_schema)
                     if not valid:
                         raise InputResolutionError(
