@@ -11,6 +11,8 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from src.contracts.agent_contract import AgentContract
+
 from .artifact import ArtifactRef
 
 
@@ -60,7 +62,13 @@ class TaskStep(BaseModel):
     # param_name -> ArtifactRef (filled at author time for hand-written graphs,
     # or by the scheduler as upstream steps complete).
     required_inputs: Dict[str, ArtifactRef] = Field(default_factory=dict)
+    # Planner-authored symbolic bindings. A binding uses either the legacy
+    # single source_step/source_output form or the fan-in source_artifacts form.
+    input_bindings: List[Dict[str, Any]] = Field(default_factory=list)
     expected_outputs: List[str] = Field(default_factory=list)  # logical names
+    expected_schema_ref: Optional[str] = None  # legacy primary-output schema
+    expected_schema_refs: Dict[str, str] = Field(default_factory=dict)
+    agent_contract: Optional[AgentContract] = None
     depends_on: List[str] = Field(default_factory=list)  # upstream step_ids
     completion_conditions: List[CompletionCondition] = Field(
         default_factory=list)

@@ -222,6 +222,52 @@ def test_prepopulated_graph_is_replaced_by_approved_snapshot(monkeypatch):
     assert state["task_graph"] == approved
 
 
+def test_registry_unavailable_rejects_snapshot_and_fails_closed(monkeypatch):
+    """When the trusted registry cannot be reached, the snapshot gate must
+    refuse injection outright (never verify against checkpoint agent_cards),
+    drop any pre-populated graph, and fail the workflow closed."""
+    tg = plan_to_task_graph(
+        _STEPS,
+        task_id="wf-t12",
+        subject="u1",
+        goal="查询王强信息",
+    ).model_dump()
+    save_plan_snapshot(
+        workflow_id="wf-t12", user_id="u1", planning_steps=_STEPS, task_graph=tg
+    )
+    monkeypatch.setattr(
+        proc, "orchestration_scheduler_enabled", True, raising=False)
+    monkeypatch.setattr(proc.cache, "get_planning_steps",
+                        lambda wf: _STEPS, raising=False)
+
+    async def _registry_down(_user_id):
+        raise RuntimeError("registry down")
+
+    monkeypatch.setattr(proc, "_trusted_registry_contract_data", _registry_down)
+
+    entered = {"v": False}
+
+    async def _fake_scheduler(state, *, task_id, **kwargs):
+        entered["v"] = True
+        yield {}
+
+    monkeypatch.setattr(runtime_mod, "run_scheduler_workflow",
+                        _fake_scheduler, raising=False)
+
+    state = _production_state()
+    # A checkpoint/caller-supplied graph must not survive the refusal: the
+    # scheduler gate must see no graph (proven by entered=False + FAILED).
+    state["task_graph"] = tg
+    workflow = SimpleNamespace(start_node="coordinator", nodes={})
+    events = _drive(workflow, state, task_id="task-registry-down",
+                    execution_phase="execution")
+
+    assert entered["v"] is False
+    assert events[-1]["event"] == "end_of_workflow"
+    assert events[-1]["data"]["status"] == "FAILED"
+    assert events[-1]["data"]["reason"] == "scheduler_gate_fail_closed"
+
+
 def test_t13_scheduler_disabled_uses_legacy_and_does_not_enter_scheduler(monkeypatch):
     from langgraph.types import Command
 

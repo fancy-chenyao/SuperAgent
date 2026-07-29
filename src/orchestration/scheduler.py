@@ -24,7 +24,11 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from src.interface.artifact import StepResult, StepStatus
 from src.interface.task_graph import TaskGraph, TaskStep, WorkflowStatus
-from src.manager.executor.artifact_adapter import to_artifact
+from src.manager.executor.agent_result_adapter import (
+    AgentResultNormalizationError,
+    normalize_agent_result,
+)
+from src.manager.executor.artifact_adapter import to_artifacts
 from src.manager.executor.base import ExecutionStatus
 from src.orchestration.completion import (
     ClaimStatus,
@@ -40,6 +44,7 @@ from src.orchestration.resolver import (
     ArtifactSchemaIncompatible,
     ArtifactSchemaInvalid,
 )
+from src.orchestration.schema_registry import get_schema_registry
 from src.orchestration.store import ArtifactNotFoundError, ArtifactStore
 
 # execute_step(step, selected_agent, inputs, context) -> ExecuteResult-like
@@ -616,13 +621,28 @@ class TaskScheduler:
                             None) or "side-effect step failed",
                 )
             result: Optional[StepResult] = self._record_success(
-                step, exec_result, step_ctx, 1)
+                step, exec_result, step_ctx, 1, selected_agent)
             result.metrics["idempotency_key"] = idem_key
+            if not result.is_success:
+                # The external side effect may already have happened, but its
+                # business result could not be normalized/validated. Keep the
+                # STARTED receipt and require reconciliation; never persist a
+                # contradictory SUCCEEDED receipt with a FAILED step.
+                reconciled = self._needs_reconciliation(
+                    step,
+                    selected_agent,
+                    result.error or "side-effect result validation failed",
+                    external_op_id=_external_operation_id(exec_result, None),
+                )
+                reconciled.metrics.update(result.metrics)
+                reconciled.metrics["needs_reconciliation"] = True
+                return reconciled
         else:
             # Read-only (or no receipt store): the original retry behavior. A
             # non-read step without a receipt store still runs at most once.
             attempts = max(1, step.retry + 1) if step.is_read_only else 1
             last_error: Optional[str] = None
+            last_failed: Optional[StepResult] = None
             result = None
             for attempt in range(attempts):
                 try:
@@ -635,13 +655,26 @@ class TaskScheduler:
                     continue
 
                 if getattr(exec_result, "is_success", True):
-                    result = self._record_success(
-                        step, exec_result, step_ctx, attempt + 1)
-                    break
+                    candidate = self._record_success(
+                        step, exec_result, step_ctx, attempt + 1, selected_agent)
+                    if candidate.is_success:
+                        result = candidate
+                        break
+                    # Normalization/validation failed on a read-only step: no
+                    # durable state was published, so the remaining retry
+                    # budget still applies. Keep the classified failure (incl.
+                    # the Agent's retryable verdict) as the terminal candidate.
+                    last_failed = candidate
+                    last_error = candidate.error or "result normalization failed"
+                    continue
                 last_error = getattr(exec_result, "error",
                                      None) or "step failed"
 
             if result is None:
+                if last_failed is not None:
+                    last_failed.metrics.setdefault(
+                        "selected_agent", selected_agent)
+                    return last_failed
                 return StepResult(
                     step_id=step.step_id,
                     status=StepStatus.FAILED,
@@ -728,35 +761,118 @@ class TaskScheduler:
             return await asyncio.wait_for(coro, step.timeout)
         return await coro
 
+    def _trusted_agent_contract(self, agent_name: str, context: dict) -> Any:
+        """Trusted registry contract for a dynamically routed Agent (or None).
+
+        ``context["agents"]`` is the runtime's registry listing (the same
+        trusted source routing selects from), never planner output.
+        """
+        for agent in (context or {}).get("agents") or []:
+            if str(getattr(agent, "agent_name", "") or "") == str(agent_name):
+                return getattr(agent, "agent_contract", None)
+        return None
+
     def _record_success(
-        self, step: TaskStep, exec_result: Any, context: dict, attempts: int
+        self,
+        step: TaskStep,
+        exec_result: Any,
+        context: dict,
+        attempts: int,
+        selected_agent: Optional[str] = None,
     ) -> StepResult:
-        artifact = to_artifact(
-            exec_result,
-            step=step,
-            context=context.get("execution_context"),
-            upstream_sensitivities=context.get("upstream_sensitivities"),
+        # The result is attributed to and validated against the Agent that
+        # ACTUALLY ran. When routing picked a different Agent than the plan,
+        # binding the planned Agent's identity/contract would either reject a
+        # legitimate envelope (PRODUCER_AGENT_MISMATCH) or misattribute a
+        # legacy payload to the wrong producer.
+        planned_agent = (
+            getattr(step, "agent_name", None)
+            or getattr(step, "preferred_resource_id", None)
         )
+        producer_agent = selected_agent or planned_agent
+        contract = getattr(step, "agent_contract", None)
+        if selected_agent and planned_agent and selected_agent != planned_agent:
+            contract = self._trusted_agent_contract(selected_agent, context)
+            if contract is None and getattr(step, "agent_contract", None) is not None:
+                # The planned step is contracted but the rerouted Agent has no
+                # trusted contract: the result cannot be validated -> refuse.
+                return StepResult(
+                    step_id=step.step_id,
+                    status=StepStatus.FAILED,
+                    error=(
+                        f"no trusted contract for rerouted agent "
+                        f"{selected_agent!r}: refusing to publish an "
+                        "unvalidated result"
+                    ),
+                    metrics={
+                        "attempts": attempts,
+                        "result_error": "REROUTED_AGENT_CONTRACT_MISSING",
+                        "selected_agent": selected_agent,
+                    },
+                )
+        try:
+            normalized = normalize_agent_result(
+                exec_result,
+                agent_contract=contract,
+                expected_outputs=list(step.expected_outputs),
+                producer_agent=producer_agent,
+            )
+            artifacts = to_artifacts(
+                normalized,
+                exec_result,
+                step=step,
+                context=context.get("execution_context"),
+                upstream_sensitivities=context.get("upstream_sensitivities"),
+            )
+        except AgentResultNormalizationError as exc:
+            return StepResult(
+                step_id=step.step_id,
+                status=StepStatus.FAILED,
+                error=str(exc),
+                metrics={
+                    "attempts": attempts,
+                    "result_error": exc.code,
+                    "result_error_details": exc.details,
+                    "result_retryable": exc.retryable,
+                },
+            )
+
         upstream_refs = list(context.get("upstream_artifact_refs") or [])
-        if upstream_refs:
-            lineage = list(artifact.derived_from or [])
-            seen = {
-                (ref.artifact_id, ref.version, ref.selector)
-                for ref in lineage
-            }
-            for ref in upstream_refs:
-                key = (ref.artifact_id, ref.version, ref.selector)
-                if key not in seen:
-                    lineage.append(ref)
-                    seen.add(key)
-            artifact = artifact.model_copy(update={"derived_from": lineage})
-        ref = self.store.put(artifact)
-        names = list(step.expected_outputs) or [artifact.logical_name]
-        outputs = {name: ref for name in names}
+        outputs: Dict[str, Any] = {}
+        stored_artifacts: list[Any] = []
+        for logical_name, artifact in artifacts.items():
+            if upstream_refs:
+                lineage = list(artifact.derived_from or [])
+                seen = {
+                    (ref.artifact_id, ref.version, ref.selector)
+                    for ref in lineage
+                }
+                for ref in upstream_refs:
+                    key = (ref.artifact_id, ref.version, ref.selector)
+                    if key not in seen:
+                        lineage.append(ref)
+                        seen.add(key)
+                artifact = artifact.model_copy(update={"derived_from": lineage})
+            # Contracted output validation is a publication boundary. An
+            # invalid typed result must never be registered for downstream use.
+            if contract is not None and artifact.schema_valid is not True:
+                return StepResult(
+                    step_id=step.step_id,
+                    status=StepStatus.FAILED,
+                    error=f"output {logical_name!r} failed schema validation",
+                    metrics={
+                        "attempts": attempts,
+                        "result_error": "SCHEMA_VALIDATION_FAILED",
+                    },
+                )
+            outputs[logical_name] = self.store.put(artifact)
+            stored_artifacts.append(artifact)
+
         metrics: Dict[str, Any] = {"attempts": attempts}
         # Carry the external operation id (e.g. provider message id) so the
         # receipt records a verifiable side-effect identifier.
-        external_op_id = _external_operation_id(exec_result, artifact)
+        primary_artifact = stored_artifacts[0] if stored_artifacts else None
+        external_op_id = _external_operation_id(exec_result, primary_artifact)
         if external_op_id is not None:
             metrics["external_op_id"] = external_op_id
         return StepResult(
@@ -860,6 +976,46 @@ class TaskScheduler:
                 param=param, source=source, reason="selector_error", detail=str(exc)
             ) from exc
 
+    def _require_contract_inputs(
+        self,
+        step: TaskStep,
+        resolved: Dict[str, Any],
+        *,
+        context: dict,
+        consumer_agent: Optional[str] = None,
+    ) -> None:
+        """Every ``required`` Agent-contract input must be resolved before the
+        Agent runs. A plan that simply omits the binding must fail closed here,
+        never silently degrade to LLM parameter extraction inside the Agent.
+
+        Symmetric with the result-side contract binding: when routing selected
+        a different Agent than the plan, the requirement set comes from the
+        ACTUAL Agent's trusted contract, not the planned one. A rerouted Agent
+        without a trusted contract is not checked here -- the result side
+        already fails closed (REROUTED_AGENT_CONTRACT_MISSING) before anything
+        is published."""
+        contract = getattr(step, "agent_contract", None)
+        planned_agent = (
+            getattr(step, "agent_name", None)
+            or getattr(step, "preferred_resource_id", None)
+        )
+        if consumer_agent and planned_agent and consumer_agent != planned_agent:
+            contract = self._trusted_agent_contract(consumer_agent, context)
+        if contract is None:
+            return
+        missing = [
+            ref.name
+            for ref in contract.requires
+            if ref.required and ref.name not in resolved
+        ]
+        if missing:
+            raise InputResolutionError(
+                param=missing[0],
+                source=None,
+                reason="required_contract_input_missing",
+                detail=f"contract requires unresolved inputs: {missing}",
+            )
+
     def _resolve_inputs(
         self, step: TaskStep, context: dict, *, consumer_agent: Optional[str] = None
     ) -> tuple[Dict[str, Any], list, list]:
@@ -906,6 +1062,9 @@ class TaskScheduler:
         # 2) Planner-derived symbolic input bindings.
         bindings = getattr(step, "input_bindings", None)
         if not isinstance(bindings, list):
+            self._require_contract_inputs(
+                step, resolved, context=context, consumer_agent=consumer_agent
+            )
             return resolved, upstream_sensitivities, upstream_refs
         for binding in bindings:
             if not isinstance(binding, dict):
@@ -913,7 +1072,167 @@ class TaskScheduler:
             param = binding.get("parameter_name")
             src_agent = binding.get("source_step")
             src_output = binding.get("source_output")
+            source_artifacts = binding.get("source_artifacts")
             optional = bool(binding.get("optional", False))
+            if source_artifacts is not None and not isinstance(source_artifacts, list):
+                raise InputResolutionError(
+                    param=str(param or ""),
+                    source=None,
+                    reason="invalid_fan_in",
+                    detail="source_artifacts must be a list",
+                )
+            if isinstance(source_artifacts, list):
+                if not param:
+                    raise InputResolutionError(
+                        param="",
+                        source=None,
+                        reason="invalid_fan_in",
+                        detail="fan-in binding requires parameter_name",
+                    )
+                if src_agent or src_output:
+                    raise InputResolutionError(
+                        param=param,
+                        source=None,
+                        reason="invalid_fan_in",
+                        detail="single-source and source_artifacts forms cannot be mixed",
+                    )
+                if param in required_params or param in resolved:
+                    raise InputResolutionError(
+                        param=param,
+                        source=None,
+                        reason="duplicate_param",
+                    )
+                contract_data = getattr(step, "agent_contract", None)
+                contract_requires = (
+                    list(contract_data.requires)
+                    if contract_data is not None
+                    else []
+                )
+                contract_input = next(
+                    (ref for ref in contract_requires if ref.name == param),
+                    None,
+                )
+                binding_optional = optional and (
+                    contract_input is None or not contract_input.required
+                )
+                if not source_artifacts:
+                    if binding_optional:
+                        continue
+                    raise InputResolutionError(
+                        param=param,
+                        source=None,
+                        reason="invalid_fan_in",
+                        detail="source_artifacts must not be empty",
+                    )
+                assembled_sources: list[dict[str, Any]] = []
+                binding_refs: list[Any] = []
+                binding_sensitivities: list[Any] = []
+                optional_source_missing = False
+                for source_binding in source_artifacts:
+                    if not isinstance(source_binding, dict):
+                        raise InputResolutionError(
+                            param=param,
+                            source=None,
+                            reason="invalid_fan_in",
+                            detail="source_artifacts entries must be objects",
+                        )
+                    source_step = source_binding.get("source_step")
+                    source_output = source_binding.get("source_output")
+                    source_step_id = self._find_source_step(source_step)
+                    ref = (
+                        self._outputs.get(source_step_id, {}).get(source_output)
+                        if source_step_id and source_output
+                        else None
+                    )
+                    if ref is None:
+                        if binding_optional:
+                            optional_source_missing = True
+                            break
+                        raise InputResolutionError(
+                            param=param,
+                            source=source_step,
+                            reason="artifact_not_produced",
+                        )
+                    value, sensitivity = self._resolve_ref_checked(
+                        param=param,
+                        ref=ref,
+                        source=str(source_step),
+                        subject=subject,
+                        scenario=scenario,
+                        consumer_agent=consumer_agent,
+                    )
+                    artifact = self.store.get(ref)
+                    assembled_sources.append(
+                        {
+                            "logical_name": artifact.logical_name,
+                            "schema_ref": artifact.schema_ref,
+                            "payload": value,
+                        }
+                    )
+                    binding_refs.append(ref)
+                    binding_sensitivities.append(sensitivity)
+                if optional_source_missing:
+                    continue
+                assembly = binding.get("assembly") or {}
+                assembled = {
+                    "sources": assembled_sources,
+                    "title": str(
+                        assembly.get("title")
+                        or getattr(step, "title", "")
+                        or "综合汇总"
+                    ),
+                    "instruction": str(
+                        assembly.get("instruction")
+                        or getattr(step, "description", "")
+                        or "使用全部上游来源完成当前步骤"
+                    ),
+                }
+                contract_data = getattr(step, "agent_contract", None) or {}
+                contract_inputs = (
+                    contract_data.get("input_schema_refs", {})
+                    if isinstance(contract_data, dict)
+                    else getattr(contract_data, "input_schema_refs", {})
+                )
+                expected_schema = contract_inputs.get(param)
+                assembly_schema = assembly.get("schema_ref")
+                if (
+                    expected_schema
+                    and assembly_schema
+                    and expected_schema != assembly_schema
+                ):
+                    raise InputResolutionError(
+                        param=param,
+                        source=None,
+                        reason="schema_incompatible",
+                        detail=(
+                            f"assembly schema {assembly_schema!r} does not match "
+                            f"contract schema {expected_schema!r}"
+                        ),
+                    )
+                target_schema = expected_schema or assembly_schema
+                if target_schema:
+                    registry = get_schema_registry()
+                    if not registry.has(target_schema):
+                        # Only fill missing built-in schemas: callers may have
+                        # registered a stricter schema under the same versioned
+                        # reference, which must never be silently replaced.
+                        from src.manager.executor.agent_result_adapter import (
+                            _register_missing_agent_schemas,
+                        )
+
+                        _register_missing_agent_schemas(registry)
+                    valid, errors = registry.validate(assembled, target_schema)
+                    if not valid:
+                        raise InputResolutionError(
+                            param=param,
+                            source=None,
+                            reason="schema_invalid",
+                            detail="; ".join(errors),
+                        )
+                resolved[param] = assembled
+                upstream_refs.extend(binding_refs)
+                upstream_sensitivities.extend(binding_sensitivities)
+                continue
             # A binding without a param or source is not an upstream artifact
             # dependency (the agent resolves it from context), so it is skipped.
             if not param or not src_agent:
@@ -989,4 +1308,7 @@ class TaskScheduler:
                 raise InputResolutionError(
                     param=param, source=src_agent, reason="selector_error", detail=str(exc)
                 ) from exc
+        self._require_contract_inputs(
+            step, resolved, context=context, consumer_agent=consumer_agent
+        )
         return resolved, upstream_sensitivities, upstream_refs

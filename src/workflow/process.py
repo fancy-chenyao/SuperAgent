@@ -150,6 +150,43 @@ def _agent_capability_bindings(agent_cards: Any) -> dict[str, list[str]]:
     return bindings
 
 
+def _current_agent_contracts(agent_cards: Any) -> dict[str, dict[str, Any]]:
+    """Extract only current trusted registry Contracts from serialized cards."""
+
+    contracts: dict[str, dict[str, Any]] = {}
+    for card in agent_cards if isinstance(agent_cards, list) else []:
+        if not isinstance(card, dict):
+            continue
+        agent_id = str(card.get("agent_id") or card.get("name") or "").strip()
+        contract = card.get("agent_contract")
+        if agent_id and isinstance(contract, dict):
+            contracts[agent_id] = contract
+    return contracts
+
+
+async def _trusted_registry_contract_data(
+    user_id: Any,
+) -> tuple[dict[str, Any], dict[str, list[str]]]:
+    """Contract/produces mappings from the SAME source as the planner save path
+    (the current trusted Agent registry), so the snapshot rebuild gate compares
+    against live registry state instead of data echoed from checkpoints."""
+
+    await agent_manager.ensure_initialized()
+    registered_agents = await agent_manager.agent_registry.list()
+    contracts = {
+        agent.agent_name: agent.agent_contract
+        for agent in registered_agents
+        if getattr(agent, "agent_contract", None) is not None
+        and (agent.user_id == "share" or agent.user_id == user_id)
+    }
+    produces = {
+        agent.agent_name: list(getattr(agent, "produces", []) or [])
+        for agent in registered_agents
+        if agent.user_id == "share" or agent.user_id == user_id
+    }
+    return contracts, produces
+
+
 async def _execute_node_with_runtime_events(
     state: State, node_func, enable_runtime_events: bool
 ):
@@ -189,7 +226,13 @@ def has_task_graph_state(state: dict) -> bool:
     return bool(state.get("task_graph"))
 
 
-def load_production_task_graph(state: dict, execution_phase: str) -> tuple[bool, str]:
+def load_production_task_graph(
+    state: dict,
+    execution_phase: str,
+    *,
+    current_agent_contracts: dict[str, Any] | None = None,
+    current_agent_produces: dict[str, list[str]] | None = None,
+) -> tuple[bool, str]:
     """For a production execution request, load + verify the PlanSnapshot and
     inject its TaskGraph into ``state``.
 
@@ -228,6 +271,12 @@ def load_production_task_graph(state: dict, execution_phase: str) -> tuple[bool,
         planning_steps=current_steps,
         goal=state.get("original_user_query", "")
         or state.get("USER_QUERY", ""),
+        current_agent_contracts=(
+            current_agent_contracts
+            if current_agent_contracts is not None
+            else _current_agent_contracts(state.get("agent_cards"))
+        ),
+        current_agent_produces=current_agent_produces,
     )
     if task_graph is None:
         logger.warning("plan snapshot rejected for %s: %s",
@@ -1274,7 +1323,43 @@ async def _process_workflow(
 
             # Production execution: load + verify the approved PlanSnapshot and
             # inject its TaskGraph so the real Web/API path drives the scheduler.
-            load_production_task_graph(state, execution_phase)
+            # Contract/produces for the rebuild gate come from the live trusted
+            # registry (same source as the planner save path); if it is
+            # unavailable the gate degrades fail-closed (snapshot rejected).
+            trusted_registry_ok = True
+            trusted_contracts: dict[str, Any] | None = None
+            trusted_produces: dict[str, list[str]] | None = None
+            try:
+                trusted_contracts, trusted_produces = (
+                    await _trusted_registry_contract_data(state.get("user_id"))
+                )
+            except Exception as exc:  # noqa: BLE001 - degraded gate stays fail-closed
+                logger.warning(
+                    "trusted registry unavailable for snapshot verification: %s",
+                    exc,
+                )
+                trusted_registry_ok = False
+            if trusted_registry_ok:
+                load_production_task_graph(
+                    state,
+                    execution_phase,
+                    current_agent_contracts=trusted_contracts,
+                    current_agent_produces=trusted_produces,
+                )
+            elif (
+                state.get("workflow_mode") == "production"
+                and execution_phase == "execution"
+            ):
+                # Without the trusted registry the rebuild gate has no valid
+                # contract source: refuse snapshot injection outright rather
+                # than compare against stale agent_cards restored from a
+                # checkpoint, and drop any caller/checkpoint-supplied graph so
+                # the scheduler gate fails closed downstream.
+                state.pop("task_graph", None)
+                logger.warning(
+                    "plan snapshot rejected for %s: trusted registry unavailable",
+                    state.get("workflow_id"),
+                )
 
             ready, category, detail = scheduler_ready(state)
             if ready:

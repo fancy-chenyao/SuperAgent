@@ -601,47 +601,72 @@ async def _validate_plan_data_flow(steps: list, user_id: str) -> tuple[bool, lis
 
         for input_mapping in inputs:
             param_name = input_mapping.get("parameter_name")
-            source_step = input_mapping.get("source_step")
-            source_output = input_mapping.get("source_output")
+            source_artifacts = input_mapping.get("source_artifacts")
+            if isinstance(source_artifacts, list):
+                if input_mapping.get("source_step") or input_mapping.get("source_output"):
+                    errors.append(
+                        f"Step {step_idx + 1} ({agent_name}): Input mapping mixes "
+                        "source_artifacts with source_step/source_output"
+                    )
+                    continue
+                source_mappings = source_artifacts
+            else:
+                source_mappings = [input_mapping]
 
-            if not param_name or not source_step or not source_output:
+            if not param_name or not source_mappings:
                 errors.append(
                     f"Step {step_idx + 1} ({agent_name}): Incomplete input mapping - "
-                    f"parameter_name={param_name}, source_step={source_step}, source_output={source_output}"
+                    f"parameter_name={param_name}"
                 )
                 continue
 
             mapped_params.add(param_name)
-
-            # Verify source_step exists in previous steps
-            source_found = False
-            for prev_idx in range(step_idx):
-                prev_step = steps[prev_idx]
-                source_references = {
-                    str(prev_step.get("agent_name") or ""),
-                    str(prev_step.get("step_id") or ""),
-                    str(prev_step.get("subtask_id") or ""),
-                }
-                source_references.update(_step_subtask_ids(prev_step))
-                if str(source_step) in source_references:
-                    source_found = True
-                    # Verify source_output is in the source agent's produces
-                    source_metadata = agent_metadata.get(
-                        prev_step.get("agent_name")
+            for source_mapping in source_mappings:
+                if not isinstance(source_mapping, dict):
+                    errors.append(
+                        f"Step {step_idx + 1} ({agent_name}): source_artifacts "
+                        "entries must be objects"
                     )
-                    if source_metadata and source_output not in source_metadata["produces"]:
-                        errors.append(
-                            f"Step {step_idx + 1} ({agent_name}): Input mapping references "
-                            f"'{source_output}' from '{source_step}', but '{source_step}' "
-                            f"does not produce '{source_output}'. Available outputs: {source_metadata['produces']}"
-                        )
-                    break
+                    continue
+                source_step = source_mapping.get("source_step")
+                source_output = source_mapping.get("source_output")
+                if not source_step or not source_output:
+                    errors.append(
+                        f"Step {step_idx + 1} ({agent_name}): Incomplete source "
+                        f"mapping - source_step={source_step}, source_output={source_output}"
+                    )
+                    continue
 
-            if not source_found:
-                errors.append(
-                    f"Step {step_idx + 1} ({agent_name}): Input mapping references "
-                    f"source_step '{source_step}' which does not exist in previous steps"
-                )
+                # Verify source_step exists in previous steps
+                source_found = False
+                for prev_idx in range(step_idx):
+                    prev_step = steps[prev_idx]
+                    source_references = {
+                        str(prev_step.get("agent_name") or ""),
+                        str(prev_step.get("step_id") or ""),
+                        str(prev_step.get("subtask_id") or ""),
+                    }
+                    source_references.update(_step_subtask_ids(prev_step))
+                    if str(source_step) in source_references:
+                        source_found = True
+                        source_agent = prev_step.get("agent_name")
+                        source_metadata = agent_metadata.get(source_agent)
+                        if (
+                            source_metadata
+                            and source_output not in source_metadata["produces"]
+                        ):
+                            errors.append(
+                                f"Step {step_idx + 1} ({agent_name}): Input mapping "
+                                f"references '{source_output}' from '{source_step}', but "
+                                f"it produces {source_metadata['produces']}"
+                            )
+                        break
+
+                if not source_found:
+                    errors.append(
+                        f"Step {step_idx + 1} ({agent_name}): Input mapping references "
+                        f"source_step '{source_step}' which does not exist in previous steps"
+                    )
 
         # Check if all required parameters are mapped
         unmapped_params = set(required_params) - mapped_params
@@ -1517,12 +1542,26 @@ async def planner_node(state: State) -> Command[Literal["publisher", "__end__"]]
                 from src.orchestration.plan_to_task_graph import plan_to_task_graph
                 from src.orchestration.runtime import unknown_operation_modes
 
+                registered_agents = await agent_manager.agent_registry.list()
+                contracts = {
+                    agent.agent_name: agent.agent_contract
+                    for agent in registered_agents
+                    if getattr(agent, "agent_contract", None) is not None
+                    and (agent.user_id == "share" or agent.user_id == state.get("user_id"))
+                }
+                produces = {
+                    agent.agent_name: list(getattr(agent, "produces", []) or [])
+                    for agent in registered_agents
+                    if agent.user_id == "share" or agent.user_id == state.get("user_id")
+                }
                 tg = plan_to_task_graph(
                     steps,
                     task_id=state.get("workflow_id") or "task",
                     subject=state.get("user_id"),
                     goal=state.get("original_user_query", "")
                     or state.get("USER_QUERY", ""),
+                    agent_produces=produces,
+                    agent_contracts=contracts,
                 )
                 unknown = unknown_operation_modes(tg)
                 if unknown:

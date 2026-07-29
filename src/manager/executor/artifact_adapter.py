@@ -17,6 +17,7 @@ import json
 from typing import Any, List, Optional
 
 from src.interface.artifact import Artifact, ArtifactRef, Sensitivity, compute_checksum
+from src.manager.executor.agent_result_adapter import NormalizedAgentResult
 from src.orchestration.schema_registry import SchemaRegistry, get_schema_registry
 
 _WRITE_MODES = {
@@ -248,3 +249,44 @@ def to_artifact(
         schema_valid=schema_valid,
         metadata=metadata,
     )
+
+
+def to_artifacts(
+    normalized: NormalizedAgentResult,
+    execute_result: Any,
+    step: Any = None,
+    context: Any = None,
+    *,
+    schema_registry: Optional[SchemaRegistry] = None,
+    upstream_sensitivities: Optional[List[Any]] = None,
+) -> dict[str, Artifact]:
+    """Convert every normalized named output into its own Artifact."""
+
+    artifacts: dict[str, Artifact] = {}
+    for logical_name, payload in normalized.outputs.items():
+        output_result = type(
+            "_NormalizedExecuteResult",
+            (),
+            {
+                "is_success": True,
+                "result": payload,
+                "error": None,
+                "metadata": getattr(execute_result, "metadata", None) or {},
+            },
+        )()
+        artifact = to_artifact(
+            output_result,
+            step=step,
+            context=context,
+            logical_name=logical_name,
+            schema_ref=normalized.schema_refs.get(logical_name),
+            schema_registry=schema_registry,
+            upstream_sensitivities=upstream_sensitivities,
+        )
+        artifact.metadata["agent_result_legacy"] = normalized.legacy
+        if normalized.contract_version:
+            artifact.metadata["contract_version"] = normalized.contract_version
+        if normalized.producer_agent:
+            artifact.metadata["producer_agent"] = normalized.producer_agent
+        artifacts[logical_name] = artifact
+    return artifacts

@@ -188,6 +188,8 @@ def verify_snapshot_for_execution(
     user_id: Optional[str],
     planning_steps: List[Dict[str, Any]],
     goal: str = "",
+    current_agent_contracts: Optional[Dict[str, Any]] = None,
+    current_agent_produces: Optional[Dict[str, List[str]]] = None,
 ) -> Tuple[Optional[Dict[str, Any]], str]:
     """Authoritative production gate: return ``(task_graph, reason)`` or ``(None, reason)``.
 
@@ -199,10 +201,16 @@ def verify_snapshot_for_execution(
     2. workflow id / user id must match the request;
     3. ``snapshot_hash`` must match the snapshot's own content (detects file
        corruption / inconsistent hand edits);
-    4. the full graph rebuilt from trusted request identity, goal and current
-       planning steps must be byte-identical (after normalization) to the
-       stored graph -- any drift in the spec, operation modes, preferred
-       resources, dependencies or output bindings is rejected.
+    4. Contract and produces injection for the rebuild comes from the CURRENT
+       trusted registry (``current_agent_contracts`` / ``current_agent_produces``),
+       never from the snapshot itself, so a snapshot stripped of its Contract
+       fields (or taken before an Agent adopted a Contract) cannot demote that
+       Agent to the schema-free legacy path;
+    5. the full graph rebuilt from trusted request identity, goal, current
+       planning steps, and current Agent Contracts must be byte-identical
+       (after normalization) to the stored graph -- any drift in the spec,
+       operation modes, preferred resources, dependencies, Contract, or output
+       bindings is rejected.
 
     On success the stored (approved) task graph dict is returned for injection.
     On ANY mismatch ``None`` is returned so the caller refuses execution and
@@ -240,11 +248,38 @@ def verify_snapshot_for_execution(
     try:
         from src.orchestration.plan_to_task_graph import plan_to_task_graph
 
+        # The rebuild inputs mirror the planner save path: Contracts and
+        # produces come from the CURRENT trusted registry only. The snapshot
+        # decides nothing here -- echoing its own ``agent_contract`` /
+        # ``expected_outputs`` back into the rebuild would make the deep
+        # compare self-validating and let a stripped or stale snapshot run a
+        # contracted Agent on the legacy (schema-free) path.
+        snap_steps = (snap_graph or {}).get("steps") or []
+        trusted_contracts = dict(current_agent_contracts or {})
+        agent_contracts = dict(trusted_contracts)
+        agent_produces = {
+            str(name): [str(output) for output in outputs or []]
+            for name, outputs in (current_agent_produces or {}).items()
+        }
+        for step in snap_steps:
+            if not isinstance(step, dict):
+                continue
+            agent_name = step.get("agent_name") or step.get("preferred_resource_id")
+            if not agent_name:
+                continue
+            if step.get("agent_contract") and str(agent_name) not in trusted_contracts:
+                return (
+                    None,
+                    f"current Agent contract missing for {agent_name!r} "
+                    "(replan required)",
+                )
         rebuilt = plan_to_task_graph(
             planning_steps or [],
             task_id=workflow_id,
             subject=user_id,
             goal=goal or "",
+            agent_produces=agent_produces,
+            agent_contracts=agent_contracts,
         ).model_dump()
     except Exception as exc:  # noqa: BLE001 - cannot rebuild -> refuse
         return None, f"rebuild failed (replan required): {exc}"
