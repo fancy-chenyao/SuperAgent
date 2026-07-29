@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from uuid import uuid4
 from collections import deque
 
+import src.security.enforcement as enforcement
 import src.security.scenario_analyzer as scenario_analyzer
 from src.security.approval import ApprovalStore
 from src.security.context import SecurityContextBuilder, UnknownSecurityUserError
@@ -487,7 +488,11 @@ def test_enforcement_populates_scenario_fit_result_in_context():
     assert fit_result["fit"] in {"match", "uncertain"}
 
 
-def test_permission_payload_contains_scenario_fit_result():
+def test_permission_payload_contains_scenario_fit_result(monkeypatch):
+    # enforcement freezes S_ABAC_ENABLED at import time; pin it ON here so
+    # the deny path is exercised even without a .env (fresh clone / CI).
+    monkeypatch.setattr(enforcement, "S_ABAC_ENABLED", True)
+
     class DummyContext:
         def __init__(self):
             self.user_id = "communication_officer"
