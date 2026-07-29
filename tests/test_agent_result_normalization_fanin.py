@@ -191,6 +191,16 @@ def test_uncontracted_legacy_error_and_partial_fail_closed(payload, code):
     assert exc.value.code == code
 
 
+def test_legacy_dict_error_keeps_remote_code_in_details():
+    with pytest.raises(AgentResultNormalizationError) as exc:
+        normalize_agent_result(
+            _ok({"error": {"code": "QUOTA_EXCEEDED", "message": "额度不足"}}),
+            expected_outputs=["result"],
+        )
+    assert exc.value.code == "BUSINESS_RESULT_ERROR"
+    assert exc.value.details["remote_code"] == "QUOTA_EXCEEDED"
+
+
 def test_remote_business_error_cannot_spoof_platform_failure_code():
     payload = _envelope(
         "RemoteKnowledgeAgent",

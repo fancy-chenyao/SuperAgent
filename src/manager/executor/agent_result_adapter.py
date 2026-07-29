@@ -85,7 +85,7 @@ def _register_missing_agent_schemas(registry: SchemaRegistry) -> SchemaRegistry:
     return registry
 
 
-def _legacy_error(payload: Any) -> tuple[str, str] | None:
+def _legacy_error(payload: Any) -> tuple[str, str, Any] | None:
     if not isinstance(payload, dict):
         return None
     status = (
@@ -102,22 +102,33 @@ def _legacy_error(payload: Any) -> tuple[str, str] | None:
         "canceled",
         "timeout",
     }:
-        return "BUSINESS_RESULT_ERROR", str(
-            payload.get("error") or payload.get("message") or status
+        return (
+            "BUSINESS_RESULT_ERROR",
+            str(payload.get("error") or payload.get("message") or status),
+            None,
         )
     # A legacy partial result is as unsafe to publish as an explicit error:
     # downstream consumers cannot tell which declared data is missing.
     if status == "partial":
-        return "BUSINESS_RESULT_INCOMPLETE", str(
-            payload.get("error") or payload.get("message") or "legacy result is partial"
+        return (
+            "BUSINESS_RESULT_INCOMPLETE",
+            str(payload.get("error") or payload.get("message") or "legacy result is partial"),
+            None,
         )
     # Any explicit error field fails closed, even when the payload also carries
     # outputs: a result that reports an error must never enter the data plane.
     error = payload.get("error")
     if error:
         if isinstance(error, dict):
-            return "BUSINESS_RESULT_ERROR", str(error.get("message") or error)
-        return "BUSINESS_RESULT_ERROR", str(error)
+            # Mirror the envelope path: the remote business code is kept in
+            # details for server-side diagnostics, never as the platform code.
+            details = {"remote_code": error.get("code")} if error.get("code") else None
+            return (
+                "BUSINESS_RESULT_ERROR",
+                str(error.get("message") or error),
+                details,
+            )
+        return "BUSINESS_RESULT_ERROR", str(error), None
     return None
 
 
@@ -165,7 +176,8 @@ def normalize_agent_result(
     payload = _coerce_json(getattr(execute_result, "result", None))
     legacy_error = _legacy_error(payload)
     if legacy_error is not None and not _looks_like_envelope(payload):
-        raise AgentResultNormalizationError(*legacy_error)
+        code, message, details = legacy_error
+        raise AgentResultNormalizationError(code, message, details=details)
 
     if agent_contract is None:
         names = list(expected_outputs or [])

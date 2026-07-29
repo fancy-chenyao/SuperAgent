@@ -122,6 +122,11 @@ def test_runtime_failure_codes_are_catalogued(code, category, retryable):
             "artifact",
         ),
         (
+            {"input_error": "required_contract_input_missing"},
+            "UPSTREAM_OUTPUT_MISSING",
+            "artifact",
+        ),
+        (
             {"input_error": "access_denied"},
             "ARTIFACT_ACCESS_DENIED",
             "permission",

@@ -244,6 +244,7 @@ _CODE_ALIASES = {
 
 _INPUT_ERROR_CODES = {
     "artifact_not_produced": FailureCode.UPSTREAM_OUTPUT_MISSING,
+    "required_contract_input_missing": FailureCode.UPSTREAM_OUTPUT_MISSING,
     "artifact_not_found": FailureCode.ARTIFACT_NOT_FOUND,
     "access_denied": FailureCode.ARTIFACT_ACCESS_DENIED,
     "selector_error": FailureCode.ARTIFACT_SELECTOR_INVALID,
