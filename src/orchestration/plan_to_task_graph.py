@@ -161,6 +161,22 @@ def _step_id_for(index: int, raw: Dict[str, Any]) -> str:
     return str(explicit) if explicit else f"step_{index + 1}"
 
 
+def _reference_list(value: Any) -> List[str]:
+    """Normalize a single-value/array reference field to a deduplicated list.
+
+    Mirrors ``coor_task._string_list``: upstream validation accepts
+    ``"depends_on": "subtask_1"`` as a legal single-value form, so iterating
+    the raw field here would silently split the string into characters and
+    drop every dependency edge.
+    """
+    if value is None:
+        return []
+    raw_items = value if isinstance(value, (list, tuple, set)) else [value]
+    return list(dict.fromkeys(
+        str(item).strip() for item in raw_items if str(item).strip()
+    ))
+
+
 def derive_step_dependencies(
     planning_steps: List[Dict[str, Any]],
     subtasks: Optional[List[Dict[str, Any]]],
@@ -210,7 +226,7 @@ def derive_step_dependencies(
     changed = False
     for i, task in enumerate(subs):
         dep_agents: List[str] = []
-        for dep_id in task.get("depends_on") or []:
+        for dep_id in _reference_list(task.get("depends_on")):
             j = index_by_subtask_id.get(str(dep_id))
             # Only backward edges (upstream step precedes this one). Skipping
             # forward/unknown references keeps the derived graph a valid DAG.
@@ -277,7 +293,7 @@ def plan_to_task_graph(
 
         inputs = raw.get("inputs") or []
         depends_on: List[str] = []
-        for dependency_ref in raw.get("depends_on") or []:
+        for dependency_ref in _reference_list(raw.get("depends_on")):
             resolved = reference_to_step.get(str(dependency_ref))
             if resolved and resolved not in depends_on:
                 depends_on.append(resolved)

@@ -172,6 +172,29 @@ def test_converter_uses_subtasks_to_serialize_report_after_queries():
     assert order.index("step_3") > order.index("step_2")
 
 
+def test_converter_normalizes_single_value_depends_on():
+    """A legal single-value ``"depends_on": "step"`` (accepted by upstream
+    ``_string_list`` validation) must resolve as ONE edge, never be iterated
+    character-by-character and silently dropped."""
+    plan = [
+        {"agent_name": "A", "step_id": "alpha"},
+        {"agent_name": "B", "step_id": "beta", "depends_on": "alpha"},
+    ]
+    g = plan_to_task_graph(plan, task_id="t")
+    assert g.step_map()["beta"].depends_on == ["alpha"]
+    assert g.topological_order() == ["alpha", "beta"]
+
+
+def test_derive_accepts_single_value_subtask_depends_on():
+    subtasks = [
+        {"id": "subtask_1", "depends_on": []},
+        {"id": "subtask_2", "depends_on": []},
+        {"id": "subtask_3", "depends_on": "subtask_1"},
+    ]
+    augmented = derive_step_dependencies(WANGQIANG_LEAVE_PLAN, subtasks)
+    assert augmented[2]["depends_on"] == ["RemoteHRAssistantAgent"]
+
+
 def test_converter_builds_contract_fan_in_dependencies():
     contracts = {
         "RemoteHRAssistantAgent": RemoteHRAssistantAgent().contract,
