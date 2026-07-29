@@ -177,6 +177,23 @@ def _reference_list(value: Any) -> List[str]:
     ))
 
 
+def _subtask_ids_for(raw: Dict[str, Any]) -> List[str]:
+    values = raw.get("subtask_ids")
+    if not values:
+        values = [raw.get("subtask_id")] if raw.get("subtask_id") else []
+    elif not isinstance(values, list):
+        values = [values]
+    return [str(value) for value in values if value]
+
+
+def _list_field(raw: Dict[str, Any], plural: str, singular: str) -> List[Any]:
+    values = raw.get(plural)
+    if not values:
+        value = raw.get(singular)
+        return [value] if value else []
+    return values if isinstance(values, list) else [values]
+
+
 def derive_step_dependencies(
     planning_steps: List[Dict[str, Any]],
     subtasks: Optional[List[Dict[str, Any]]],
@@ -280,22 +297,45 @@ def plan_to_task_graph(
     if subtasks:
         planning_steps = derive_step_dependencies(planning_steps, subtasks)
 
-    steps: List[TaskStep] = []
-    # Resolve references by step_id/subtask_id first, while retaining the
-    # legacy agent_name -> most-recent prior step mapping.
-    reference_to_step: Dict[str, str] = {}
+    raw_steps = [
+        (idx, raw)
+        for idx, raw in enumerate(planning_steps or [])
+        if isinstance(raw, dict)
+    ]
 
-    for idx, raw in enumerate(planning_steps or []):
-        if not isinstance(raw, dict):
-            continue
+    # Build structural aliases before resolving edges so a valid TaskGraph can
+    # reference any step_id/subtask_id, including a step that appears later in
+    # the Planner's list. Agent-name aliases remain a legacy, backward-only
+    # fallback because the same agent may legitimately execute multiple steps.
+    reference_to_step: Dict[str, str] = {}
+    for idx, raw in raw_steps:
+        step_id = _step_id_for(idx, raw)
+        aliases = [step_id, *_subtask_ids_for(raw)]
+        for alias in aliases:
+            existing = reference_to_step.get(alias)
+            if existing and existing != step_id:
+                raise TaskGraphValidationError(
+                    f"reference '{alias}' maps to multiple steps: "
+                    f"'{existing}' and '{step_id}'"
+                )
+            reference_to_step[alias] = step_id
+
+    steps: List[TaskStep] = []
+    prior_agent_to_step: Dict[str, str] = {}
+
+    def resolve_reference(reference: Any) -> str:
+        key = str(reference)
+        return reference_to_step.get(key) or prior_agent_to_step.get(key) or key
+
+    for idx, raw in raw_steps:
         agent_name = raw.get("agent_name") or raw.get("agent") or ""
         step_id = _step_id_for(idx, raw)
 
         inputs = raw.get("inputs") or []
         depends_on: List[str] = []
         for dependency_ref in _reference_list(raw.get("depends_on")):
-            resolved = reference_to_step.get(str(dependency_ref))
-            if resolved and resolved not in depends_on:
+            resolved = resolve_reference(dependency_ref)
+            if resolved not in depends_on:
                 depends_on.append(resolved)
         for binding in inputs:
             if not isinstance(binding, dict):
@@ -322,8 +362,8 @@ def plan_to_task_graph(
                 source_step = source_binding.get("source_step")
                 if not source_step:
                     continue
-                resolved = reference_to_step.get(str(source_step))
-                if resolved and resolved not in depends_on:
+                resolved = resolve_reference(source_step)
+                if resolved not in depends_on:
                     depends_on.append(resolved)
 
         # The registry-provided contract is trusted platform metadata. Planner
@@ -397,26 +437,15 @@ def plan_to_task_graph(
                 contract.model_dump(mode="json") if contract else None
             ),
             verification_contract=dict(raw.get("verification_contract") or {}),
-            subtask_ids=raw.get("subtask_ids", []) or (
-                [raw.get("subtask_id")] if raw.get("subtask_id") else []
-            ),
-            intents=raw.get("intents", []) or (
-                [raw.get("intent")] if raw.get("intent") else []
-            ),
+            subtask_ids=_subtask_ids_for(raw),
+            intents=_list_field(raw, "intents", "intent"),
             # trusted classification audit trail
             operation_mode_source=operation_mode_source,
             operation_mode_reason=operation_mode_reason,
         )
         steps.append(step)
-        reference_to_step[step_id] = step_id
-        subtask_ids = raw.get("subtask_ids")
-        if not isinstance(subtask_ids, list):
-            subtask_ids = [raw.get("subtask_id")] if raw.get("subtask_id") else []
-        for subtask_id in subtask_ids:
-            if subtask_id:
-                reference_to_step[str(subtask_id)] = step_id
         if agent_name:
-            reference_to_step[agent_name] = step_id
+            prior_agent_to_step[agent_name] = step_id
 
     graph = TaskGraph(spec=TaskSpec(
         task_id=task_id, goal=goal, subject=subject), steps=steps)

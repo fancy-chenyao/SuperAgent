@@ -310,6 +310,21 @@ def _enrich_inferred_dependencies(
         )
 
     # 相同意图只保留一项；语义来源优先，显式来源优先于推导来源。
+    if (
+        "leave_record_query" in executable_names
+        and employee_name
+        and not entities.get("employee_id")
+    ):
+        _insert_before(
+            candidates,
+            {"leave_record_query"},
+            _candidate(
+                "employee_information_query",
+                provenance="inferred",
+                evidence="请假记录工具需要先用员工姓名解析员工工号",
+            ),
+        )
+
     deduplicated: list[IntentCandidate] = []
     index_by_name: dict[str, int] = {}
     for item in candidates:
@@ -370,6 +385,75 @@ def _segment_for_candidate(
         if (span and span in text) or any(item and item in text for item in evidence):
             return segment
     return segments[0] if segments and candidate.provenance == "explicit" else None
+
+
+def _order_candidates_for_execution(
+    candidates: list[IntentCandidate],
+    segments: list[dict[str, Any]],
+) -> list[IntentCandidate]:
+    """按原文任务边界与显式依赖生成稳定的执行顺序。
+
+    融合器会先放入规则候选，再追加仅由语义模型识别的候选，因此它的
+    列表顺序不等于用户表达顺序。这里先按文本片段排序，再用 condition_on
+    做稳定拓扑排序，避免“发送结果”排在“查询结果”之前。
+    """
+    if len(candidates) < 2:
+        return list(candidates)
+
+    original_indexes = {id(item): index for index, item in enumerate(candidates)}
+    segment_indexes = {
+        str(segment.get("id") or ""): index
+        for index, segment in enumerate(segments)
+    }
+
+    def base_key(candidate: IntentCandidate) -> tuple[int, int]:
+        segment = _segment_for_candidate(candidate, segments)
+        segment_id = str((segment or {}).get("id") or "")
+        return (
+            segment_indexes.get(segment_id, len(segments) + original_indexes[id(candidate)]),
+            original_indexes[id(candidate)],
+        )
+
+    base_order = sorted(candidates, key=base_key)
+    names = {item.name for item in base_order}
+    dependencies: dict[str, set[str]] = {
+        item.name: {
+            str(name)
+            for name in item.condition_on
+            if str(name) in names and str(name) != item.name
+        }
+        for item in base_order
+    }
+    for item in base_order:
+        available_names = [
+            candidate.name
+            for candidate in base_order
+            if candidate.name != item.name
+        ]
+        dependencies[item.name].update(
+            name
+            for name in _dependency_names(item.name, available_names)
+            if name in names and name != item.name
+        )
+
+    ordered: list[IntentCandidate] = []
+    completed: set[str] = set()
+    remaining = list(base_order)
+    while remaining:
+        ready = [
+            item
+            for item in remaining
+            if dependencies.get(item.name, set()).issubset(completed)
+        ]
+        if not ready:
+            # 模型给出了循环依赖时不猜测，保留已经按文本边界排好的顺序。
+            ordered.extend(remaining)
+            break
+        selected = ready[0]
+        ordered.append(selected)
+        completed.add(selected.name)
+        remaining.remove(selected)
+    return ordered
 
 
 def _action_for_intent(intent: str, query: str, candidate: IntentCandidate | None = None) -> str:
@@ -488,14 +572,24 @@ def _build_subtasks(
     entities: dict[str, Any],
 ) -> list[dict[str, Any]]:
     subtasks: list[dict[str, Any]] = []
-    name_to_id: dict[str, str] = {}
-    executable = [item for item in candidates if not item.negated]
+    executable = [
+        item
+        for item in candidates
+        if not item.negated and item.name in INTENT_CATALOG
+    ]
+    # 先为全部逻辑子任务分配 ID，再解析依赖。旧实现边创建边解析，
+    # 一旦后置任务被融合器排在前面，指向后续意图的 condition_on 就会丢失。
+    name_to_id = {
+        candidate.name: f"subtask_{index + 1}"
+        for index, candidate in enumerate(executable)
+    }
     for candidate in executable:
         definition = INTENT_CATALOG.get(candidate.name)
         if not definition:
             continue
         segment = _segment_for_candidate(candidate, segments)
-        dependency_names = _dependency_names(candidate.name, list(name_to_id))
+        prior_names = [str(item.get("intent") or "") for item in subtasks]
+        dependency_names = _dependency_names(candidate.name, prior_names)
         dependency_ids = [name_to_id[name] for name in dependency_names if name in name_to_id]
         condition_ids = [name_to_id[name] for name in candidate.condition_on if name in name_to_id]
         inherited_conditional_ids = [
@@ -509,7 +603,7 @@ def _build_subtasks(
         if candidate.name == "message_or_email_send" and inherited_conditional_ids:
             effective_condition = effective_condition or "前置条件成立且会议创建成功"
             effective_condition_ids = _unique(condition_ids + inherited_conditional_ids)
-        subtask_id = f"subtask_{len(subtasks) + 1}"
+        subtask_id = name_to_id[candidate.name]
         subtasks.append(
             {
                 "id": subtask_id,
@@ -536,7 +630,6 @@ def _build_subtasks(
                 "execution_policy": "conditional" if effective_condition else "always",
             }
         )
-        name_to_id[candidate.name] = subtask_id
     return subtasks
 
 
@@ -681,7 +774,12 @@ async def profile_task(
     recognition.entities = entities
     recognition = _enrich_inferred_dependencies(recognition, entities)
     recognition = _annotate_rule_conditions(user_query, recognition)
-    executable = [item for item in recognition.intents if not item.negated]
+    executable = _order_candidates_for_execution(
+        [item for item in recognition.intents if not item.negated],
+        segments,
+    )
+    negated = [item for item in recognition.intents if item.negated]
+    recognition.intents = executable + negated
 
     subtasks = _build_subtasks(executable, resolved_query, segments, entities)
     intent_nodes = _build_intent_nodes(recognition.intents, segments)
