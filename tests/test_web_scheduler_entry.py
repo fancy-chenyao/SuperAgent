@@ -316,3 +316,23 @@ def test_t13_code_default_is_off(monkeypatch):
 
     assert _parse_bool("ORCHESTRATION_SCHEDULER_ENABLED", False) is False
     assert _parse_bool("ARTIFACT_CAPTURE_ENABLED", False) is False
+
+
+def test_scheduler_gate_failure_uses_safe_structured_protocol(monkeypatch):
+    monkeypatch.setattr(proc, "orchestration_scheduler_enabled", True, raising=False)
+    monkeypatch.setattr(proc.cache, "get_planning_steps", lambda _wf: _STEPS)
+
+    workflow = SimpleNamespace(start_node="coordinator", nodes={})
+    events = _drive(
+        workflow,
+        _production_state(),
+        task_id="task-gate-safe",
+        execution_phase="execution",
+    )
+
+    terminal = events[-1]["data"]
+    assert terminal["status"] == "FAILED"
+    assert terminal["failures"][0]["code"] == "TASK_GRAPH_MISSING"
+    assert terminal["failed_steps"] == []
+    assert terminal["blocked_steps"] == []
+    assert "no explicit task graph" not in str(terminal)

@@ -12,6 +12,7 @@ from .agent_result import (
 from .conversation_context import ContextReference, ResolvedRequest
 from .routing_decision import ExcludedAgent, RoutingCandidate, RoutingDecision
 from .task_profile import TaskProfile
+from .workflow_failure import FailureCategory, FailureCode, FailureDescriptor
 
 __all__ = [
     "AgentContract",
@@ -30,4 +31,7 @@ __all__ = [
     "RoutingCandidate",
     "RoutingDecision",
     "TaskProfile",
+    "FailureCategory",
+    "FailureCode",
+    "FailureDescriptor",
 ]

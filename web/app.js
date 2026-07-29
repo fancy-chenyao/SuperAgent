@@ -307,6 +307,7 @@ let planningOutputBlocks = new Map();
 let executionOutputBlocks = new Map();
 let executionStepCards = [];       // Step cards for execution log: {id, agentName, displayName, status, content, startTime, endTime, summary}
 let executionStepCardsByKey = new Map();
+let workflowFailureSummary = null;
 let currentStepCard = null;        // Currently active (running) step card
 let executionStepCount = 0;        // Monotonic step counter
 let finalResultReceived = false;
@@ -595,7 +596,7 @@ const updateChatExecutionProgress = (status, detail = "") => {
   if (!lifecycle) return;
   const total = Math.max(planSteps.length, executionStepCards.length, 1);
   const completed = executionStepCards.filter((card) => card.status === "done").length;
-  const hasError = executionStepCards.some((card) => card.status === "error");
+  const hasError = executionStepCards.some((card) => ["error", "blocked"].includes(card.status));
   const running = executionStepCards.filter((card) => card.status === "running").length;
   const current = status === "completed" ? total : Math.min(completed + running, total);
   const percentage = status === "completed" ? 100 : Math.round((completed / total) * 100);
@@ -1731,6 +1732,7 @@ tabs.forEach((tab) => {
 const clearStepCards = () => {
   executionStepCards = [];
   executionStepCardsByKey = new Map();
+  workflowFailureSummary = null;
   currentStepCard = null;
   executionStepCount = 0;
   finalResultReceived = false;
@@ -1802,6 +1804,155 @@ const formatStepResultContent = (data) => {
   return data?.error || "该步骤未返回可展示的结果。";
 };
 
+const FAILURE_CATEGORY_LABELS = {
+  routing: "路由",
+  execution: "执行",
+  contract: "契约",
+  schema: "Schema",
+  artifact: "Artifact",
+  permission: "权限",
+  timeout: "超时",
+  persistence: "持久化",
+  reconciliation: "状态核对",
+  planning: "计划",
+  internal: "系统",
+};
+
+const normalizeFailure = (failure, legacyError = "") => {
+  if (!failure || typeof failure !== "object" || Array.isArray(failure)) return null;
+  const details = failure.details_safe && typeof failure.details_safe === "object"
+    ? failure.details_safe
+    : {};
+  const code = String(failure.code || "UNKNOWN_WORKFLOW_FAILURE").trim().toUpperCase();
+  const categoryValue = String(failure.category || "internal").trim().toLowerCase();
+  const category = Object.prototype.hasOwnProperty.call(FAILURE_CATEGORY_LABELS, categoryValue)
+    ? categoryValue
+    : "internal";
+  const blockedBy = Array.isArray(failure.blocked_by)
+    ? failure.blocked_by
+    : (Array.isArray(details.blocked_by) ? details.blocked_by : []);
+  return {
+    code,
+    category,
+    message: String(failure.message || legacyError || "工作流步骤执行失败。"),
+    action: failure.action ? String(failure.action) : "",
+    retryable: failure.retryable === true,
+    stepId: failure.step_id ? String(failure.step_id) : "",
+    parameterName: failure.parameter_name ? String(failure.parameter_name) : "",
+    sourceStep: failure.source_step ? String(failure.source_step) : "",
+    sourceOutput: failure.source_output ? String(failure.source_output) : "",
+    blockedBy: blockedBy.map(String).filter(Boolean),
+    details,
+  };
+};
+
+const getFailurePresentation = (failure) => {
+  const code = failure.code;
+  const category = failure.category;
+  if (code === "CLARIFICATION_BLOCKED") {
+    return {
+      title: "等待补充信息，当前步骤未执行",
+      guidance: "请先回答工作流提出的问题，再重新执行。",
+      state: "blocked",
+    };
+  }
+  const isBlocked = code === "UPSTREAM_STEP_FAILED"
+    || code === "UPSTREAM_OUTPUT_MISSING"
+    || failure.blockedBy.length > 0;
+
+  if (isBlocked) {
+    return {
+      title: "上游数据不可用，当前步骤未执行",
+      guidance: "请先修复上游失败步骤，再从安全检查点恢复。",
+      state: "blocked",
+    };
+  }
+  if (category === "permission") {
+    return {
+      title: "权限校验未通过",
+      guidance: "请检查当前用户、角色及资源授权；重复执行通常不会解决权限问题。",
+      state: "error",
+    };
+  }
+  if (category === "schema" || category === "contract") {
+    return {
+      title: category === "schema" ? "输出 Schema 校验失败" : "Agent 契约不兼容",
+      guidance: "请检查 Agent 输出字段、Contract 声明和协议版本。",
+      state: "error",
+    };
+  }
+  if (category === "reconciliation" || code === "SIDE_EFFECT_UNCONFIRMED") {
+    return {
+      title: "外部操作状态尚未确认",
+      guidance: "请人工核对外部系统；为避免重复操作，当前不应自动重试。",
+      state: "error",
+    };
+  }
+  return {
+    title: "步骤执行失败",
+    guidance: "请根据错误码检查步骤配置或服务状态。",
+    state: "error",
+  };
+};
+
+const formatFailureDetails = (failure) => {
+  const presentation = getFailurePresentation(failure);
+  const categoryLabel = FAILURE_CATEGORY_LABELS[failure.category] || "其他";
+  const requiresManualHandling = failure.category === "reconciliation"
+    || failure.code === "SIDE_EFFECT_UNCONFIRMED";
+  const action = requiresManualHandling
+    ? presentation.guidance
+    : (failure.action || presentation.guidance);
+  const blockedBy = failure.blockedBy.length
+    ? `<div class="failure-meta-row"><span>阻断来源</span><strong>${escapeHtml(failure.blockedBy.join("、"))}</strong></div>`
+    : "";
+  const source = failure.sourceStep || failure.sourceOutput
+    ? `<div class="failure-meta-row"><span>上游来源</span><strong>${escapeHtml(
+      [failure.sourceStep, failure.sourceOutput].filter(Boolean).join(" / ")
+    )}</strong></div>`
+    : "";
+  const parameter = failure.parameterName
+    ? `<div class="failure-meta-row"><span>输入参数</span><strong>${escapeHtml(failure.parameterName)}</strong></div>`
+    : "";
+  const detailLabels = {
+    logical_name: "Artifact",
+    schema_ref: "目标 Schema",
+    expected_schema_ref: "期望 Schema",
+    actual_schema_ref: "实际 Schema",
+    missing_outputs: "缺少输出",
+    undeclared_outputs: "未声明输出",
+  };
+  const safeDetails = Object.entries(failure.details || {})
+    .filter(([key, value]) => Object.prototype.hasOwnProperty.call(detailLabels, key)
+      && value !== null && value !== undefined && value !== "")
+    .map(([key, value]) => {
+      const display = Array.isArray(value) ? value.join("、") : String(value);
+      return `<div class="failure-meta-row"><span>${escapeHtml(detailLabels[key])}</span><strong>${escapeHtml(display)}</strong></div>`;
+    })
+    .join("");
+  const retryText = failure.retryable && !requiresManualHandling
+    ? "可从安全检查点重试"
+    : "不建议直接重试";
+
+  return `
+    <section class="failure-detail failure-${escapeHtml(failure.category)}" aria-label="步骤失败详情">
+      <div class="failure-heading">
+        <span class="failure-category">${escapeHtml(categoryLabel)}</span>
+        <strong>${escapeHtml(presentation.title)}</strong>
+      </div>
+      <p class="failure-message">${escapeHtml(failure.message)}</p>
+      <div class="failure-meta">
+        <div class="failure-meta-row"><span>错误码</span><code>${escapeHtml(failure.code)}</code></div>
+        ${blockedBy}
+        ${source}
+        ${parameter}
+        ${safeDetails}
+        <div class="failure-meta-row"><span>重试策略</span><strong>${escapeHtml(retryText)}</strong></div>
+      </div>
+      <p class="failure-action"><span>建议</span>${escapeHtml(action)}</p>
+    </section>`;
+};
+
 const appendStepContent = (content, card = currentStepCard) => {
   if (!card) return;
   card.content += content;
@@ -1829,14 +1980,19 @@ const finalizeStepCard = (card = currentStepCard) => {
   updateChatExecutionProgress("running");
 };
 
-const errorStepCard = (errMsg, card = currentStepCard) => {
+const errorStepCard = (errMsg, card = currentStepCard, failure = null, trustedHtml = false) => {
   if (card) {
-    card.status = "error";
+    const normalizedFailure = normalizeFailure(failure, errMsg);
+    const presentation = normalizedFailure ? getFailurePresentation(normalizedFailure) : null;
+    card.status = presentation?.state || "error";
     card.endTime = Date.now();
-    const plainText = errMsg.replace(/<[^>]*>/g, "").trim();
+    const plainText = normalizedFailure
+      ? normalizedFailure.message.trim()
+      : String(errMsg || "").replace(/<[^>]*>/g, "").trim();
     card.summary = plainText.substring(0, 80) || "Execution error";
     card.content = errMsg;
-    card._isHtml = true;
+    card.failure = normalizedFailure;
+    card._isHtml = !normalizedFailure && trustedHtml;
     if (currentStepCard === card) currentStepCard = null;
   }
   renderAllStepCards();
@@ -1945,6 +2101,9 @@ const renderAllStepCards = () => {
   executionStepCards.forEach((card) => {
     renderStepCardInto(card, frag);
   });
+  if (workflowFailureSummary) {
+    renderWorkflowFailureSummaryInto(workflowFailureSummary, frag);
+  }
   executionOutput.innerHTML = "";
   executionOutput.appendChild(frag);
 };
@@ -1960,7 +2119,7 @@ const renderStepCardInto = (card, parent) => {
     ? `${Math.round((card.endTime - card.startTime) / 1000)}s`
     : (card.status === "running" ? "..." : "");
 
-  const iconMap = { running: "[...]", done: "[ok]", error: "[x]", pending: "[ ]" };
+  const iconMap = { running: "[...]", done: "[ok]", error: "[x]", blocked: "[!]", pending: "[ ]" };
   const icon = iconMap[card.status] || "[ ]";
 
   const cardEl = document.createElement("div");
@@ -1986,10 +2145,15 @@ const renderStepCardInto = (card, parent) => {
     `<span class="step-toggle">></span>`;
 
   // Body (collapsed by default, but expanded for error cards)
-  const isError = card.status === "error";
+  const isError = ["error", "blocked"].includes(card.status);
   const body = document.createElement("div");
   body.className = `step-card-body${isError ? "" : " hidden"}`;
-  if (card.content) {
+  if (card.failure) {
+    const div = document.createElement("div");
+    div.className = "step-result";
+    div.innerHTML = formatFailureDetails(card.failure);
+    body.appendChild(div);
+  } else if (card.content) {
     if (card._isHtml) {
       const div = document.createElement("div");
       div.className = "step-result";
@@ -2009,6 +2173,40 @@ const renderStepCardInto = (card, parent) => {
     const toggle = cardEl.querySelector(".step-toggle");
     if (toggle) toggle.textContent = "v";
   }
+};
+
+const renderWorkflowFailureSummaryInto = (summary, parent) => {
+  const failures = Array.isArray(summary.failures)
+    ? summary.failures
+      .map((failure) => normalizeFailure(failure?.failure || failure, failure?.error || ""))
+      .filter(Boolean)
+    : [];
+  const blockedSteps = Array.isArray(summary.blockedSteps) ? summary.blockedSteps : [];
+  if (!failures.length && !blockedSteps.length) return;
+
+  const section = document.createElement("section");
+  section.className = "workflow-failure-summary";
+  section.setAttribute("aria-label", "工作流失败摘要");
+  const failureItems = failures.map((failure) => (
+    `<li><code>${escapeHtml(failure.code)}</code><span>${escapeHtml(failure.message)}</span></li>`
+  )).join("");
+  const blockedItems = blockedSteps.map((step) => {
+    const stepId = typeof step === "object" && step !== null
+      ? step.step_id || step.id || "unknown"
+      : step;
+    const blockedBy = typeof step === "object" && step !== null && Array.isArray(step.blocked_by)
+      ? `（上游：${step.blocked_by.map(String).join("、")}）`
+      : "";
+    return `<li><strong>${escapeHtml(String(stepId))}</strong>${escapeHtml(blockedBy)}</li>`;
+  }).join("");
+  section.innerHTML = `
+    <div class="workflow-failure-summary-heading">
+      <strong>工作流异常摘要</strong>
+      <span>${escapeHtml(`${failures.length} 条异常记录，${blockedSteps.length} 个步骤被阻断`)}</span>
+    </div>
+    ${failureItems ? `<ul class="workflow-failure-list">${failureItems}</ul>` : ""}
+    ${blockedItems ? `<div class="workflow-blocked-list"><span>未执行步骤</span><ul>${blockedItems}</ul></div>` : ""}`;
+  parent.appendChild(section);
 };
 
 // Result Formatting
@@ -2884,8 +3082,8 @@ const handleEvent = (eventName, payload) => {
         );
       }
       const content = formatStepResultContent(data);
-      if (status && status !== "SUCCEEDED") {
-        errorStepCard(content, card);
+      if (data.failure || (status && status !== "SUCCEEDED")) {
+        errorStepCard(content, card, data.failure);
       } else {
         appendStepContent(content, card);
       }
@@ -2976,7 +3174,10 @@ const handleEvent = (eventName, payload) => {
         (scenarioFitReason
           ? `<div style="margin-top:4px;color:var(--warning)"><strong>${escapeHtml(scenarioFitLabel)}:</strong> ${escapeHtml(scenarioFitReason)}</div>`
           : ``) +
-        `</div>`
+        `</div>`,
+        currentStepCard,
+        null,
+        true
       );
     }
 
@@ -3016,7 +3217,10 @@ const handleEvent = (eventName, payload) => {
         `<div style="color:var(--warning)"><strong>Hint:</strong> ${escapeHtml(errorPresentation.hint)}</div>` +
         `<div style="margin-top:6px;color:var(--danger)"><strong>Reason:</strong> ${escapeHtml(detail)}</div>` +
         `<div style="margin-top:6px">${escapeHtml(errorPresentation.action)}</div>` +
-        `</div>`
+        `</div>`,
+        currentStepCard,
+        null,
+        true
       );
     } else {
       appendOutput(
@@ -3035,7 +3239,8 @@ const handleEvent = (eventName, payload) => {
     return;
   }
   if (eventName === "end_of_workflow") {
-    const rawStatus = (payload.data && payload.data.status) || "";
+    const workflowData = payload.data || {};
+    const rawStatus = workflowData.status || "";
     const status = String(rawStatus).toUpperCase();
     if (plannerOnlyMode) {
       if (!plannerOnlyStepsUpdated) {
@@ -3057,6 +3262,10 @@ const handleEvent = (eventName, payload) => {
       }
     }
     if (currentRunContext === "executing") {
+      workflowFailureSummary = {
+        failures: Array.isArray(workflowData.failures) ? workflowData.failures : [],
+        blockedSteps: Array.isArray(workflowData.blocked_steps) ? workflowData.blocked_steps : [],
+      };
       finalizeRunningStepCards();
     }
     switch (status) {
@@ -5034,13 +5243,18 @@ const loadTaskCheckpoints = async (taskId) => {
             const res = await fetch(`/api/tasks/${encodeURIComponent(selectedTaskId)}/checkpoints/${cp.step}`);
             if (res.ok) {
               const data = await res.json();
-              detailsDiv.innerHTML = `<pre class="checkpoint-json">${JSON.stringify(data, null, 2)}</pre>`;
+              detailsDiv.textContent = "";
+              const pre = document.createElement("pre");
+              pre.className = "checkpoint-json";
+              pre.textContent = JSON.stringify(data, null, 2);
+              detailsDiv.appendChild(pre);
               loaded = true;
             } else {
               detailsDiv.innerHTML = '<div style="color:var(--danger)">Failed to load checkpoint data</div>';
             }
           } catch (err) {
-            detailsDiv.innerHTML = `<div style="color:var(--danger)">Error: ${err.message}</div>`;
+            detailsDiv.textContent = `Error: ${String(err?.message || "Failed to load checkpoint data")}`;
+            detailsDiv.style.color = "var(--danger)";
           }
         }
       });
@@ -5062,12 +5276,12 @@ const loadTaskLog = async (taskId) => {
     const log = await res.json();
 
     logMeta.innerHTML = `
-      <div class="log-meta-item"><b>Task ID</b><span>${log.task_id}</span></div>
-      <div class="log-meta-item"><b>Execution phase</b><span class="phase-badge">${executionPhaseLabel(log.execution_phase)}</span></div>
-      <div class="log-meta-item"><b>Task status</b><span class="status-badge ${statusBadgeClass(log.status)}">${log.status}</span></div>
-      <div class="log-meta-item"><b>Created</b><span>${formatDateTime(log.created_at)}</span></div>
-      <div class="log-meta-item"><b>Finished</b><span>${formatDateTime(log.finished_at) || "-"}</span></div>
-      ${log.error ? `<div class="log-meta-item error-text"><b>Error</b><span>${log.error}</span></div>` : ""}
+      <div class="log-meta-item"><b>Task ID</b><span>${escapeHtml(log.task_id || "")}</span></div>
+      <div class="log-meta-item"><b>Execution phase</b><span class="phase-badge">${escapeHtml(executionPhaseLabel(log.execution_phase))}</span></div>
+      <div class="log-meta-item"><b>Task status</b><span class="status-badge ${statusBadgeClass(log.status)}">${escapeHtml(log.status || "")}</span></div>
+      <div class="log-meta-item"><b>Created</b><span>${escapeHtml(formatDateTime(log.created_at))}</span></div>
+      <div class="log-meta-item"><b>Finished</b><span>${escapeHtml(formatDateTime(log.finished_at) || "-")}</span></div>
+      ${log.error ? `<div class="log-meta-item error-text"><b>Error</b><span>${escapeHtml(log.error)}</span></div>` : ""}
     `;
 
     if (!log.history || !log.history.length) {

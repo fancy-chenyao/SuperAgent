@@ -135,7 +135,9 @@ def test_failure_only_blocks_downstream_branch():
     assert results["a"].status == StepStatus.SUCCEEDED
     assert results["b"].status == StepStatus.FAILED
     assert results["c"].status == StepStatus.SUCCEEDED
-    assert "d" not in results  # blocked because its dependency failed
+    assert results["d"].status == StepStatus.SKIPPED
+    assert results["d"].failure.code == "UPSTREAM_STEP_FAILED"
+    assert results["d"].failure.blocked_by == ["b"]
 
 
 def test_retry_then_succeed():
@@ -238,7 +240,9 @@ def test_routing_crash_degrades_to_failed_and_isolates_branch():
     assert "step crashed" in (results["b"].error or "")
     # independent branch survives
     assert results["c"].status == StepStatus.SUCCEEDED
-    assert "d" not in results  # blocked by failed dependency
+    assert results["d"].status == StepStatus.SKIPPED
+    assert results["d"].failure.code == "UPSTREAM_STEP_FAILED"
+    assert results["d"].failure.blocked_by == ["b"]
 
 
 # --------------------------------------------------------------------------- #
@@ -478,6 +482,47 @@ def test_side_effect_receipt_extracts_provider_id_from_structured_result():
     assert result.metrics["external_op_id"] == "msg-42"
     assert receipt["external_op_id"] == "msg-42"
     assert validate_receipt(receipt, key=result.metrics["idempotency_key"])
+
+
+def test_dispatch_permission_denial_is_not_retried_or_misclassified():
+    from src.security.enforcement import PermissionDeniedError
+
+    calls = {"n": 0}
+
+    async def denied(**_kwargs):
+        calls["n"] += 1
+        raise PermissionDeniedError("private policy reason", {"secret": "value"})
+
+    step = _step("read", retry=3, preferred_resource_id="DeniedAgent")
+    results = _run(denied, _graph(step), StubRoutingProvider())
+
+    assert calls["n"] == 1
+    assert results["read"].failure.code == "AGENT_DISPATCH_DENIED"
+    assert results["read"].failure.category == "permission"
+    assert results["read"].failure.retryable is False
+    assert "private policy reason" not in results["read"].failure.message
+
+
+def test_side_effect_dispatch_permission_denial_does_not_require_reconciliation():
+    from src.orchestration.completion import ReceiptStore
+    from src.security.enforcement import PermissionDeniedError
+
+    async def denied(**_kwargs):
+        raise PermissionDeniedError("private policy reason", {"secret": "value"})
+
+    step = _step("email", mode="send", preferred_resource_id="DeniedAgent")
+    scheduler = TaskScheduler(
+        execute_step=denied,
+        routing_provider=StubRoutingProvider(),
+        receipt_store=ReceiptStore(),
+    )
+    results = asyncio.run(
+        scheduler.run(_graph(step), context={"task_id": "permission-task"})
+    )
+
+    assert results["email"].failure.code == "AGENT_DISPATCH_DENIED"
+    assert results["email"].failure.category == "permission"
+    assert results["email"].metrics.get("needs_reconciliation") is not True
 
 
 # --------------------------------------------------------------------------- #

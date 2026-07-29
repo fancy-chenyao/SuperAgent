@@ -103,10 +103,19 @@ class _FakeTaskLogger:
         self.user_query = user_query
         self.history = []
         self.status = "running"
+        self.finished_at = None
+        self.error = None
+        self.failures = []
+        self._step_counter = {}
         self.execution_phase = "initial_planning"
         self.planning_steps = []
         self.task_profile = {}
         self.skill_execution_evidence = {}
+
+    def truncate_for_resume(self, resume_step):
+        from src.robust.task_logger import TaskLogger
+
+        TaskLogger.truncate_for_resume(self, resume_step)
 
     def set_execution_phase(self, phase):
         self.execution_phase = phase

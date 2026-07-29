@@ -197,5 +197,6 @@ def test_t6_resume_with_missing_artifact_fails_closed():
     # s2 never executed with empty input
     assert execute.s2_attempts == s2_calls_before
     assert events2[-1]["data"]["status"] == "FAILED"
-    s2_result = state["step_results"]["s2"]
-    assert s2_result["metrics"].get("input_error") == "artifact_not_found"
+    assert state["step_results"]["s1"]["failure"]["code"] == "ARTIFACT_NOT_FOUND"
+    assert state["step_results"]["s2"]["status"] == "SKIPPED"
+    assert state["step_results"]["s2"]["failure"]["blocked_by"] == ["s1"]

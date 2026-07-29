@@ -36,6 +36,7 @@ from src.orchestration.artifact_payload_store import (
     ArtifactPayloadStore,
 )
 from src.orchestration.completion import PersistentReceiptStore
+from src.orchestration.failure_mapper import make_failure
 from src.orchestration.plan_to_task_graph import plan_to_task_graph
 from src.orchestration.providers import MainAgentRoutingProvider, RoutingProvider
 from src.orchestration.resolver import ArtifactResolver
@@ -73,6 +74,15 @@ def has_task_graph(state: dict) -> bool:
     return bool(state.get("task_graph"))
 
 
+def _required_step_outputs(step: Any) -> list[str]:
+    """Return outputs whose absence invalidates a resumed successful step."""
+
+    contract = getattr(step, "agent_contract", None)
+    if contract is not None:
+        return [ref.name for ref in contract.produces if ref.required]
+    return list(getattr(step, "expected_outputs", []) or [])
+
+
 def _restore_outputs(state: dict, completed: set[str]) -> dict:
     """Rebuild ``{step_id: {param: ArtifactRef}}`` for completed steps on resume.
 
@@ -100,6 +110,16 @@ def _restore_outputs(state: dict, completed: set[str]) -> dict:
         if revived:
             outputs[sid] = revived
     return outputs
+
+
+def _ref_unavailable(store: ArtifactStore, ref: ArtifactRef) -> bool:
+    """Return whether a restored ref has no readable protected payload."""
+
+    try:
+        store.get(ref)
+    except Exception:  # noqa: BLE001 - any missing/corrupt payload invalidates success
+        return True
+    return False
 
 
 def _restore_completed_step_results(
@@ -133,6 +153,67 @@ def _status_value(status: Any) -> str:
 
 def _json_safe(value: Any) -> Any:
     return json.loads(json.dumps(value, ensure_ascii=False, default=str))
+
+
+_PUBLIC_STEP_METRIC_KEYS = frozenset(
+    {
+        "attempts",
+        "duration_ms",
+        "elapsed_ms",
+        "idempotent_reuse",
+        "needs_reconciliation",
+        "receipt_status",
+        "retry_count",
+        "routing_decision",
+    }
+)
+_CHECKPOINT_STEP_METRIC_KEYS = _PUBLIC_STEP_METRIC_KEYS | frozenset(
+    {
+        # Required to resume side-effect evidence and receipt verification.
+        "external_op_id",
+        "idempotency_key",
+        # Legacy machine-readable compatibility fields. Raw diagnostics such as
+        # result_error_details are deliberately excluded.
+        "failure_code",
+        "input_error",
+        "persistence_failed",
+        "receipt_store_corrupt",
+        "result_error",
+    }
+)
+
+
+def _public_step_metrics(metrics: Any) -> dict[str, Any]:
+    """Return the small operational metric allow-list safe for SSE clients."""
+
+    if not isinstance(metrics, dict):
+        return {}
+    public: dict[str, Any] = {}
+    for key in _PUBLIC_STEP_METRIC_KEYS:
+        value = metrics.get(key)
+        if value is None or not isinstance(value, (str, int, float, bool)):
+            continue
+        public[key] = value[:128] if isinstance(value, str) else value
+    return public
+
+
+def _checkpoint_step_result(result: StepResult) -> dict[str, Any]:
+    """Serialize a step result without persisting raw provider diagnostics."""
+
+    payload = result.model_dump(mode="json")
+    failure = getattr(result, "failure", None)
+    if result.status != StepStatus.SUCCEEDED:
+        payload["error"] = (
+            failure.message if failure is not None else "The workflow step failed."
+        )
+    metrics = result.metrics if isinstance(result.metrics, dict) else {}
+    payload["metrics"] = {
+        key: value[:256] if isinstance(value, str) else value
+        for key in _CHECKPOINT_STEP_METRIC_KEYS
+        for value in [metrics.get(key)]
+        if value is not None and isinstance(value, (str, int, float, bool))
+    }
+    return payload
 
 
 def _leaf_step_ids(graph: TaskGraph) -> list[str]:
@@ -404,11 +485,15 @@ async def run_scheduler_workflow(
                 planning_steps=state.get("planning_steps") or [],
             )
             persist_skill_evidence(evidence)
+            failure = make_failure(
+                "ARTIFACT_STORE_CORRUPTION",
+                message="Saved workflow artifacts are missing or corrupted.",
+                action="Restart from a safe checkpoint or run the workflow again.",
+            )
             if task_logger is not None:
-                task_logger.log_error(
-                    error=f"corrupt artifact store on resume: {exc}",
-                    node_name="scheduler",
-                )
+                if hasattr(task_logger, "log_failure"):
+                    task_logger.log_failure(failure.model_dump(mode="json"))
+            finalize_task_log(WorkflowStatus.FAILED, error=failure.message)
             yield {
                 "event": "end_of_workflow",
                 "data": {
@@ -416,8 +501,11 @@ async def run_scheduler_workflow(
                     "task_id": task_id,
                     "mode": "scheduler",
                     "status": WorkflowStatus.FAILED.value,
-                    "error": f"corrupt artifact store on resume: {exc}",
+                    "error": failure.message,
                     "reason": "artifact_store_corruption",
+                    "failures": [failure.model_dump(mode="json")],
+                    "failed_steps": [],
+                    "blocked_steps": [],
                     "skill_execution_evidence": evidence.model_dump(mode="json"),
                 },
             }
@@ -488,9 +576,17 @@ async def run_scheduler_workflow(
         """
         succeeded = result.status == StepStatus.SUCCEEDED
 
+        # Allocate the step number BEFORE building the candidate. Synthetic
+        # results (clarify/blocked steps) never pass through ``on_step_start``,
+        # so allocating lazily below would persist a candidate whose
+        # ``current_step`` still equals this checkpoint's own step number --
+        # after a resume the next step would reuse that number and overwrite
+        # the very checkpoint used for recovery.
+        current = step_number(step.step_id)
+
         # (1) Candidate step_results (do not mutate live state yet).
         step_results = dict(state.get("step_results") or {})
-        step_results[step.step_id] = result.model_dump()
+        step_results[step.step_id] = _checkpoint_step_result(result)
 
         # (1) Persist artifact payloads to the PROTECTED payload store. Only a
         # de-sensitized index (refs + checksum) is carried in the checkpoint.
@@ -521,7 +617,7 @@ async def run_scheduler_workflow(
             checkpoint_manager.save_checkpoint(
                 workflow_id=workflow_id,
                 task_id=task_id,
-                step=step_number(step.step_id),
+                step=current,
                 node_name="scheduler",
                 next_node="scheduler",
                 state=candidate,
@@ -545,6 +641,13 @@ async def run_scheduler_workflow(
                     step=step_number(step.step_id),
                     sub_agent_name=getattr(step, "agent_name", None),
                 )
+                failure = getattr(result, "failure", None)
+                if failure is not None and hasattr(task_logger, "log_failure"):
+                    task_logger.log_failure(
+                        failure.model_dump(mode="json"),
+                        node_name="scheduler",
+                        step=step_number(step.step_id),
+                    )
             except Exception:  # noqa: BLE001
                 pass
 
@@ -562,9 +665,15 @@ async def run_scheduler_workflow(
             "status": status_value,
             "outputs": {},
             "output_refs": {},
-            "metrics": _json_safe(result.metrics or {}),
-            "error": result.error,
+            "metrics": _public_step_metrics(result.metrics),
+            "error": (
+                getattr(getattr(result, "failure", None), "message", None)
+                or result.error
+            ),
         }
+        failure = getattr(result, "failure", None)
+        if failure is not None:
+            result_data["failure"] = failure.model_dump(mode="json")
         unavailable_outputs: dict[str, str] = {}
         if status_value == StepStatus.SUCCEEDED.value:
             for name, ref in (result.outputs or {}).items():
@@ -597,6 +706,11 @@ async def run_scheduler_workflow(
                     "agent_id": f"{workflow_id}_{step.step_id}",
                     "sub_agent_name": selected_name,
                     "status": status_value,
+                    "failure": (
+                        failure.model_dump(mode="json")
+                        if failure is not None
+                        else None
+                    ),
                 },
             }
         )
@@ -698,6 +812,40 @@ async def run_scheduler_workflow(
     initial_completed = set(state.get("completed_steps") or [])
     initial_outputs = _restore_outputs(state, initial_completed)
     initial_results = _restore_completed_step_results(state, initial_completed)
+    step_map = graph.step_map()
+    stale_completed: set[str] = set()
+    for step_id in list(initial_results):
+        step = step_map.get(step_id)
+        expected = _required_step_outputs(step) if step else []
+        refs = initial_outputs.get(step_id, {})
+        if expected and (
+            any(name not in refs for name in expected)
+            or any(
+                _ref_unavailable(store, refs[name])
+                for name in expected
+                if name in refs
+            )
+        ):
+            # A checkpoint can claim completion after its protected Artifact
+            # payload has gone missing. Do not count that stale success in the
+            # resumed terminal/evidence result.
+            stale_completed.add(step_id)
+            failure = make_failure(
+                "ARTIFACT_NOT_FOUND",
+                step_id=step_id,
+                message="A completed step's saved Artifact is no longer available.",
+                action="Restore the Artifact store or restart from an earlier safe checkpoint.",
+            )
+            initial_results[step_id] = StepResult(
+                step_id=step_id,
+                status=StepStatus.FAILED,
+                error=failure.message,
+                failure=failure,
+            )
+            initial_outputs.pop(step_id, None)
+    if stale_completed:
+        initial_completed.difference_update(stale_completed)
+        state["completed_steps"] = sorted(initial_completed)
 
     run_task = asyncio.create_task(
         scheduler.run(
@@ -705,6 +853,7 @@ async def run_scheduler_workflow(
             context=ctx,
             initial_completed=initial_completed,
             initial_outputs=initial_outputs,
+            initial_results=initial_results,
             on_step_start=on_step_start,
             on_step_end=on_step_end,
             commit_step_result=commit_step_result,
@@ -739,11 +888,15 @@ async def run_scheduler_workflow(
             planning_steps=state.get("planning_steps") or [],
         )
         persist_skill_evidence(evidence)
+        failure = make_failure(
+            "INTERNAL_SCHEDULER_ERROR",
+            message="The workflow scheduler stopped unexpectedly.",
+            action="Retry the workflow. If the problem persists, inspect the server logs.",
+        )
         if task_logger is not None:
-            task_logger.log_error(
-                error=f"scheduler failed: {exc}",
-                node_name="scheduler",
-            )
+            if hasattr(task_logger, "log_failure"):
+                task_logger.log_failure(failure.model_dump(mode="json"))
+        finalize_task_log(WorkflowStatus.FAILED, error=failure.message)
         yield {
             "event": "end_of_workflow",
             "data": {
@@ -751,7 +904,10 @@ async def run_scheduler_workflow(
                 "task_id": task_id,
                 "mode": "scheduler",
                 "status": WorkflowStatus.FAILED.value,
-                "error": str(exc),
+                "error": failure.message,
+                "failures": [failure.model_dump(mode="json")],
+                "failed_steps": [],
+                "blocked_steps": [],
                 "skill_execution_evidence": evidence.model_dump(mode="json"),
             },
         }
@@ -770,8 +926,21 @@ async def run_scheduler_workflow(
     # ``results`` is a WorkflowResult: it carries the authoritative workflow-level
     # terminal status so the frontend never infers success from the mere
     # presence of an end_of_workflow event.
-    failed = [sid for sid, r in results.items() if r.status !=
-              StepStatus.SUCCEEDED]
+    failed = [sid for sid, r in results.items() if r.status == StepStatus.FAILED]
+    blocked = list(getattr(results, "blocked_steps", []) or [])
+    failures = [
+        failure.model_dump(mode="json")
+        for result in results.values()
+        for failure in [getattr(result, "failure", None)]
+        if failure is not None
+    ]
+    failures.extend(
+        failure.model_dump(mode="json")
+        for failure in (getattr(results, "additional_failures", []) or [])
+    )
+    if task_logger is not None and hasattr(task_logger, "log_failure"):
+        for failure in (getattr(results, "additional_failures", []) or []):
+            task_logger.log_failure(failure.model_dump(mode="json"))
     clarifications = [c for c in (
         getattr(results, "clarifications", []) or []) if c]
     rejected = list(getattr(results, "rejected_steps", []) or [])
@@ -811,6 +980,8 @@ async def run_scheduler_workflow(
             "mode": "scheduler",
             "status": status,
             "failed_steps": failed,
+            "blocked_steps": blocked,
+            "failures": failures,
             "rejected_steps": rejected,
             "clarifications": clarifications,
             "needs_reconciliation": needs_recon,

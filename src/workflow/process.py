@@ -915,15 +915,9 @@ async def _process_workflow(
         from src.robust.task_logger import TaskLogger as TL
         existing_logger = TL.load(task_id)
         if existing_logger:
-            # Truncate history: remove entries from resume_step onwards and workflow_end events
-            existing_logger.history = [
-                entry for entry in existing_logger.history
-                if entry.get("step", 0) < resume_step and entry.get("event") != "workflow_end"
-            ]
-            existing_logger.status = "running"
-            existing_logger.finished_at = None
-            existing_logger.error = None
-            existing_logger._step_counter = {"__global__": resume_step - 1}
+            # Truncate history/failures and reset terminal fields so the re-run
+            # starts from a consistent pre-resume log state.
+            existing_logger.truncate_for_resume(resume_step)
             task_logger = existing_logger
             user_query = existing_logger.user_query
             logger.info(
@@ -1319,6 +1313,7 @@ async def _process_workflow(
         # publisher/while loop. Gated OFF by default -> B1 behavior is unchanged.
         if orchestration_scheduler_enabled:
             from src.orchestration.runtime import run_scheduler_workflow, scheduler_ready
+            from src.orchestration.failure_mapper import make_failure
             from src.interface.task_graph import WorkflowStatus
 
             # Production execution: load + verify the approved PlanSnapshot and
@@ -1414,9 +1409,17 @@ async def _process_workflow(
                     "scheduler gate: fail-closed (category=%s): %s", category, detail
                 )
                 state["workflow_execution_failed"] = True
+                gate_code = {
+                    "invalid": "TASK_GRAPH_INVALID",
+                    "no_graph": "TASK_GRAPH_MISSING",
+                    "unknown": "OPERATION_MODE_UNCLASSIFIED",
+                }.get(category, "INTERNAL_SCHEDULER_ERROR")
+                failure = make_failure(gate_code)
+                if hasattr(task_logger, "log_failure"):
+                    task_logger.log_failure(failure.model_dump(mode="json"))
                 task_logger.log_workflow_terminal(
                     WorkflowStatus.FAILED,
-                    error=f"scheduler gate fail-closed: {category}: {detail}",
+                    error=failure.message,
                 )
                 if state.get("workflow_mode") == "production":
                     try:
@@ -1437,8 +1440,11 @@ async def _process_workflow(
                         "task_id": task_id,
                         "mode": "scheduler",
                         "status": WorkflowStatus.FAILED.value,
-                        "error": f"{category}: {detail}",
+                        "error": failure.message,
                         "reason": "scheduler_gate_fail_closed",
+                        "failures": [failure.model_dump(mode="json")],
+                        "failed_steps": [],
+                        "blocked_steps": [],
                     },
                 }
                 return

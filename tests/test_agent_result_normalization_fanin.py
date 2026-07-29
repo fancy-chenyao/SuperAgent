@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from types import SimpleNamespace
 
 import pytest
@@ -191,6 +192,38 @@ def test_uncontracted_legacy_error_and_partial_fail_closed(payload, code):
     assert exc.value.code == code
 
 
+def test_legacy_dict_error_keeps_remote_code_in_details():
+    with pytest.raises(AgentResultNormalizationError) as exc:
+        normalize_agent_result(
+            _ok({"error": {"code": "QUOTA_EXCEEDED", "message": "额度不足"}}),
+            expected_outputs=["result"],
+        )
+    assert exc.value.code == "BUSINESS_RESULT_ERROR"
+    assert exc.value.details["remote_code"] == "QUOTA_EXCEEDED"
+
+
+def test_remote_business_error_cannot_spoof_platform_failure_code():
+    payload = _envelope(
+        "RemoteKnowledgeAgent",
+        {},
+        status="error",
+        error={
+            "code": "PERSISTENCE_FAILED",
+            "message": "remote business rejection",
+            "retryable": True,
+            "details": {"private": "payload"},
+        },
+    )
+    with pytest.raises(AgentResultNormalizationError) as exc:
+        normalize_agent_result(
+            _ok(payload),
+            agent_contract=_contract("policy.info", "policy.info@v1"),
+        )
+
+    assert exc.value.code == "BUSINESS_RESULT_ERROR"
+    assert exc.value.details["remote_code"] == "PERSISTENCE_FAILED"
+
+
 def test_error_envelope_preserves_retryable_flag():
     envelope = _envelope(
         "RemoteKnowledgeAgent",
@@ -208,7 +241,8 @@ def test_error_envelope_preserves_retryable_flag():
             _ok(envelope),
             agent_contract=_contract("policy.info", "policy.info@v1"),
         )
-    assert exc.value.code == "UPSTREAM_TIMEOUT"
+    assert exc.value.code == "BUSINESS_RESULT_ERROR"
+    assert exc.value.details["remote_code"] == "UPSTREAM_TIMEOUT"
     assert exc.value.retryable is True
 
 
@@ -842,5 +876,53 @@ def test_read_only_step_normalization_failure_exhausts_retry_budget():
     result = results["k"]
     assert calls["n"] == 2
     assert result.is_success is False
-    assert result.metrics["result_error"] == "UPSTREAM_TIMEOUT"
+    assert result.metrics["result_error"] == "BUSINESS_RESULT_ERROR"
+    assert result.metrics["result_error_details"]["remote_code"] == "UPSTREAM_TIMEOUT"
     assert result.metrics["result_retryable"] is True
+
+
+def test_normalization_failure_retains_remote_diagnostics_in_server_log(caplog):
+    """remote_code/remote_details are filtered from SSE, checkpoints and the
+    TaskLogger -- the server log must be their actual retention point."""
+
+    contract = _contract("policy.info", "policy.info@v1")
+    step = TaskStep(
+        step_id="k",
+        operation_mode="read",
+        agent_name="RemoteKnowledgeAgent",
+        preferred_resource_id="RemoteKnowledgeAgent",
+        expected_outputs=["policy.info"],
+        agent_contract=contract,
+    )
+
+    async def execute(**kwargs):
+        return _ok(
+            _envelope(
+                "RemoteKnowledgeAgent",
+                {},
+                status="error",
+                error={
+                    "code": "PERSISTENCE_FAILED",
+                    "message": "remote business rejection",
+                    "retryable": False,
+                    "details": {"ticket": "T-1"},
+                },
+            )
+        )
+
+    scheduler = TaskScheduler(
+        execute_step=execute,
+        routing_provider=StubRoutingProvider(),
+    )
+    with caplog.at_level(logging.WARNING, logger="src.orchestration.scheduler"):
+        asyncio.run(
+            scheduler.run(TaskGraph(spec=TaskSpec(task_id="log-diag"), steps=[step]))
+        )
+
+    messages = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "src.orchestration.scheduler"
+    ]
+    assert any("PERSISTENCE_FAILED" in message for message in messages)
+    assert any("T-1" in message for message in messages)

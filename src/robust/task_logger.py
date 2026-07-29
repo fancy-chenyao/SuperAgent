@@ -77,6 +77,7 @@ class TaskLogger:
         self.agent_contract_fingerprints: Dict[str, str] = {}
         self.agent_capability_bindings: Dict[str, List[str]] = {}
         self.skill_execution_evidence: Dict[str, Any] = {}
+        self.failures: List[Dict[str, Any]] = []
         self._step_counter: Dict[str, int] = {}  # track per-node step
 
         self._logs_dir = _get_task_logs_dir()
@@ -88,6 +89,29 @@ class TaskLogger:
         count = self._step_counter.get("__global__", -1) + 1
         self._step_counter["__global__"] = count
         return count
+
+    def truncate_for_resume(self, resume_step: int) -> None:
+        """Roll the log back to just before ``resume_step`` for a re-run.
+
+        Removes history entries from ``resume_step`` onwards (and any
+        ``workflow_end``), rebuilds :attr:`failures` from the retained
+        history so a successful re-run no longer reports the previous
+        attempt's failures, and resets the terminal fields.
+        """
+
+        self.history = [
+            entry for entry in self.history
+            if entry.get("step", 0) < resume_step and entry.get("event") != "workflow_end"
+        ]
+        self.failures = [
+            entry.get("failure")
+            for entry in self.history
+            if entry.get("event") == "step_failure" and entry.get("failure")
+        ]
+        self.status = "running"
+        self.finished_at = None
+        self.error = None
+        self._step_counter = {"__global__": resume_step - 1}
 
     def log_event(
         self,
@@ -196,6 +220,37 @@ class TaskLogger:
         self.error = error
         self.log_event(node_name=node_name, event="error", content=error, step=step)
 
+    def log_failure(
+        self,
+        failure: Dict[str, Any],
+        *,
+        node_name: str = "scheduler",
+        step: Optional[int] = None,
+    ) -> None:
+        """Persist a payload-free, structured step failure.
+
+        Unlike :meth:`log_error`, a step failure does not finalize the task:
+        independent DAG branches may still complete before the Scheduler emits
+        the authoritative workflow terminal status.
+        """
+
+        safe_failure = dict(failure or {})
+        if not safe_failure:
+            return
+        self.failures.append(safe_failure)
+        self.log_event(
+            node_name=node_name,
+            event="step_failure",
+            content=str(safe_failure.get("message") or safe_failure.get("code") or "step failed"),
+            step=step,
+            extra={
+                "failure_code": safe_failure.get("code"),
+                "failure_category": safe_failure.get("category"),
+                "retryable": bool(safe_failure.get("retryable", False)),
+                "failure": safe_failure,
+            },
+        )
+
     def set_execution_phase(self, execution_phase: str) -> None:
         """设置执行阶段"""
         self.execution_phase = execution_phase
@@ -273,6 +328,7 @@ class TaskLogger:
             "agent_contract_fingerprints": self.agent_contract_fingerprints,
             "agent_capability_bindings": self.agent_capability_bindings,
             "skill_execution_evidence": self.skill_execution_evidence,
+            "failures": self.failures,
             "created_at": self.created_at,
             "finished_at": self.finished_at,
             "status": self.status,
@@ -321,6 +377,7 @@ class TaskLogger:
             inst.skill_execution_evidence = data.get(
                 "skill_execution_evidence", {}
             )
+            inst.failures = data.get("failures", [])
 
             inst._step_counter = {"__global__": len(inst.history)}
             inst._logs_dir = logs_dir
@@ -363,6 +420,7 @@ class TaskLogger:
                     "status": data.get("status", "unknown"),
                     "step_count": len(data.get("history", [])),
                     "error": data.get("error"),
+                    "failure_count": len(data.get("failures", [])),
                 })
             except Exception:
                 continue
