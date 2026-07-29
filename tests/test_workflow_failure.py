@@ -181,6 +181,39 @@ def test_failure_from_step_result_does_not_publish_remote_details():
     assert failure.agent_id == "hr-agent"
 
 
+def test_adapter_retryable_verdict_upgrades_business_failure():
+    failure = failure_from_step_result(
+        "hr_step",
+        "upstream timeout",
+        {
+            "result_error": "BUSINESS_RESULT_ERROR",
+            "result_retryable": True,
+            "selected_agent": "hr-agent",
+        },
+    )
+
+    assert failure.code == "AGENT_BUSINESS_ERROR"
+    assert failure.retryable is True
+    # Presentation stays platform-owned even when the verdict is trusted.
+    assert failure.message != "upstream timeout"
+
+
+def test_adapter_retryable_verdict_never_leaks_outside_result_errors():
+    failure = failure_from_step_result(
+        "hr_step",
+        None,
+        {
+            "input_error": "artifact_not_found",
+            "result_retryable": True,
+        },
+    )
+
+    assert failure.code == "ARTIFACT_NOT_FOUND"
+    # The verdict only applies to business-result failures; other codes keep
+    # their catalog default.
+    assert failure.retryable is False
+
+
 def test_failure_from_exception_never_exposes_exception_text():
     failure = failure_from_exception(
         RuntimeError("password=private"),

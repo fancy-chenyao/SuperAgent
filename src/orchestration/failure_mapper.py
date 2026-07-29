@@ -344,6 +344,7 @@ def failure_from_step_result(
 
     values = dict(metrics or {})
     selected_agent = agent_id or values.get("selected_agent")
+    retryable: bool | None = None
     details = {
         key: values[key]
         for key in (
@@ -387,6 +388,11 @@ def failure_from_step_result(
             # Remote business codes are retained only in server logs.  They are
             # not trusted as part of the platform's public protocol.
             code = FailureCode.AGENT_BUSINESS_ERROR
+        # ``result_retryable`` is set by the result adapter, not copied from
+        # the raw remote payload.  It may only upgrade a business failure to
+        # retryable; message/action stay platform-owned.
+        if values.get("result_retryable") is True:
+            retryable = True
     elif values.get("input_error"):
         code = _INPUT_ERROR_CODES.get(
             str(values["input_error"]).strip().lower(),
@@ -420,6 +426,7 @@ def failure_from_step_result(
         code,
         step_id=step_id,
         agent_id=selected_agent,
+        retryable=retryable,
         details_safe=details,
         **context,
     )

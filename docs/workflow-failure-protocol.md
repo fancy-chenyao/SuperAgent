@@ -26,8 +26,11 @@ SSE events, and the Web UI.
 ```
 
 `code` is the stable machine contract. `category`, `message`, and `action` are
-platform-owned presentation hints. A remote Agent cannot make a failure
-retryable or publish arbitrary diagnostic fields.
+platform-owned presentation hints. A remote Agent cannot choose the platform
+failure code or publish arbitrary diagnostic fields. The only remote signal
+that survives is the retryability verdict preserved by the result adapter
+(`result_retryable`): when it is `true`, the descriptor's `retryable` flag is
+upgraded, while message and action still come from the platform catalog.
 
 `details_safe` is allow-listed. Tracebacks, raw remote responses, business
 payloads, validator error trees, credentials, and policy internals never cross
