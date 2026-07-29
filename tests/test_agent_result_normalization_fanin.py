@@ -693,6 +693,60 @@ def test_missing_required_contract_binding_fails_closed():
     assert exc.value.param == "report.sources"
 
 
+def test_rerouted_agent_required_inputs_bound_to_actual_contract():
+    """Input-side requirements are symmetric with the result side: when
+    routing selected a different Agent, its trusted contract's required
+    inputs must be enforced -- and the planned contract's no longer apply."""
+    requiring_contract = AgentContract(
+        requires=[
+            DataContractRef(name="report.sources", schema_ref="report.sources@v1")
+        ],
+        produces=[
+            DataContractRef(name="report.markdown", schema_ref="report.markdown@v1")
+        ],
+    )
+    free_contract = _contract("policy.info", "policy.info@v1")
+    scheduler = TaskScheduler(execute_step=lambda **kwargs: None)
+    context = {
+        "agents": [
+            SimpleNamespace(
+                agent_name="RequiringAgent", agent_contract=requiring_contract
+            ),
+            SimpleNamespace(agent_name="FreeAgent", agent_contract=free_contract),
+        ],
+    }
+
+    # Planned agent requires nothing, but the ACTUAL routed agent does:
+    # running it with no binding must fail closed.
+    step = TaskStep(
+        step_id="s",
+        operation_mode="read",
+        agent_name="PlannedAgent",
+        preferred_resource_id="PlannedAgent",
+        agent_contract=free_contract,
+        input_bindings=[],
+    )
+    with pytest.raises(InputResolutionError) as exc:
+        scheduler._resolve_inputs(step, context, consumer_agent="RequiringAgent")
+    assert exc.value.reason == "required_contract_input_missing"
+    assert exc.value.param == "report.sources"
+
+    # Conversely, the planned contract's requirement no longer applies when a
+    # requirement-free trusted Agent actually runs.
+    step = TaskStep(
+        step_id="s",
+        operation_mode="read",
+        agent_name="PlannedAgent",
+        preferred_resource_id="PlannedAgent",
+        agent_contract=requiring_contract,
+        input_bindings=[],
+    )
+    resolved, _sens, _refs = scheduler._resolve_inputs(
+        step, context, consumer_agent="FreeAgent"
+    )
+    assert resolved == {}
+
+
 def test_read_only_step_retries_after_retryable_error_envelope():
     contract = _contract("policy.info", "policy.info@v1")
     step = TaskStep(

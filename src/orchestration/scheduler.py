@@ -977,12 +977,30 @@ class TaskScheduler:
             ) from exc
 
     def _require_contract_inputs(
-        self, step: TaskStep, resolved: Dict[str, Any]
+        self,
+        step: TaskStep,
+        resolved: Dict[str, Any],
+        *,
+        context: dict,
+        consumer_agent: Optional[str] = None,
     ) -> None:
         """Every ``required`` Agent-contract input must be resolved before the
         Agent runs. A plan that simply omits the binding must fail closed here,
-        never silently degrade to LLM parameter extraction inside the Agent."""
+        never silently degrade to LLM parameter extraction inside the Agent.
+
+        Symmetric with the result-side contract binding: when routing selected
+        a different Agent than the plan, the requirement set comes from the
+        ACTUAL Agent's trusted contract, not the planned one. A rerouted Agent
+        without a trusted contract is not checked here -- the result side
+        already fails closed (REROUTED_AGENT_CONTRACT_MISSING) before anything
+        is published."""
         contract = getattr(step, "agent_contract", None)
+        planned_agent = (
+            getattr(step, "agent_name", None)
+            or getattr(step, "preferred_resource_id", None)
+        )
+        if consumer_agent and planned_agent and consumer_agent != planned_agent:
+            contract = self._trusted_agent_contract(consumer_agent, context)
         if contract is None:
             return
         missing = [
@@ -1044,7 +1062,9 @@ class TaskScheduler:
         # 2) Planner-derived symbolic input bindings.
         bindings = getattr(step, "input_bindings", None)
         if not isinstance(bindings, list):
-            self._require_contract_inputs(step, resolved)
+            self._require_contract_inputs(
+                step, resolved, context=context, consumer_agent=consumer_agent
+            )
             return resolved, upstream_sensitivities, upstream_refs
         for binding in bindings:
             if not isinstance(binding, dict):
@@ -1288,5 +1308,7 @@ class TaskScheduler:
                 raise InputResolutionError(
                     param=param, source=src_agent, reason="selector_error", detail=str(exc)
                 ) from exc
-        self._require_contract_inputs(step, resolved)
+        self._require_contract_inputs(
+            step, resolved, context=context, consumer_agent=consumer_agent
+        )
         return resolved, upstream_sensitivities, upstream_refs
