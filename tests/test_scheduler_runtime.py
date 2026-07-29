@@ -128,6 +128,17 @@ def test_public_step_metrics_excludes_result_and_remote_diagnostics():
     public = _public_step_metrics(
         {
             "attempts": 2,
+            "attempt_failures": [
+                {
+                    "attempt": 1,
+                    "phase": "primary",
+                    "code": "AGENT_TIMEOUT",
+                    "retryable": True,
+                }
+            ],
+            "recovery_path": ["primary", "same_agent_retry", "redispatch"],
+            "redispatch_count": 1,
+            "redispatch_outcome": "SUCCEEDED",
             "routing_decision": "DISPATCH",
             "result_error": "REMOTE_PRIVATE_CODE",
             "result_error_details": {
@@ -139,7 +150,13 @@ def test_public_step_metrics_excludes_result_and_remote_diagnostics():
         }
     )
 
-    assert public == {"attempts": 2, "routing_decision": "DISPATCH"}
+    assert public == {
+        "attempts": 2,
+        "recovery_path": ["primary", "same_agent_retry", "redispatch"],
+        "redispatch_count": 1,
+        "redispatch_outcome": "SUCCEEDED",
+        "routing_decision": "DISPATCH",
+    }
 
 
 def test_runtime_emits_workflow_and_agent_events_in_order():
@@ -354,6 +371,62 @@ def test_checkpoint_step_result_removes_raw_failure_diagnostics():
     assert saved["error"] == result.failure.message
     assert saved["metrics"] == {"attempts": 1}
     assert "secret provider response" not in json.dumps(saved)
+
+
+def test_checkpoint_step_result_keeps_only_safe_recovery_trace_fields():
+    import src.orchestration.runtime as runtime_mod
+    from src.orchestration.failure_mapper import make_failure
+
+    result = StepResult(
+        step_id="retry",
+        status=StepStatus.FAILED,
+        metrics={
+            "attempts": 2,
+            "recovery_path": [
+                "primary",
+                "same_agent_retry",
+                "redispatch",
+                "unexpected",
+            ],
+            "attempt_failures": [
+                {
+                    "attempt": 1,
+                    "phase": "primary",
+                    "code": "AGENT_TIMEOUT",
+                    "retryable": True,
+                    "raw_error": "secret",
+                },
+                {
+                    "attempt": 2,
+                    "phase": "invalid",
+                    "code": "<script>secret</script>",
+                    "retryable": True,
+                },
+            ],
+            "redispatched_to": "private-provider-id",
+            "redispatch_outcome": "<script>secret</script>",
+        },
+        failure=make_failure("AGENT_TIMEOUT", step_id="retry"),
+    )
+
+    saved = runtime_mod._checkpoint_step_result(result)
+
+    assert saved["metrics"]["recovery_path"] == [
+        "primary",
+        "same_agent_retry",
+        "redispatch",
+    ]
+    assert saved["metrics"]["attempt_failures"] == [
+        {
+            "attempt": 1,
+            "phase": "primary",
+            "code": "AGENT_TIMEOUT",
+            "retryable": True,
+        }
+    ]
+    assert "private-provider-id" not in json.dumps(saved)
+    assert "redispatch_outcome" not in saved["metrics"]
+    assert "secret" not in json.dumps(saved)
 
 
 def test_resume_missing_leaf_artifact_cannot_report_success():

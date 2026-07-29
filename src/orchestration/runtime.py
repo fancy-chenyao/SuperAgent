@@ -163,6 +163,9 @@ _PUBLIC_STEP_METRIC_KEYS = frozenset(
         "idempotent_reuse",
         "needs_reconciliation",
         "receipt_status",
+        "redispatch_count",
+        "redispatch_outcome",
+        "recovery_path",
         "retry_count",
         "routing_decision",
     }
@@ -179,8 +182,60 @@ _CHECKPOINT_STEP_METRIC_KEYS = _PUBLIC_STEP_METRIC_KEYS | frozenset(
         "persistence_failed",
         "receipt_store_corrupt",
         "result_error",
+        "attempt_failures",
     }
 )
+
+
+def _safe_recovery_path(value: Any) -> list[str]:
+    allowed = {"primary", "same_agent_retry", "redispatch"}
+    if not isinstance(value, list):
+        return []
+    return [
+        str(item)
+        for item in value[:3]
+        if isinstance(item, str) and item in allowed
+    ]
+
+
+def _safe_machine_token(value: Any, *, max_length: int = 64) -> Optional[str]:
+    if not isinstance(value, str):
+        return None
+    token = value.strip().upper()
+    if not token or not token.replace("_", "").isalnum():
+        return None
+    return token[:max_length]
+
+
+def _safe_attempt_failures(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    safe: list[dict[str, Any]] = []
+    for raw in value[:3]:
+        if not isinstance(raw, dict):
+            continue
+        attempt = raw.get("attempt")
+        phase = raw.get("phase")
+        code = raw.get("code")
+        retryable = raw.get("retryable")
+        if (
+            not isinstance(attempt, int)
+            or not isinstance(phase, str)
+            or phase not in {"primary", "redispatch"}
+            or not isinstance(code, str)
+            or not code.replace("_", "").isalnum()
+            or not isinstance(retryable, bool)
+        ):
+            continue
+        safe.append(
+            {
+                "attempt": attempt,
+                "phase": phase,
+                "code": code[:64],
+                "retryable": retryable,
+            }
+        )
+    return safe
 
 
 def _public_step_metrics(metrics: Any) -> dict[str, Any]:
@@ -191,6 +246,16 @@ def _public_step_metrics(metrics: Any) -> dict[str, Any]:
     public: dict[str, Any] = {}
     for key in _PUBLIC_STEP_METRIC_KEYS:
         value = metrics.get(key)
+        if key == "recovery_path":
+            path = _safe_recovery_path(value)
+            if path:
+                public[key] = path
+            continue
+        if key == "redispatch_outcome":
+            outcome = _safe_machine_token(value)
+            if outcome is not None:
+                public[key] = outcome
+            continue
         if value is None or not isinstance(value, (str, int, float, bool)):
             continue
         public[key] = value[:128] if isinstance(value, str) else value
@@ -207,12 +272,23 @@ def _checkpoint_step_result(result: StepResult) -> dict[str, Any]:
             failure.message if failure is not None else "The workflow step failed."
         )
     metrics = result.metrics if isinstance(result.metrics, dict) else {}
-    payload["metrics"] = {
+    safe_metrics = {
         key: value[:256] if isinstance(value, str) else value
         for key in _CHECKPOINT_STEP_METRIC_KEYS
         for value in [metrics.get(key)]
+        if key not in {"recovery_path", "redispatch_outcome", "attempt_failures"}
         if value is not None and isinstance(value, (str, int, float, bool))
     }
+    recovery_path = _safe_recovery_path(metrics.get("recovery_path"))
+    if recovery_path:
+        safe_metrics["recovery_path"] = recovery_path
+    redispatch_outcome = _safe_machine_token(metrics.get("redispatch_outcome"))
+    if redispatch_outcome is not None:
+        safe_metrics["redispatch_outcome"] = redispatch_outcome
+    attempt_failures = _safe_attempt_failures(metrics.get("attempt_failures"))
+    if attempt_failures:
+        safe_metrics["attempt_failures"] = attempt_failures
+    payload["metrics"] = safe_metrics
     return payload
 
 
@@ -469,6 +545,8 @@ async def run_scheduler_workflow(
     hook_engine: Any = None,
     execute_step: Optional[ExecuteStep] = None,
     routing_provider: Optional[RoutingProvider] = None,
+    redispatch_enabled: Optional[bool] = None,
+    retry_delay_seconds: Optional[float] = None,
 ) -> AsyncGenerator[dict, None]:
     """Drive the scheduler over the state's TaskGraph, yielding workflow events.
 
@@ -714,7 +792,11 @@ async def run_scheduler_workflow(
                     node_name="scheduler",
                     next_node="scheduler",
                     step=step_number(step.step_id),
-                    sub_agent_name=getattr(step, "agent_name", None),
+                    sub_agent_name=(
+                        (result.metrics or {}).get("selected_agent")
+                        or step_agents.get(step.step_id)
+                        or getattr(step, "agent_name", None)
+                    ),
                 )
                 failure = getattr(result, "failure", None)
                 if failure is not None and hasattr(task_logger, "log_failure"):
@@ -728,8 +810,8 @@ async def run_scheduler_workflow(
 
         status_value = _status_value(result.status)
         selected_name = (
-            step_agents.get(step.step_id)
-            or (result.metrics or {}).get("selected_agent")
+            (result.metrics or {}).get("selected_agent")
+            or step_agents.get(step.step_id)
             or getattr(step, "agent_name", None)
             or step.step_id
         )
@@ -864,12 +946,25 @@ async def run_scheduler_workflow(
             "unavailable_artifacts": unavailable,
         }
 
+    if redispatch_enabled is None or retry_delay_seconds is None:
+        from src.service.env import (
+            SCHEDULER_REDISPATCH_ENABLED,
+            SCHEDULER_RETRY_DELAY_SECONDS,
+        )
+
+        if redispatch_enabled is None:
+            redispatch_enabled = SCHEDULER_REDISPATCH_ENABLED
+        if retry_delay_seconds is None:
+            retry_delay_seconds = SCHEDULER_RETRY_DELAY_SECONDS
+
     scheduler = TaskScheduler(
         execute_step=execute,
         routing_provider=routing,
         store=store,
         resolver=resolver,
         receipt_store=receipt_store,
+        redispatch_enabled=bool(redispatch_enabled),
+        retry_delay_seconds=max(0.0, float(retry_delay_seconds)),
     )
     ctx = {
         "user_query": state.get("USER_QUERY", "") or state.get("original_user_query", ""),

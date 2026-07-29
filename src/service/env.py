@@ -119,9 +119,20 @@ S_ABAC_ENABLED = _parse_bool("S_ABAC_ENABLED", False)
 #                                    while production execution FAILS CLOSED for
 #                                    a missing/invalid graph or rejected
 #                                    snapshot.
+# SCHEDULER_REDISPATCH_ENABLED    -> after a retryable read-only step exhausts
+#                                    its same-Agent budget, allow one trusted,
+#                                    equivalent Agent redispatch. Default OFF.
+# SCHEDULER_RETRY_DELAY_SECONDS   -> fixed delay before the bounded same-Agent
+#                                    retry. Clamped to zero; no backoff policy.
 ARTIFACT_CAPTURE_ENABLED = _parse_bool("ARTIFACT_CAPTURE_ENABLED", False)
 ORCHESTRATION_SCHEDULER_ENABLED = _parse_bool(
     "ORCHESTRATION_SCHEDULER_ENABLED", False)
+SCHEDULER_REDISPATCH_ENABLED = _parse_bool(
+    "SCHEDULER_REDISPATCH_ENABLED", False)
+SCHEDULER_RETRY_DELAY_SECONDS = max(
+    0.0,
+    _parse_float("SCHEDULER_RETRY_DELAY_SECONDS", 0.0),
+)
 
 # 意图识别：默认混合模式；Basic LLM 未配置或调用异常时由识别层自动降级为 rule。
 INTENT_RECOGNITION_MODE = _parse_choice(

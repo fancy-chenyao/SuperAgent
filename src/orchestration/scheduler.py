@@ -46,6 +46,7 @@ from src.orchestration.resolver import (
     ArtifactSchemaInvalid,
 )
 from src.orchestration.failure_mapper import (
+    failure_from_exception,
     failure_from_step_result,
     make_failure,
 )
@@ -189,12 +190,16 @@ class TaskScheduler:
         store: Optional[ArtifactStore] = None,
         resolver: Optional[ArtifactResolver] = None,
         receipt_store: Optional[ReceiptStore] = None,
+        redispatch_enabled: bool = False,
+        retry_delay_seconds: float = 0.0,
     ) -> None:
         self._execute_step = execute_step
         self._routing = routing_provider
         self.store = store or ArtifactStore()
         self.resolver = resolver or ArtifactResolver(self.store)
         self.receipt_store = receipt_store
+        self.redispatch_enabled = bool(redispatch_enabled)
+        self.retry_delay_seconds = max(0.0, float(retry_delay_seconds))
 
         # Runtime state (reset per run)
         self._outputs: Dict[str, Dict[str, Any]] = {}
@@ -279,7 +284,9 @@ class TaskScheduler:
         # Pre-flight routing: resolve the routing verdict for every not-yet-done
         # step BEFORE executing anything, and cache it. This makes a global
         # clarification enforceable (any CLARIFY halts the whole workflow before
-        # a single side-effect step starts) and avoids re-routing at run time.
+        # a single side-effect step starts). A later recovery route is allowed
+        # only after this pass fully dispatches, only for a retryable read-only
+        # step, and never promotes runtime CLARIFY/REJECT into a global gate.
         self._routes = await self._preflight_routing(graph, context, skip=attempted)
 
         clarify_result = self._global_clarify(graph, results, completed=completed)
@@ -638,6 +645,418 @@ class TaskScheduler:
             }
         )
 
+    def _prepare_agent_execution(
+        self,
+        step: TaskStep,
+        context: dict,
+        selected_agent: Optional[str],
+    ) -> tuple[dict, dict]:
+        """Build an isolated context and resolve inputs for the actual Agent."""
+
+        step_ctx = dict(context)
+        factory = context.get("context_factory")
+        if callable(factory):
+            try:
+                step_ctx["execution_context"] = factory(step, selected_agent)
+            except Exception:  # noqa: BLE001 - context failures fail closed later
+                step_ctx["execution_context"] = None
+        inputs, upstream_sensitivities, upstream_refs = self._resolve_inputs(
+            step,
+            step_ctx,
+            consumer_agent=selected_agent,
+        )
+        step_ctx["upstream_sensitivities"] = upstream_sensitivities
+        step_ctx["upstream_artifact_refs"] = upstream_refs
+        return step_ctx, inputs
+
+    @staticmethod
+    def _attempt_trace(
+        failure: Any,
+        *,
+        attempt: int,
+        phase: str,
+    ) -> dict[str, Any]:
+        """Return a payload-free recovery trace entry."""
+
+        return {
+            "attempt": attempt,
+            "phase": phase,
+            "code": str(getattr(failure, "code", "INTERNAL_STEP_ERROR")),
+            "retryable": bool(getattr(failure, "retryable", False)),
+        }
+
+    def _classify_attempt_result(
+        self,
+        step: TaskStep,
+        result: StepResult,
+        *,
+        selected_agent: Optional[str],
+    ) -> StepResult:
+        """Attach the public failure descriptor while still inside the retry loop."""
+
+        metrics = dict(result.metrics or {})
+        metrics.setdefault("selected_agent", selected_agent)
+        classified = result.model_copy(update={"metrics": metrics})
+        if classified.is_success or classified.failure is not None:
+            return classified
+        return classified.model_copy(
+            update={
+                "failure": failure_from_step_result(
+                    step.step_id,
+                    classified.error,
+                    classified.metrics,
+                    agent_id=selected_agent,
+                )
+            }
+        )
+
+    async def _execute_read_only_with_agent(
+        self,
+        step: TaskStep,
+        step_ctx: dict,
+        selected_agent: Optional[str],
+        inputs: dict,
+        *,
+        retry_budget: int,
+        phase: str,
+    ) -> StepResult:
+        """Execute one read-only Agent with a retryable-driven bounded budget."""
+
+        max_attempts = 1 + min(max(int(retry_budget), 0), 1)
+        attempt_failures: list[dict[str, Any]] = []
+        for attempt_index in range(max_attempts):
+            attempt_number = attempt_index + 1
+            try:
+                exec_result = await self._invoke(
+                    step,
+                    selected_agent,
+                    inputs,
+                    step_ctx,
+                )
+            except asyncio.TimeoutError:
+                failure = make_failure(
+                    "AGENT_TIMEOUT",
+                    step_id=step.step_id,
+                    agent_id=selected_agent,
+                    details_safe={"attempts": attempt_number},
+                )
+                candidate = StepResult(
+                    step_id=step.step_id,
+                    status=StepStatus.FAILED,
+                    failure=failure,
+                    metrics={
+                        "attempts": attempt_number,
+                        "selected_agent": selected_agent,
+                    },
+                )
+            except Exception as exc:  # noqa: BLE001 - classify and fail closed
+                if _is_dispatch_permission_error(exc):
+                    failure = make_failure(
+                        "AGENT_DISPATCH_DENIED",
+                        step_id=step.step_id,
+                        agent_id=selected_agent,
+                    )
+                else:
+                    # An arbitrary exception may be a programming/configuration
+                    # defect. Only explicit transient signals are auto-retried.
+                    failure = failure_from_exception(
+                        exc,
+                        step_id=step.step_id,
+                        agent_id=selected_agent,
+                        retryable=False,
+                    )
+                candidate = StepResult(
+                    step_id=step.step_id,
+                    status=StepStatus.FAILED,
+                    failure=failure,
+                    metrics={
+                        "attempts": attempt_number,
+                        "selected_agent": selected_agent,
+                        **(
+                            {"failure_code": "AGENT_DISPATCH_DENIED"}
+                            if _is_dispatch_permission_error(exc)
+                            else {}
+                        ),
+                    },
+                )
+            else:
+                if getattr(exec_result, "is_success", True):
+                    candidate = self._record_success(
+                        step,
+                        exec_result,
+                        step_ctx,
+                        attempt_number,
+                        selected_agent,
+                    )
+                    if candidate.is_success:
+                        metrics = dict(candidate.metrics or {})
+                        metrics.update(
+                            {
+                                "attempts": attempt_number,
+                                "retry_count": attempt_index,
+                                "selected_agent": selected_agent,
+                                "attempt_failures": attempt_failures,
+                                "recovery_path": (
+                                    [phase, "same_agent_retry"]
+                                    if attempt_number > 1
+                                    else [phase]
+                                ),
+                            }
+                        )
+                        return candidate.model_copy(update={"metrics": metrics})
+                else:
+                    status = getattr(exec_result, "status", None)
+                    metrics = {
+                        "attempts": attempt_number,
+                        "selected_agent": selected_agent,
+                    }
+                    error = getattr(exec_result, "error", None) or "step failed"
+                    if status == ExecutionStatus.TIMEOUT:
+                        failure = make_failure(
+                            "AGENT_TIMEOUT",
+                            step_id=step.step_id,
+                            agent_id=selected_agent,
+                            details_safe={"attempts": attempt_number},
+                        )
+                        candidate = StepResult(
+                            step_id=step.step_id,
+                            status=StepStatus.FAILED,
+                            failure=failure,
+                            metrics=metrics,
+                        )
+                    else:
+                        candidate = StepResult(
+                            step_id=step.step_id,
+                            status=StepStatus.FAILED,
+                            error=error,
+                            metrics=metrics,
+                        )
+
+            candidate = self._classify_attempt_result(
+                step,
+                candidate,
+                selected_agent=selected_agent,
+            )
+            attempt_failures.append(
+                self._attempt_trace(
+                    candidate.failure,
+                    attempt=attempt_number,
+                    phase=phase,
+                )
+            )
+            metrics = dict(candidate.metrics or {})
+            metrics.update(
+                {
+                    "attempts": attempt_number,
+                    "retry_count": attempt_index,
+                    "selected_agent": selected_agent,
+                    "attempt_failures": list(attempt_failures),
+                    "recovery_path": (
+                        [phase, "same_agent_retry"]
+                        if attempt_number > 1
+                        else [phase]
+                    ),
+                }
+            )
+            candidate = candidate.model_copy(update={"metrics": metrics})
+            if (
+                not bool(getattr(candidate.failure, "retryable", False))
+                or attempt_number >= max_attempts
+            ):
+                return candidate
+            if self.retry_delay_seconds:
+                await asyncio.sleep(self.retry_delay_seconds)
+
+        raise AssertionError("read-only recovery loop exhausted unexpectedly")
+
+    async def _route_excluding(
+        self,
+        step: TaskStep,
+        context: dict,
+        excluded_agent_ids: set[str],
+    ) -> RoutingResult:
+        """Ask the bound router for a new verdict after excluding failed Agents."""
+
+        if self._routing is None:
+            return RoutingResult(
+                selected_agent=None,
+                decision="NO_CAPABLE_AGENT",
+                reason_codes=["REDISPATCH_ROUTER_UNAVAILABLE"],
+            )
+        authorized = set(context.get("authorized_agent_ids") or set())
+        authorized.difference_update(excluded_agent_ids)
+        return await self._routing.decide(
+            step,
+            user_query=context.get("user_query", ""),
+            task_id=context.get("task_id", ""),
+            workflow_id=context.get("workflow_id", ""),
+            agents=context.get("agents", ()),
+            authorized_agent_ids=authorized,
+            metadata=context.get("metadata"),
+        )
+
+    def _redispatch_contract_outcome(
+        self,
+        step: TaskStep,
+        context: dict,
+        selected_agent: str,
+    ) -> Optional[str]:
+        """Validate a recovery candidate before sending it any step inputs."""
+
+        planned_contract = getattr(step, "agent_contract", None)
+        if planned_contract is None:
+            return "REDISPATCH_PLANNED_CONTRACT_MISSING"
+        candidate_contract = self._trusted_agent_contract(selected_agent, context)
+        if candidate_contract is None:
+            return "REROUTED_AGENT_CONTRACT_MISSING"
+
+        expected_outputs = list(getattr(step, "expected_outputs", None) or [])
+        if not expected_outputs:
+            return "REDISPATCH_EXPECTED_OUTPUTS_MISSING"
+        planned_outputs = {
+            ref.name: ref.schema_ref for ref in planned_contract.produces
+        }
+        candidate_outputs = {
+            ref.name: ref.schema_ref for ref in candidate_contract.produces
+        }
+        for name in expected_outputs:
+            if name not in candidate_outputs:
+                return "REDISPATCH_OUTPUT_MISSING"
+            planned_schema = planned_outputs.get(name)
+            if planned_schema and candidate_outputs[name] != planned_schema:
+                return "REDISPATCH_OUTPUT_SCHEMA_MISMATCH"
+        return None
+
+    @staticmethod
+    def _with_redispatch_outcome(
+        result: StepResult,
+        *,
+        outcome: str,
+    ) -> StepResult:
+        metrics = dict(result.metrics or {})
+        metrics["redispatch_outcome"] = outcome
+        return result.model_copy(update={"metrics": metrics})
+
+    async def _maybe_redispatch_read_only(
+        self,
+        step: TaskStep,
+        context: dict,
+        selected_agent: Optional[str],
+        primary: StepResult,
+    ) -> StepResult:
+        """Run at most one equivalent Agent after a retryable primary failure."""
+
+        failure = getattr(primary, "failure", None)
+        if (
+            not self.redispatch_enabled
+            or self._routing is None
+            or not step.is_read_only
+            or not selected_agent
+            or failure is None
+            or not failure.retryable
+            or bool((primary.metrics or {}).get("needs_reconciliation"))
+        ):
+            return primary
+
+        if getattr(step, "agent_contract", None) is None:
+            return self._with_redispatch_outcome(
+                primary,
+                outcome="REDISPATCH_PLANNED_CONTRACT_MISSING",
+            )
+        authorized = set(context.get("authorized_agent_ids") or set())
+        authorized.discard(selected_agent)
+        try:
+            routing = await self._route_excluding(step, context, {selected_agent})
+        except Exception:  # noqa: BLE001 - recovery routing never crashes the DAG
+            return self._with_redispatch_outcome(
+                primary,
+                outcome="ROUTING_FAILED",
+            )
+        decision = str(getattr(routing, "decision", "") or "").upper()
+        rerouted_agent = getattr(routing, "selected_agent", None)
+        if decision != "DISPATCH":
+            return self._with_redispatch_outcome(
+                primary,
+                outcome=decision or "ROUTING_FAILED",
+            )
+        if not rerouted_agent:
+            return self._with_redispatch_outcome(
+                primary,
+                outcome="DISPATCH_NO_AGENT",
+            )
+        if rerouted_agent == selected_agent:
+            return self._with_redispatch_outcome(
+                primary,
+                outcome="REDISPATCH_RESELECTED_EXCLUDED_AGENT",
+            )
+        if rerouted_agent not in authorized:
+            return self._with_redispatch_outcome(
+                primary,
+                outcome="REDISPATCH_AGENT_UNAUTHORIZED",
+            )
+
+        contract_outcome = self._redispatch_contract_outcome(
+            step,
+            context,
+            rerouted_agent,
+        )
+        if contract_outcome is not None:
+            return self._with_redispatch_outcome(
+                primary,
+                outcome=contract_outcome,
+            )
+        try:
+            rerouted_ctx, rerouted_inputs = self._prepare_agent_execution(
+                step,
+                context,
+                rerouted_agent,
+            )
+        except InputResolutionError:
+            return self._with_redispatch_outcome(
+                primary,
+                outcome="REDISPATCH_INPUT_RESOLUTION_FAILED",
+            )
+
+        rerouted = await self._execute_read_only_with_agent(
+            step,
+            rerouted_ctx,
+            rerouted_agent,
+            rerouted_inputs,
+            retry_budget=0,
+            phase="redispatch",
+        )
+        primary_metrics = dict(primary.metrics or {})
+        rerouted_metrics = dict(rerouted.metrics or {})
+        primary_attempts = int(primary_metrics.get("attempts") or 0)
+        combined_failures = list(primary_metrics.get("attempt_failures") or [])
+        for item in rerouted_metrics.get("attempt_failures") or []:
+            entry = dict(item)
+            entry["attempt"] = primary_attempts + int(entry.get("attempt") or 0)
+            combined_failures.append(entry)
+        merged_metrics = dict(rerouted_metrics)
+        merged_metrics.update(
+            {
+                "attempts": primary_attempts
+                + int(rerouted_metrics.get("attempts") or 0),
+                "retry_count": int(primary_metrics.get("retry_count") or 0),
+                "redispatch_count": 1,
+                "redispatched_from": selected_agent,
+                "redispatched_to": rerouted_agent,
+                "redispatch_outcome": (
+                    "SUCCEEDED"
+                    if rerouted.is_success
+                    else str(getattr(rerouted.failure, "code", "FAILED"))
+                ),
+                "attempt_failures": combined_failures,
+                "recovery_path": [
+                    *(primary_metrics.get("recovery_path") or ["primary"]),
+                    "redispatch",
+                ],
+                "selected_agent": rerouted_agent,
+            }
+        )
+        return rerouted.model_copy(update={"metrics": merged_metrics})
+
     async def _execute_step_core(
         self,
         step: TaskStep,
@@ -702,21 +1121,11 @@ class TaskScheduler:
                          "reason_codes": reason_codes},
             )
 
-        # Build a per-step execution context (never shared across concurrent
-        # steps). The injected ``context_factory`` yields an ExecutionContext
-        # carrying the acting user + producer agent so captured artifacts get
-        # correct owner/producer/provenance metadata.
-        step_ctx = dict(context)
-        factory = context.get("context_factory")
-        if callable(factory):
-            try:
-                step_ctx["execution_context"] = factory(step, selected_agent)
-            except Exception:  # noqa: BLE001 - never let context build crash a step
-                step_ctx["execution_context"] = None
-
         try:
-            inputs, upstream_sensitivities, upstream_refs = self._resolve_inputs(
-                step, step_ctx, consumer_agent=selected_agent
+            step_ctx, inputs = self._prepare_agent_execution(
+                step,
+                context,
+                selected_agent,
             )
         except InputResolutionError as exc:
             # A declared upstream dependency could not be satisfied. Fail closed
@@ -732,8 +1141,6 @@ class TaskScheduler:
                     "selected_agent": selected_agent,
                 },
             )
-        step_ctx["upstream_sensitivities"] = upstream_sensitivities
-        step_ctx["upstream_artifact_refs"] = upstream_refs
 
         # Idempotency + crash-safety for side-effect steps: a single ATOMIC
         # claim replaces the old separate get()+put(STARTED) so two instances
@@ -850,61 +1257,82 @@ class TaskScheduler:
                 reconciled.metrics["needs_reconciliation"] = True
                 return reconciled
         else:
-            # Read-only (or no receipt store): the original retry behavior. A
-            # non-read step without a receipt store still runs at most once.
-            attempts = max(1, step.retry + 1) if step.is_read_only else 1
-            last_error: Optional[str] = None
-            last_failed: Optional[StepResult] = None
-            result = None
-            for attempt in range(attempts):
+            if step.is_read_only:
+                result = await self._execute_read_only_with_agent(
+                    step,
+                    step_ctx,
+                    selected_agent,
+                    inputs,
+                    retry_budget=step.retry,
+                    phase="primary",
+                )
+                if not result.is_success:
+                    return await self._maybe_redispatch_read_only(
+                        step,
+                        context,
+                        selected_agent,
+                        result,
+                    )
+            else:
+                # A non-read step without a receipt store still executes at
+                # most once. It is deliberately outside automatic recovery.
                 try:
-                    exec_result = await self._invoke(step, selected_agent, inputs, step_ctx)
+                    exec_result = await self._invoke(
+                        step,
+                        selected_agent,
+                        inputs,
+                        step_ctx,
+                    )
                 except asyncio.TimeoutError:
-                    last_error = f"timeout after {step.timeout}s"
-                    continue
-                except Exception as exc:  # noqa: BLE001 - record and maybe retry
+                    return StepResult(
+                        step_id=step.step_id,
+                        status=StepStatus.FAILED,
+                        error=f"timeout after {step.timeout}s",
+                        metrics={
+                            "attempts": 1,
+                            "selected_agent": selected_agent,
+                        },
+                    )
+                except Exception as exc:  # noqa: BLE001
                     if _is_dispatch_permission_error(exc):
                         return StepResult(
                             step_id=step.step_id,
                             status=StepStatus.FAILED,
                             error="agent dispatch denied by policy",
                             metrics={
-                                "attempts": attempt + 1,
+                                "attempts": 1,
                                 "failure_code": "AGENT_DISPATCH_DENIED",
                                 "selected_agent": selected_agent,
                             },
                         )
-                    last_error = str(exc)
-                    continue
-
-                if getattr(exec_result, "is_success", True):
-                    candidate = self._record_success(
-                        step, exec_result, step_ctx, attempt + 1, selected_agent)
-                    if candidate.is_success:
-                        result = candidate
-                        break
-                    # Normalization/validation failed on a read-only step: no
-                    # durable state was published, so the remaining retry
-                    # budget still applies. Keep the classified failure (incl.
-                    # the Agent's retryable verdict) as the terminal candidate.
-                    last_failed = candidate
-                    last_error = candidate.error or "result normalization failed"
-                    continue
-                last_error = getattr(exec_result, "error",
-                                     None) or "step failed"
-
-            if result is None:
-                if last_failed is not None:
-                    last_failed.metrics.setdefault(
-                        "selected_agent", selected_agent)
-                    return last_failed
-                return StepResult(
-                    step_id=step.step_id,
-                    status=StepStatus.FAILED,
-                    error=last_error,
-                    metrics={"attempts": attempts,
-                             "selected_agent": selected_agent},
+                    return StepResult(
+                        step_id=step.step_id,
+                        status=StepStatus.FAILED,
+                        error=str(exc),
+                        metrics={
+                            "attempts": 1,
+                            "selected_agent": selected_agent,
+                        },
+                    )
+                if not getattr(exec_result, "is_success", True):
+                    return StepResult(
+                        step_id=step.step_id,
+                        status=StepStatus.FAILED,
+                        error=getattr(exec_result, "error", None) or "step failed",
+                        metrics={
+                            "attempts": 1,
+                            "selected_agent": selected_agent,
+                        },
+                    )
+                result = self._record_success(
+                    step,
+                    exec_result,
+                    step_ctx,
+                    1,
+                    selected_agent,
                 )
+                if not result.is_success:
+                    return result
 
         # Completion conditions gate success; a failing predicate marks FAILED.
         passed, failed_expr = evaluate_completion(
