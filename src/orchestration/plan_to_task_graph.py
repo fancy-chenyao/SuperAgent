@@ -327,8 +327,10 @@ def plan_to_task_graph(
                     depends_on.append(resolved)
 
         # The registry-provided contract is trusted platform metadata. Planner
-        # output is untrusted and must never replace it with a weaker contract.
-        raw_contract = agent_contracts.get(agent_name) or raw.get("agent_contract")
+        # output is untrusted and must never inject a contract: a step-level
+        # ``agent_contract`` in the plan is ignored outright, so a fabricated
+        # or weakened contract can never reach the Scheduler.
+        raw_contract = agent_contracts.get(agent_name)
         contract = (
             raw_contract
             if isinstance(raw_contract, AgentContract)

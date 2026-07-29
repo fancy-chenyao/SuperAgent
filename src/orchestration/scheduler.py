@@ -621,7 +621,7 @@ class TaskScheduler:
                             None) or "side-effect step failed",
                 )
             result: Optional[StepResult] = self._record_success(
-                step, exec_result, step_ctx, 1)
+                step, exec_result, step_ctx, 1, selected_agent)
             result.metrics["idempotency_key"] = idem_key
             if not result.is_success:
                 # The external side effect may already have happened, but its
@@ -642,6 +642,7 @@ class TaskScheduler:
             # non-read step without a receipt store still runs at most once.
             attempts = max(1, step.retry + 1) if step.is_read_only else 1
             last_error: Optional[str] = None
+            last_failed: Optional[StepResult] = None
             result = None
             for attempt in range(attempts):
                 try:
@@ -654,13 +655,26 @@ class TaskScheduler:
                     continue
 
                 if getattr(exec_result, "is_success", True):
-                    result = self._record_success(
-                        step, exec_result, step_ctx, attempt + 1)
-                    break
+                    candidate = self._record_success(
+                        step, exec_result, step_ctx, attempt + 1, selected_agent)
+                    if candidate.is_success:
+                        result = candidate
+                        break
+                    # Normalization/validation failed on a read-only step: no
+                    # durable state was published, so the remaining retry
+                    # budget still applies. Keep the classified failure (incl.
+                    # the Agent's retryable verdict) as the terminal candidate.
+                    last_failed = candidate
+                    last_error = candidate.error or "result normalization failed"
+                    continue
                 last_error = getattr(exec_result, "error",
                                      None) or "step failed"
 
             if result is None:
+                if last_failed is not None:
+                    last_failed.metrics.setdefault(
+                        "selected_agent", selected_agent)
+                    return last_failed
                 return StepResult(
                     step_id=step.step_id,
                     status=StepStatus.FAILED,
@@ -747,18 +761,61 @@ class TaskScheduler:
             return await asyncio.wait_for(coro, step.timeout)
         return await coro
 
+    def _trusted_agent_contract(self, agent_name: str, context: dict) -> Any:
+        """Trusted registry contract for a dynamically routed Agent (or None).
+
+        ``context["agents"]`` is the runtime's registry listing (the same
+        trusted source routing selects from), never planner output.
+        """
+        for agent in (context or {}).get("agents") or []:
+            if str(getattr(agent, "agent_name", "") or "") == str(agent_name):
+                return getattr(agent, "agent_contract", None)
+        return None
+
     def _record_success(
-        self, step: TaskStep, exec_result: Any, context: dict, attempts: int
+        self,
+        step: TaskStep,
+        exec_result: Any,
+        context: dict,
+        attempts: int,
+        selected_agent: Optional[str] = None,
     ) -> StepResult:
+        # The result is attributed to and validated against the Agent that
+        # ACTUALLY ran. When routing picked a different Agent than the plan,
+        # binding the planned Agent's identity/contract would either reject a
+        # legitimate envelope (PRODUCER_AGENT_MISMATCH) or misattribute a
+        # legacy payload to the wrong producer.
+        planned_agent = (
+            getattr(step, "agent_name", None)
+            or getattr(step, "preferred_resource_id", None)
+        )
+        producer_agent = selected_agent or planned_agent
+        contract = getattr(step, "agent_contract", None)
+        if selected_agent and planned_agent and selected_agent != planned_agent:
+            contract = self._trusted_agent_contract(selected_agent, context)
+            if contract is None and getattr(step, "agent_contract", None) is not None:
+                # The planned step is contracted but the rerouted Agent has no
+                # trusted contract: the result cannot be validated -> refuse.
+                return StepResult(
+                    step_id=step.step_id,
+                    status=StepStatus.FAILED,
+                    error=(
+                        f"no trusted contract for rerouted agent "
+                        f"{selected_agent!r}: refusing to publish an "
+                        "unvalidated result"
+                    ),
+                    metrics={
+                        "attempts": attempts,
+                        "result_error": "REROUTED_AGENT_CONTRACT_MISSING",
+                        "selected_agent": selected_agent,
+                    },
+                )
         try:
             normalized = normalize_agent_result(
                 exec_result,
-                agent_contract=getattr(step, "agent_contract", None),
+                agent_contract=contract,
                 expected_outputs=list(step.expected_outputs),
-                producer_agent=(
-                    getattr(step, "agent_name", None)
-                    or getattr(step, "preferred_resource_id", None)
-                ),
+                producer_agent=producer_agent,
             )
             artifacts = to_artifacts(
                 normalized,
@@ -776,6 +833,7 @@ class TaskScheduler:
                     "attempts": attempts,
                     "result_error": exc.code,
                     "result_error_details": exc.details,
+                    "result_retryable": exc.retryable,
                 },
             )
 
@@ -797,7 +855,7 @@ class TaskScheduler:
                 artifact = artifact.model_copy(update={"derived_from": lineage})
             # Contracted output validation is a publication boundary. An
             # invalid typed result must never be registered for downstream use.
-            if getattr(step, "agent_contract", None) is not None and artifact.schema_valid is not True:
+            if contract is not None and artifact.schema_valid is not True:
                 return StepResult(
                     step_id=step.step_id,
                     status=StepStatus.FAILED,
@@ -918,6 +976,28 @@ class TaskScheduler:
                 param=param, source=source, reason="selector_error", detail=str(exc)
             ) from exc
 
+    def _require_contract_inputs(
+        self, step: TaskStep, resolved: Dict[str, Any]
+    ) -> None:
+        """Every ``required`` Agent-contract input must be resolved before the
+        Agent runs. A plan that simply omits the binding must fail closed here,
+        never silently degrade to LLM parameter extraction inside the Agent."""
+        contract = getattr(step, "agent_contract", None)
+        if contract is None:
+            return
+        missing = [
+            ref.name
+            for ref in contract.requires
+            if ref.required and ref.name not in resolved
+        ]
+        if missing:
+            raise InputResolutionError(
+                param=missing[0],
+                source=None,
+                reason="required_contract_input_missing",
+                detail=f"contract requires unresolved inputs: {missing}",
+            )
+
     def _resolve_inputs(
         self, step: TaskStep, context: dict, *, consumer_agent: Optional[str] = None
     ) -> tuple[Dict[str, Any], list, list]:
@@ -964,6 +1044,7 @@ class TaskScheduler:
         # 2) Planner-derived symbolic input bindings.
         bindings = getattr(step, "input_bindings", None)
         if not isinstance(bindings, list):
+            self._require_contract_inputs(step, resolved)
             return resolved, upstream_sensitivities, upstream_refs
         for binding in bindings:
             if not isinstance(binding, dict):
@@ -1207,4 +1288,5 @@ class TaskScheduler:
                 raise InputResolutionError(
                     param=param, source=src_agent, reason="selector_error", detail=str(exc)
                 ) from exc
+        self._require_contract_inputs(step, resolved)
         return resolved, upstream_sensitivities, upstream_refs

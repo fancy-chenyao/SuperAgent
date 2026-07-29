@@ -258,6 +258,26 @@ def test_converter_prefers_trusted_registry_contract_over_planner_contract():
     assert step.expected_outputs == ["policy.info"]
 
 
+def test_converter_ignores_planner_only_contract():
+    """Planner output is untrusted: a step-level agent_contract with no
+    matching trusted registry contract must be dropped entirely, never
+    injected into the TaskStep."""
+    untrusted = RemoteReportAgent().contract
+    graph = plan_to_task_graph(
+        [
+            {
+                "agent_name": "SomeUnregisteredAgent",
+                "agent_contract": untrusted.model_dump(mode="json"),
+            }
+        ],
+        task_id="planner-injected-contract",
+    )
+    step = graph.steps[0]
+
+    assert step.agent_contract is None
+    assert step.expected_schema_refs == {}
+
+
 def test_converter_rejects_outputs_outside_trusted_contract():
     with pytest.raises(
         TaskGraphValidationError,

@@ -1326,6 +1326,9 @@ async def _process_workflow(
             # Contract/produces for the rebuild gate come from the live trusted
             # registry (same source as the planner save path); if it is
             # unavailable the gate degrades fail-closed (snapshot rejected).
+            trusted_registry_ok = True
+            trusted_contracts: dict[str, Any] | None = None
+            trusted_produces: dict[str, list[str]] | None = None
             try:
                 trusted_contracts, trusted_produces = (
                     await _trusted_registry_contract_data(state.get("user_id"))
@@ -1335,13 +1338,28 @@ async def _process_workflow(
                     "trusted registry unavailable for snapshot verification: %s",
                     exc,
                 )
-                trusted_contracts, trusted_produces = None, None
-            load_production_task_graph(
-                state,
-                execution_phase,
-                current_agent_contracts=trusted_contracts,
-                current_agent_produces=trusted_produces,
-            )
+                trusted_registry_ok = False
+            if trusted_registry_ok:
+                load_production_task_graph(
+                    state,
+                    execution_phase,
+                    current_agent_contracts=trusted_contracts,
+                    current_agent_produces=trusted_produces,
+                )
+            elif (
+                state.get("workflow_mode") == "production"
+                and execution_phase == "execution"
+            ):
+                # Without the trusted registry the rebuild gate has no valid
+                # contract source: refuse snapshot injection outright rather
+                # than compare against stale agent_cards restored from a
+                # checkpoint, and drop any caller/checkpoint-supplied graph so
+                # the scheduler gate fails closed downstream.
+                state.pop("task_graph", None)
+                logger.warning(
+                    "plan snapshot rejected for %s: trusted registry unavailable",
+                    state.get("workflow_id"),
+                )
 
             ready, category, detail = scheduler_ready(state)
             if ready:
