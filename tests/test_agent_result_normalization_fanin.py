@@ -1,4 +1,5 @@
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 
@@ -12,7 +13,7 @@ from src.manager.executor.base import ExecuteResult, ExecutionStatus
 from src.interface.artifact import Artifact
 from src.interface.task_graph import TaskGraph, TaskSpec, TaskStep
 from src.orchestration.completion import ReceiptStore
-from src.orchestration.providers import StubRoutingProvider
+from src.orchestration.providers import RoutingResult, StubRoutingProvider
 from src.orchestration.schema_registry import SchemaRegistry, get_schema_registry
 from src.orchestration.scheduler import InputResolutionError, TaskScheduler
 
@@ -128,6 +129,17 @@ def test_legacy_contract_result_is_adapted_only_when_unambiguous():
     ("payload", "code"),
     [
         ({"error": "没有权限"}, "BUSINESS_RESULT_ERROR"),
+        # An explicit legacy error must fail closed even when the payload also
+        # carries outputs -- it must never be published as a success.
+        (
+            {"error": "upstream timeout", "outputs": {"value": 1}},
+            "BUSINESS_RESULT_ERROR",
+        ),
+        # A legacy partial result is likewise unpublishable.
+        (
+            {"status": "partial", "message": "仅获得部分结果"},
+            "BUSINESS_RESULT_INCOMPLETE",
+        ),
         (
             _envelope(
                 "RemoteKnowledgeAgent",
@@ -160,6 +172,25 @@ def test_business_error_and_partial_fail_closed(payload, code):
     assert exc.value.code == code
 
 
+@pytest.mark.parametrize(
+    ("payload", "code"),
+    [
+        (
+            {"error": "upstream timeout", "outputs": {"value": 1}},
+            "BUSINESS_RESULT_ERROR",
+        ),
+        (
+            {"status": "partial", "message": "仅获得部分结果"},
+            "BUSINESS_RESULT_INCOMPLETE",
+        ),
+    ],
+)
+def test_uncontracted_legacy_error_and_partial_fail_closed(payload, code):
+    with pytest.raises(AgentResultNormalizationError) as exc:
+        normalize_agent_result(_ok(payload), expected_outputs=["result"])
+    assert exc.value.code == code
+
+
 def test_remote_business_error_cannot_spoof_platform_failure_code():
     payload = _envelope(
         "RemoteKnowledgeAgent",
@@ -180,6 +211,28 @@ def test_remote_business_error_cannot_spoof_platform_failure_code():
 
     assert exc.value.code == "BUSINESS_RESULT_ERROR"
     assert exc.value.details["remote_code"] == "PERSISTENCE_FAILED"
+
+
+def test_error_envelope_preserves_retryable_flag():
+    envelope = _envelope(
+        "RemoteKnowledgeAgent",
+        {},
+        status="error",
+        error={
+            "code": "UPSTREAM_TIMEOUT",
+            "message": "上游超时",
+            "retryable": True,
+            "details": {},
+        },
+    )
+    with pytest.raises(AgentResultNormalizationError) as exc:
+        normalize_agent_result(
+            _ok(envelope),
+            agent_contract=_contract("policy.info", "policy.info@v1"),
+        )
+    assert exc.value.code == "BUSINESS_RESULT_ERROR"
+    assert exc.value.details["remote_code"] == "UPSTREAM_TIMEOUT"
+    assert exc.value.retryable is True
 
 
 def test_uncontracted_legacy_result_preserves_declared_output_aliases():
@@ -205,6 +258,59 @@ def test_builtin_schema_registration_does_not_replace_existing_schema():
 
     assert registry.get("employee.info@v1") == strict_schema
     assert registry.has("policy.info@v1")
+
+
+def test_fan_in_schema_backfill_does_not_replace_existing_schema(monkeypatch):
+    """The fan-in assembly backfill must only fill missing built-in schemas,
+    never replace a stricter schema already registered under the same ref."""
+    from src.orchestration import schema_registry as registry_module
+
+    fresh = SchemaRegistry()
+    strict_schema = {
+        "required": ["sentinel"],
+        "properties": {"sentinel": {"type": "string"}},
+    }
+    fresh.register("employee.info@v1", strict_schema)
+    monkeypatch.setattr(registry_module, "_DEFAULT_REGISTRY", fresh)
+
+    report_contract = AgentContract(
+        requires=[
+            DataContractRef(name="report.sources", schema_ref="report.sources@v1")
+        ],
+        produces=[
+            DataContractRef(name="report.markdown", schema_ref="report.markdown@v1")
+        ],
+    )
+    step = TaskStep(
+        step_id="report",
+        operation_mode="read",
+        agent_contract=report_contract,
+        input_bindings=[
+            {
+                "parameter_name": "report.sources",
+                "source_artifacts": [
+                    {"source_step": "hr", "source_output": "employee.info"}
+                ],
+                "assembly": {"schema_ref": "report.sources@v1"},
+            }
+        ],
+    )
+    scheduler = TaskScheduler(execute_step=lambda **kwargs: None)
+    employee_ref = scheduler.store.put(
+        Artifact(
+            logical_name="employee.info",
+            schema_ref="employee.info@v1",
+            payload={"records": []},
+            schema_valid=True,
+        )
+    )
+    scheduler._outputs = {"hr": {"employee.info": employee_ref}}
+
+    resolved, _refs, _sensitivities = scheduler._resolve_inputs(step, {})
+
+    assert fresh.get("employee.info@v1") == strict_schema
+    assert fresh.has("report.sources@v1")
+    assert len(resolved["report.sources"]["sources"]) == 1
 
 
 def test_side_effect_normalization_failure_does_not_complete_success_receipt():
@@ -486,3 +592,279 @@ def test_three_agent_contract_fan_in_creates_named_artifacts_and_lineage():
         hr_info_ref.artifact_id,
         results["knowledge"].outputs["policy.info"].artifact_id,
     }
+
+
+class _FixedRoutingProvider:
+    """Deterministic reroute: always dispatch to one concrete agent."""
+
+    def __init__(self, agent_name: str) -> None:
+        self._agent_name = agent_name
+
+    async def decide(self, step, **kwargs):
+        return RoutingResult(selected_agent=self._agent_name, decision="DISPATCH")
+
+
+def test_rerouted_agent_result_validated_against_actual_agent_contract():
+    """Routing picked a different (trusted) Agent than the plan: its own
+    envelope must be accepted and validated against ITS contract, never
+    rejected as PRODUCER_AGENT_MISMATCH against the planned agent."""
+    hr_contract = _contract("employee.info", "employee.info@v1")
+    step = TaskStep(
+        step_id="lookup",
+        operation_mode="read",
+        agent_name="RemoteKnowledgeAgent",
+        preferred_resource_id="RemoteKnowledgeAgent",
+        expected_outputs=["policy.info"],
+        agent_contract=_contract("policy.info", "policy.info@v1"),
+    )
+
+    async def execute(*, step, selected_agent, inputs, context):
+        return _ok(
+            _envelope(
+                selected_agent,
+                {
+                    "employee.info": {
+                        "records": [{"employee_id": "E001", "name": "王强"}],
+                        "matched_count": 1,
+                    }
+                },
+            )
+        )
+
+    scheduler = TaskScheduler(
+        execute_step=execute,
+        routing_provider=_FixedRoutingProvider("RemoteHRAssistantAgent"),
+    )
+    results = asyncio.run(
+        scheduler.run(
+            TaskGraph(spec=TaskSpec(task_id="reroute"), steps=[step]),
+            context={
+                "agents": [
+                    SimpleNamespace(
+                        agent_name="RemoteHRAssistantAgent",
+                        agent_contract=hr_contract,
+                    )
+                ],
+            },
+        )
+    )
+
+    result = results["lookup"]
+    assert result.is_success is True
+    artifact = scheduler.store.get(result.outputs["employee.info"])
+    assert artifact.metadata["producer_agent"] == "RemoteHRAssistantAgent"
+    assert artifact.schema_ref == "employee.info@v1"
+    assert artifact.schema_valid is True
+
+
+def test_rerouted_agent_without_trusted_contract_fails_closed():
+    """A contracted plan step rerouted to an Agent with no trusted contract
+    must refuse publication instead of validating against the wrong contract
+    or misattributing a legacy payload to the planned agent."""
+    step = TaskStep(
+        step_id="lookup",
+        operation_mode="read",
+        agent_name="RemoteKnowledgeAgent",
+        preferred_resource_id="RemoteKnowledgeAgent",
+        expected_outputs=["policy.info"],
+        agent_contract=_contract("policy.info", "policy.info@v1"),
+    )
+
+    async def execute(*, step, selected_agent, inputs, context):
+        return _ok({"anything": True})
+
+    scheduler = TaskScheduler(
+        execute_step=execute,
+        routing_provider=_FixedRoutingProvider("UnknownAgent"),
+    )
+    results = asyncio.run(
+        scheduler.run(
+            TaskGraph(spec=TaskSpec(task_id="reroute-unknown"), steps=[step]),
+            context={"agents": []},
+        )
+    )
+
+    result = results["lookup"]
+    assert result.is_success is False
+    assert result.metrics["result_error"] == "REROUTED_AGENT_CONTRACT_MISSING"
+
+
+def test_missing_required_contract_binding_fails_closed():
+    """A step whose contract declares a required input but whose plan carries
+    no binding at all must fail closed, never run the Agent with empty inputs
+    (which would silently degrade to LLM parameter extraction)."""
+    report_contract = AgentContract(
+        requires=[
+            DataContractRef(name="report.sources", schema_ref="report.sources@v1")
+        ],
+        produces=[
+            DataContractRef(name="report.markdown", schema_ref="report.markdown@v1")
+        ],
+    )
+    step = TaskStep(
+        step_id="report",
+        operation_mode="read",
+        agent_contract=report_contract,
+        input_bindings=[],
+    )
+    scheduler = TaskScheduler(execute_step=lambda **kwargs: None)
+
+    with pytest.raises(InputResolutionError) as exc:
+        scheduler._resolve_inputs(step, {})
+
+    assert exc.value.reason == "required_contract_input_missing"
+    assert exc.value.param == "report.sources"
+
+
+def test_rerouted_agent_required_inputs_bound_to_actual_contract():
+    """Input-side requirements are symmetric with the result side: when
+    routing selected a different Agent, its trusted contract's required
+    inputs must be enforced -- and the planned contract's no longer apply."""
+    requiring_contract = AgentContract(
+        requires=[
+            DataContractRef(name="report.sources", schema_ref="report.sources@v1")
+        ],
+        produces=[
+            DataContractRef(name="report.markdown", schema_ref="report.markdown@v1")
+        ],
+    )
+    free_contract = _contract("policy.info", "policy.info@v1")
+    scheduler = TaskScheduler(execute_step=lambda **kwargs: None)
+    context = {
+        "agents": [
+            SimpleNamespace(
+                agent_name="RequiringAgent", agent_contract=requiring_contract
+            ),
+            SimpleNamespace(agent_name="FreeAgent", agent_contract=free_contract),
+        ],
+    }
+
+    # Planned agent requires nothing, but the ACTUAL routed agent does:
+    # running it with no binding must fail closed.
+    step = TaskStep(
+        step_id="s",
+        operation_mode="read",
+        agent_name="PlannedAgent",
+        preferred_resource_id="PlannedAgent",
+        agent_contract=free_contract,
+        input_bindings=[],
+    )
+    with pytest.raises(InputResolutionError) as exc:
+        scheduler._resolve_inputs(step, context, consumer_agent="RequiringAgent")
+    assert exc.value.reason == "required_contract_input_missing"
+    assert exc.value.param == "report.sources"
+
+    # Conversely, the planned contract's requirement no longer applies when a
+    # requirement-free trusted Agent actually runs.
+    step = TaskStep(
+        step_id="s",
+        operation_mode="read",
+        agent_name="PlannedAgent",
+        preferred_resource_id="PlannedAgent",
+        agent_contract=requiring_contract,
+        input_bindings=[],
+    )
+    resolved, _sens, _refs = scheduler._resolve_inputs(
+        step, context, consumer_agent="FreeAgent"
+    )
+    assert resolved == {}
+
+
+def test_read_only_step_retries_after_retryable_error_envelope():
+    contract = _contract("policy.info", "policy.info@v1")
+    step = TaskStep(
+        step_id="k",
+        operation_mode="read",
+        retry=1,
+        agent_name="RemoteKnowledgeAgent",
+        preferred_resource_id="RemoteKnowledgeAgent",
+        expected_outputs=["policy.info"],
+        agent_contract=contract,
+    )
+    calls = {"n": 0}
+
+    async def execute(**kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return _ok(
+                _envelope(
+                    "RemoteKnowledgeAgent",
+                    {},
+                    status="error",
+                    error={
+                        "code": "UPSTREAM_TIMEOUT",
+                        "message": "上游超时",
+                        "retryable": True,
+                        "details": {},
+                    },
+                )
+            )
+        return _ok(
+            _envelope(
+                "RemoteKnowledgeAgent",
+                {
+                    "policy.info": {
+                        "query": "年假",
+                        "answer": "满一年五天",
+                        "knowledge_items_count": 1,
+                        "policy_scope": "company",
+                    }
+                },
+            )
+        )
+
+    scheduler = TaskScheduler(
+        execute_step=execute,
+        routing_provider=StubRoutingProvider(),
+    )
+    results = asyncio.run(
+        scheduler.run(TaskGraph(spec=TaskSpec(task_id="retry"), steps=[step]))
+    )
+
+    assert calls["n"] == 2
+    assert results["k"].is_success is True
+
+
+def test_read_only_step_normalization_failure_exhausts_retry_budget():
+    contract = _contract("policy.info", "policy.info@v1")
+    step = TaskStep(
+        step_id="k",
+        operation_mode="read",
+        retry=1,
+        agent_name="RemoteKnowledgeAgent",
+        preferred_resource_id="RemoteKnowledgeAgent",
+        expected_outputs=["policy.info"],
+        agent_contract=contract,
+    )
+    calls = {"n": 0}
+
+    async def execute(**kwargs):
+        calls["n"] += 1
+        return _ok(
+            _envelope(
+                "RemoteKnowledgeAgent",
+                {},
+                status="error",
+                error={
+                    "code": "UPSTREAM_TIMEOUT",
+                    "message": "上游超时",
+                    "retryable": True,
+                    "details": {},
+                },
+            )
+        )
+
+    scheduler = TaskScheduler(
+        execute_step=execute,
+        routing_provider=StubRoutingProvider(),
+    )
+    results = asyncio.run(
+        scheduler.run(TaskGraph(spec=TaskSpec(task_id="retry-fail"), steps=[step]))
+    )
+
+    result = results["k"]
+    assert calls["n"] == 2
+    assert result.is_success is False
+    assert result.metrics["result_error"] == "BUSINESS_RESULT_ERROR"
+    assert result.metrics["result_error_details"]["remote_code"] == "UPSTREAM_TIMEOUT"
+    assert result.metrics["result_retryable"] is True

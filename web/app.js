@@ -356,6 +356,7 @@ let clarificationPending = false;
 let pendingClarificationContext = null;
 let coordinatorResponseHandled = false;
 let latestRoutingDecision = null;
+let latestPlanningFailureMessage = "";
 let conversationContextEntities = {};
 let conversationContextArtifacts = [];
 let currentRequestQuery = "";
@@ -2878,6 +2879,11 @@ const applyPlannerStepsFromBuffer = (buffer, options = {}) => {
       const validationMessage = validationErrors.length
         ? `Plan validation failed: ${validationErrors.join("; ")}`
         : (parsed ? emptyStepsMessage : invalidJsonMessage);
+      latestPlanningFailureMessage = validationErrors.length
+        ? `规划未生成可执行结果，原因：${validationErrors.map(String).join("；")}`
+        : parsed
+          ? "规划未生成可执行结果：Planner 返回了空步骤列表。"
+          : "规划未生成可执行结果：Planner 输出无法解析为有效的 JSON 步骤。";
       showPlanHint(validationMessage, true);
       showPlanValidationHint(validationMessage, true);
       if (plannerOnlyMode) {
@@ -2895,6 +2901,7 @@ const applyPlannerStepsFromBuffer = (buffer, options = {}) => {
   }
 
   planSteps = steps.map((step) => normalizeStep(step));
+  latestPlanningFailureMessage = "";
   plannerOnlyStepsUpdated = true;
   renderPlanSummary(planSteps);
   renderPlanEditor();
@@ -3401,6 +3408,7 @@ const runWorkflow = async () => {
   coordinatorBuffer = "";
   clarificationPending = false;
   coordinatorResponseHandled = false;
+  latestPlanningFailureMessage = "";
   latestRoutingDecision = null;
   instructionHistory = [...instructionHistory, message].slice(-CHAT_HISTORY_LIMIT);
   if (!isClarificationAnswer) {
@@ -3502,9 +3510,11 @@ const runWorkflow = async () => {
       setStatus("Plan ready", true);
       setChatPlanActionsDisabled(false);
     } else if (!clarificationPending && !coordinatorResponseHandled) {
-      const statusMessage = currentRunHasError
-        ? "规划失败，请查看规划日志。"
-        : "规划未生成可执行结果，请查看规划日志。";
+      const statusMessage = latestPlanningFailureMessage || (
+        currentRunHasError
+          ? "规划失败：工作流发生异常，但后端没有返回具体错误原因。"
+          : "规划未生成可执行结果：后端没有返回可执行步骤或具体失败原因。"
+      );
       showAssistantText(statusMessage);
       appendActiveConversationMessage("assistant", statusMessage);
     }

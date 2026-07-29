@@ -94,6 +94,128 @@ def test_converter_explicit_step_id_and_independent_steps():
     assert g.step_map()["step_2"].depends_on == []
 
 
+def test_converter_resolves_step_and_subtask_references_before_building_edges():
+    graph = plan_to_task_graph(
+        [
+            {
+                "step_id": "consumer",
+                "subtask_ids": ["subtask_consumer"],
+                "agent_name": "ConsumerAgent",
+                "depends_on": ["subtask_source"],
+            },
+            {
+                "step_id": "source",
+                "subtask_ids": ["subtask_source"],
+                "agent_name": "SourceAgent",
+            },
+        ],
+        task_id="forward-reference",
+    )
+
+    assert graph.step_map()["consumer"].depends_on == ["source"]
+    assert graph.topological_order() == ["source", "consumer"]
+
+
+def test_converter_rejects_unknown_dependency_instead_of_dropping_it():
+    with pytest.raises(
+        TaskGraphValidationError,
+        match="depends on unknown step 'missing_step'",
+    ):
+        plan_to_task_graph(
+            [
+                {
+                    "step_id": "consumer",
+                    "agent_name": "ConsumerAgent",
+                    "depends_on": ["missing_step"],
+                }
+            ],
+            task_id="unknown-dependency",
+        )
+
+
+def test_converter_rejects_unknown_input_source_instead_of_running_early():
+    with pytest.raises(
+        TaskGraphValidationError,
+        match="depends on unknown step 'missing_source'",
+    ):
+        plan_to_task_graph(
+            [
+                {
+                    "step_id": "consumer",
+                    "agent_name": "ConsumerAgent",
+                    "inputs": [
+                        {
+                            "parameter_name": "payload",
+                            "source_step": "missing_source",
+                        }
+                    ],
+                }
+            ],
+            task_id="unknown-input-source",
+        )
+
+
+def test_converter_keeps_legacy_agent_reference_to_most_recent_prior_step():
+    graph = plan_to_task_graph(
+        [
+            {"step_id": "query_1", "agent_name": "SharedAgent"},
+            {"step_id": "query_2", "agent_name": "SharedAgent"},
+            {
+                "step_id": "report",
+                "agent_name": "ReportAgent",
+                "depends_on": ["SharedAgent"],
+            },
+        ],
+        task_id="legacy-agent-reference",
+    )
+
+    assert graph.step_map()["report"].depends_on == ["query_2"]
+
+
+def test_converter_normalizes_single_subtask_and_intent_values():
+    graph = plan_to_task_graph(
+        [
+            {
+                "step_id": "query",
+                "agent_name": "RemoteHRAssistantAgent",
+                "subtask_ids": "subtask_1",
+                "intents": "employee_information_query",
+            }
+        ],
+        task_id="normalized-list-fields",
+    )
+
+    step = graph.step_map()["query"]
+    assert step.subtask_ids == ["subtask_1"]
+    assert step.intents == ["employee_information_query"]
+
+
+def test_converter_falls_back_from_empty_plural_fields_to_singular_values():
+    graph = plan_to_task_graph(
+        [
+            {
+                "step_id": "query",
+                "agent_name": "RemoteHRAssistantAgent",
+                "subtask_ids": [],
+                "subtask_id": "subtask_1",
+                "intents": [],
+                "intent": "employee_information_query",
+            },
+            {
+                "step_id": "report",
+                "agent_name": "RemoteReportAgent",
+                "depends_on": ["subtask_1"],
+            },
+        ],
+        task_id="empty-plural-field-fallback",
+    )
+
+    query_step = graph.step_map()["query"]
+    assert query_step.subtask_ids == ["subtask_1"]
+    assert query_step.intents == ["employee_information_query"]
+    assert graph.step_map()["report"].depends_on == ["query"]
+
+
 def test_converter_preserves_structured_execution_contract():
     graph = plan_to_task_graph(
         [
@@ -172,6 +294,29 @@ def test_converter_uses_subtasks_to_serialize_report_after_queries():
     assert order.index("step_3") > order.index("step_2")
 
 
+def test_converter_normalizes_single_value_depends_on():
+    """A legal single-value ``"depends_on": "step"`` (accepted by upstream
+    ``_string_list`` validation) must resolve as ONE edge, never be iterated
+    character-by-character and silently dropped."""
+    plan = [
+        {"agent_name": "A", "step_id": "alpha"},
+        {"agent_name": "B", "step_id": "beta", "depends_on": "alpha"},
+    ]
+    g = plan_to_task_graph(plan, task_id="t")
+    assert g.step_map()["beta"].depends_on == ["alpha"]
+    assert g.topological_order() == ["alpha", "beta"]
+
+
+def test_derive_accepts_single_value_subtask_depends_on():
+    subtasks = [
+        {"id": "subtask_1", "depends_on": []},
+        {"id": "subtask_2", "depends_on": []},
+        {"id": "subtask_3", "depends_on": "subtask_1"},
+    ]
+    augmented = derive_step_dependencies(WANGQIANG_LEAVE_PLAN, subtasks)
+    assert augmented[2]["depends_on"] == ["RemoteHRAssistantAgent"]
+
+
 def test_converter_builds_contract_fan_in_dependencies():
     contracts = {
         "RemoteHRAssistantAgent": RemoteHRAssistantAgent().contract,
@@ -233,6 +378,26 @@ def test_converter_prefers_trusted_registry_contract_over_planner_contract():
 
     assert [ref.name for ref in step.agent_contract.produces] == ["policy.info"]
     assert step.expected_outputs == ["policy.info"]
+
+
+def test_converter_ignores_planner_only_contract():
+    """Planner output is untrusted: a step-level agent_contract with no
+    matching trusted registry contract must be dropped entirely, never
+    injected into the TaskStep."""
+    untrusted = RemoteReportAgent().contract
+    graph = plan_to_task_graph(
+        [
+            {
+                "agent_name": "SomeUnregisteredAgent",
+                "agent_contract": untrusted.model_dump(mode="json"),
+            }
+        ],
+        task_id="planner-injected-contract",
+    )
+    step = graph.steps[0]
+
+    assert step.agent_contract is None
+    assert step.expected_schema_refs == {}
 
 
 def test_converter_rejects_outputs_outside_trusted_contract():

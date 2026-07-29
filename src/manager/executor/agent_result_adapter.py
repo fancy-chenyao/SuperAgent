@@ -26,9 +26,19 @@ from src.orchestration.schema_registry import SchemaRegistry, get_schema_registr
 class AgentResultNormalizationError(ValueError):
     """An executor result cannot safely be exposed as downstream data."""
 
-    def __init__(self, code: str, message: str, *, details: Any = None) -> None:
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        details: Any = None,
+        retryable: bool = False,
+    ) -> None:
         self.code = code
         self.details = details
+        # Preserved from the envelope's error object so the scheduler can keep
+        # the Agent's own retryability verdict in the failed step's metrics.
+        self.retryable = retryable
         super().__init__(message)
 
 
@@ -95,8 +105,16 @@ def _legacy_error(payload: Any) -> tuple[str, str] | None:
         return "BUSINESS_RESULT_ERROR", str(
             payload.get("error") or payload.get("message") or status
         )
+    # A legacy partial result is as unsafe to publish as an explicit error:
+    # downstream consumers cannot tell which declared data is missing.
+    if status == "partial":
+        return "BUSINESS_RESULT_INCOMPLETE", str(
+            payload.get("error") or payload.get("message") or "legacy result is partial"
+        )
+    # Any explicit error field fails closed, even when the payload also carries
+    # outputs: a result that reports an error must never enter the data plane.
     error = payload.get("error")
-    if error and not payload.get("outputs"):
+    if error:
         if isinstance(error, dict):
             return "BUSINESS_RESULT_ERROR", str(error.get("message") or error)
         return "BUSINESS_RESULT_ERROR", str(error)
@@ -222,12 +240,14 @@ def normalize_agent_result(
                 "remote_code": envelope.error.code,
                 "remote_details": envelope.error.details,
             },
+            retryable=envelope.error.retryable,
         )
     if envelope.status == AgentResultStatus.PARTIAL:
         raise AgentResultNormalizationError(
             "BUSINESS_RESULT_INCOMPLETE",
             envelope.error.message if envelope.error else "Agent result is partial",
             details=envelope.error.details if envelope.error else None,
+            retryable=bool(envelope.error and envelope.error.retryable),
         )
 
     validation = validate_agent_result(envelope, contract, registry)
