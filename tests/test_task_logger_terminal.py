@@ -75,6 +75,25 @@ def test_task_logger_persists_structured_failure_without_finalizing_early():
     assert loaded.failures[0]["blocked_by"] == ["hr_step"]
 
 
+def test_truncate_for_resume_rebuilds_failures_from_retained_history():
+    logger = TaskLogger(task_id="task-resume-failures", workflow_id="wf-resume")
+    early = make_failure("AGENT_EXECUTION_FAILED", step_id="s1")
+    late = make_failure("UPSTREAM_STEP_FAILED", step_id="s2", blocked_by=["s1"])
+    logger.log_failure(early.model_dump(mode="json"), step=1)
+    logger.log_failure(late.model_dump(mode="json"), step=3)
+    logger.log_workflow_terminal(WorkflowStatus.FAILED, error="boom")
+
+    logger.truncate_for_resume(3)
+
+    # Only the failure recorded before the resume point survives; the stale
+    # attempt's failure no longer inflates failure_count after a re-run.
+    assert [failure["step_id"] for failure in logger.failures] == ["s1"]
+    assert logger.status == "running"
+    assert logger.error is None
+    assert logger.finished_at is None
+    assert all(entry.get("event") != "workflow_end" for entry in logger.history)
+
+
 @pytest.mark.parametrize("status", list(WorkflowStatus))
 def test_runtime_end_status_matches_task_logger(status, monkeypatch):
     class _TerminalScheduler:

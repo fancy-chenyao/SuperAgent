@@ -110,6 +110,11 @@ _SPECS: dict[str, _FailureSpec] = {
         "The result producer does not match the selected Agent.",
         action="Check Agent registration and result metadata.",
     ),
+    FailureCode.REROUTED_AGENT_CONTRACT_MISSING: _spec(
+        FailureCategory.CONTRACT,
+        "The rerouted Agent has no trusted contract to validate the result.",
+        action="Register a trusted contract for the Agent or fix the routing.",
+    ),
     FailureCode.MISSING_REQUIRED_OUTPUT: _spec(
         FailureCategory.CONTRACT,
         "The Agent result is missing a required output.",

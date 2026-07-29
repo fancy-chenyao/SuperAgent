@@ -13,7 +13,7 @@ from src.contracts.agent_contract import AgentContract, DataContractRef
 from src.interface.artifact import ArtifactRef, StepResult, StepStatus
 from src.interface.task_graph import TaskGraph, TaskSpec, TaskStep
 from src.manager.executor.base import ExecuteResult, ExecutionStatus
-from src.orchestration.providers import StubRoutingProvider
+from src.orchestration.providers import RoutingResult, StubRoutingProvider
 from src.orchestration.runtime import (
     _public_step_metrics,
     _required_step_outputs,
@@ -429,6 +429,46 @@ def test_runtime_reports_restored_artifact_corruption_without_leaking_details(
     assert terminal["data"]["status"] == "FAILED"
     assert terminal["data"]["failures"][0]["code"] == "ARTIFACT_STORE_CORRUPTION"
     assert "private path" not in json.dumps(terminal["data"])
+
+
+def test_synthetic_clarify_checkpoint_never_reuses_step_number():
+    """A clarify outcome skips ``on_step_start``; its checkpoint must still
+    advance ``current_step`` past its own step number, otherwise the next step
+    after a resume reuses the number and overwrites the recovery checkpoint."""
+
+    class _RecordingCheckpoints:
+        def __init__(self):
+            self.saved = []
+
+        def save_checkpoint(self, **kwargs):
+            self.saved.append(kwargs)
+
+    class _ClarifyRouting:
+        async def decide(self, step, **kwargs):
+            return RoutingResult(
+                selected_agent=None, decision="CLARIFY", clarification="目标？"
+            )
+
+    checkpoints = _RecordingCheckpoints()
+    state = _two_step_state()
+
+    async def _run():
+        return [
+            ev
+            async for ev in run_scheduler_workflow(
+                state,
+                task_id="task-1",
+                checkpoint_manager=checkpoints,
+                execute_step=_fake_execute,
+                routing_provider=_ClarifyRouting(),
+            )
+        ]
+
+    asyncio.run(_run())
+
+    assert checkpoints.saved
+    for saved in checkpoints.saved:
+        assert saved["state"]["current_step"] > saved["step"]
 
 
 def test_runtime_checkpoint_failure_does_not_report_success():

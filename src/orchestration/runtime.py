@@ -576,6 +576,14 @@ async def run_scheduler_workflow(
         """
         succeeded = result.status == StepStatus.SUCCEEDED
 
+        # Allocate the step number BEFORE building the candidate. Synthetic
+        # results (clarify/blocked steps) never pass through ``on_step_start``,
+        # so allocating lazily below would persist a candidate whose
+        # ``current_step`` still equals this checkpoint's own step number --
+        # after a resume the next step would reuse that number and overwrite
+        # the very checkpoint used for recovery.
+        current = step_number(step.step_id)
+
         # (1) Candidate step_results (do not mutate live state yet).
         step_results = dict(state.get("step_results") or {})
         step_results[step.step_id] = _checkpoint_step_result(result)
@@ -609,7 +617,7 @@ async def run_scheduler_workflow(
             checkpoint_manager.save_checkpoint(
                 workflow_id=workflow_id,
                 task_id=task_id,
-                step=step_number(step.step_id),
+                step=current,
                 node_name="scheduler",
                 next_node="scheduler",
                 state=candidate,

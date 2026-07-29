@@ -117,6 +117,11 @@ def test_runtime_failure_codes_are_catalogued(code, category, retryable):
             "schema",
         ),
         (
+            {"result_error": "REROUTED_AGENT_CONTRACT_MISSING"},
+            "REROUTED_AGENT_CONTRACT_MISSING",
+            "contract",
+        ),
+        (
             {"input_error": "artifact_not_produced"},
             "UPSTREAM_OUTPUT_MISSING",
             "artifact",

@@ -90,6 +90,29 @@ class TaskLogger:
         self._step_counter["__global__"] = count
         return count
 
+    def truncate_for_resume(self, resume_step: int) -> None:
+        """Roll the log back to just before ``resume_step`` for a re-run.
+
+        Removes history entries from ``resume_step`` onwards (and any
+        ``workflow_end``), rebuilds :attr:`failures` from the retained
+        history so a successful re-run no longer reports the previous
+        attempt's failures, and resets the terminal fields.
+        """
+
+        self.history = [
+            entry for entry in self.history
+            if entry.get("step", 0) < resume_step and entry.get("event") != "workflow_end"
+        ]
+        self.failures = [
+            entry.get("failure")
+            for entry in self.history
+            if entry.get("event") == "step_failure" and entry.get("failure")
+        ]
+        self.status = "running"
+        self.finished_at = None
+        self.error = None
+        self._step_counter = {"__global__": resume_step - 1}
+
     def log_event(
         self,
         node_name: str,

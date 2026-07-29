@@ -18,6 +18,7 @@ The scheduler is decoupled from the real agent runtime via an injected
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from collections.abc import Mapping
 from typing import Any, Awaitable, Callable, Dict, List, Optional
@@ -50,6 +51,8 @@ from src.orchestration.failure_mapper import (
 )
 from src.orchestration.schema_registry import get_schema_registry
 from src.orchestration.store import ArtifactNotFoundError, ArtifactStore
+
+logger = logging.getLogger(__name__)
 
 # execute_step(step, selected_agent, inputs, context) -> ExecuteResult-like
 ExecuteStep = Callable[..., Awaitable[Any]]
@@ -1045,6 +1048,17 @@ class TaskScheduler:
                 upstream_sensitivities=context.get("upstream_sensitivities"),
             )
         except AgentResultNormalizationError as exc:
+            # Remote business diagnostics (remote_code / remote_details) are
+            # deliberately excluded from SSE, checkpoints and the TaskLogger.
+            # The server log is their only retention point, so record them
+            # here before they are filtered out.
+            logger.warning(
+                "step %s: agent result rejected (%s): %s; details=%r",
+                step.step_id,
+                exc.code,
+                exc,
+                exc.details,
+            )
             return StepResult(
                 step_id=step.step_id,
                 status=StepStatus.FAILED,

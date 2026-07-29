@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from types import SimpleNamespace
 
 import pytest
@@ -878,3 +879,50 @@ def test_read_only_step_normalization_failure_exhausts_retry_budget():
     assert result.metrics["result_error"] == "BUSINESS_RESULT_ERROR"
     assert result.metrics["result_error_details"]["remote_code"] == "UPSTREAM_TIMEOUT"
     assert result.metrics["result_retryable"] is True
+
+
+def test_normalization_failure_retains_remote_diagnostics_in_server_log(caplog):
+    """remote_code/remote_details are filtered from SSE, checkpoints and the
+    TaskLogger -- the server log must be their actual retention point."""
+
+    contract = _contract("policy.info", "policy.info@v1")
+    step = TaskStep(
+        step_id="k",
+        operation_mode="read",
+        agent_name="RemoteKnowledgeAgent",
+        preferred_resource_id="RemoteKnowledgeAgent",
+        expected_outputs=["policy.info"],
+        agent_contract=contract,
+    )
+
+    async def execute(**kwargs):
+        return _ok(
+            _envelope(
+                "RemoteKnowledgeAgent",
+                {},
+                status="error",
+                error={
+                    "code": "PERSISTENCE_FAILED",
+                    "message": "remote business rejection",
+                    "retryable": False,
+                    "details": {"ticket": "T-1"},
+                },
+            )
+        )
+
+    scheduler = TaskScheduler(
+        execute_step=execute,
+        routing_provider=StubRoutingProvider(),
+    )
+    with caplog.at_level(logging.WARNING, logger="src.orchestration.scheduler"):
+        asyncio.run(
+            scheduler.run(TaskGraph(spec=TaskSpec(task_id="log-diag"), steps=[step]))
+        )
+
+    messages = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "src.orchestration.scheduler"
+    ]
+    assert any("PERSISTENCE_FAILED" in message for message in messages)
+    assert any("T-1" in message for message in messages)

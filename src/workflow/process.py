@@ -915,15 +915,9 @@ async def _process_workflow(
         from src.robust.task_logger import TaskLogger as TL
         existing_logger = TL.load(task_id)
         if existing_logger:
-            # Truncate history: remove entries from resume_step onwards and workflow_end events
-            existing_logger.history = [
-                entry for entry in existing_logger.history
-                if entry.get("step", 0) < resume_step and entry.get("event") != "workflow_end"
-            ]
-            existing_logger.status = "running"
-            existing_logger.finished_at = None
-            existing_logger.error = None
-            existing_logger._step_counter = {"__global__": resume_step - 1}
+            # Truncate history/failures and reset terminal fields so the re-run
+            # starts from a consistent pre-resume log state.
+            existing_logger.truncate_for_resume(resume_step)
             task_logger = existing_logger
             user_query = existing_logger.user_query
             logger.info(
