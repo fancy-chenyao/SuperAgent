@@ -325,13 +325,49 @@ def segment_query(text: str) -> list[dict[str, Any]]:
 _PERSON_STOP_WORDS = {
     "员工", "人员", "人事", "基本", "个人", "相关", "这个", "那个", "公司", "部门",
     "收入", "在职", "请假", "分析", "明天", "今天", "后天", "本周", "下周", "本月", "下月",
-    "一次", "一场", "一个", "会议", "参会人", "收件人",
+    "最近", "一次", "一场", "一个", "会议", "参会人", "收件人",
 }
+_GENERIC_PERSON_PREFIXES = (
+    "我们",
+    "咱们",
+    "大家",
+    "全体",
+    "所有",
+    "员工",
+    "人员",
+    "部门",
+    "公司",
+)
+_ORGANIZATION_SUBJECT_SUFFIXES = (
+    "部门",
+    "公司",
+    "团队",
+    "小组",
+    "中心",
+    "办公室",
+    "事业部",
+    "分部",
+    "处室",
+    "科室",
+    "部",
+)
+
+_LEAVE_QUERY_SUBJECT_PATTERN = (
+    r"(?:^|[，,。；;\s])"
+    r"(?:(?:请问(?:一下)?|请(?:帮我|帮忙)?|麻烦(?:帮我|帮忙)?|帮我|帮忙)\s*)?"
+    r"(?:(?:查(?:询|一下|下)?|查看|看看|看(?:一下)?|确认(?:一下)?)\s*)?"
+    r"(?:员工)?([\u4e00-\u9fff]{2,4}?)"
+    r"(?=(?:最近|本月|本周|这段时间)?(?:有没有|是否|有无).{0,8}(?:请假|休假))"
+)
 
 
 def is_person_candidate(value: Any) -> bool:
     candidate = str(value or "").strip()
-    return 2 <= len(candidate) <= 8 and candidate not in _PERSON_STOP_WORDS
+    if not 2 <= len(candidate) <= 8 or candidate in _PERSON_STOP_WORDS:
+        return False
+    if candidate.startswith(_GENERIC_PERSON_PREFIXES):
+        return False
+    return not candidate.endswith(_ORGANIZATION_SUBJECT_SUFFIXES)
 
 
 def extract_entities(text: str) -> dict[str, Any]:
@@ -353,6 +389,11 @@ def extract_entities(text: str) -> dict[str, Any]:
         r"(?:发给|发送给|寄给|转给|抄送给?|交给|通知)([\w.@\-\u4e00-\u9fff]{2,30}?)(?=$|[，,。；;]|然后|并且|并发|再)",
         raw,
     )
+    if not recipient_match:
+        recipient_match = re.search(
+            r"(?:给|向)([\w.@\-\u4e00-\u9fff]{2,30}?)(?=(?:发送|发一封|发邮件|寄送|通知))",
+            raw,
+        )
     if recipient_match:
         recipient = recipient_match.group(1).strip("，。；;,. ")
         if recipient:
@@ -361,6 +402,7 @@ def extract_entities(text: str) -> dict[str, Any]:
     people: list[str] = []
     # 从动作与属格上下文中抽取姓名，不依赖固定人名表。
     patterns = (
+        _LEAVE_QUERY_SUBJECT_PATTERN,
         r"(?:查询|查一下|查看|看看|帮|为|取消|生成)(?:员工)?([\u4e00-\u9fff]{2,4}?)(?=的|生成|写|开|明天|后天|本周|下周|本月|下月|日程|在职|收入|请假|休假)",
         r"(?:安排|预约)([\u4e00-\u9fff]{2,3})(?:和|与)([\u4e00-\u9fff]{2,3})(?=明天|后天|开会|的?会议)",
         r"(?:安排)?与([\u4e00-\u9fff]{2,3})(?=的?会议)",
@@ -381,6 +423,17 @@ def extract_entities(text: str) -> dict[str, Any]:
         recipient_person = str(entities["recipient"])
         if recipient_person not in people:
             people.append(recipient_person)
+    leave_subject_match = re.search(
+        _LEAVE_QUERY_SUBJECT_PATTERN,
+        raw,
+    )
+    if leave_subject_match:
+        leave_subject = leave_subject_match.group(1)
+        if is_person_candidate(leave_subject):
+            entities["employee_name"] = leave_subject
+            if leave_subject not in people:
+                people.append(leave_subject)
+
     if people:
         entities["people"] = people
         recipient = str(entities.get("recipient") or "")
@@ -427,6 +480,47 @@ def _find_keyword_spans(text: str, keywords: tuple[str, ...]) -> list[tuple[int,
         if start >= 0:
             matches.append((start, keyword))
     return sorted(matches)
+
+
+def _clause_for_match(text: str, start: int, match_text: str) -> str:
+    """返回一次意图命中所在的完整分句，用于判断业务语境。"""
+    clause_start = 0
+    clause_end = len(text)
+    match_end = start + len(match_text)
+    boundaries = re.finditer(
+        r"[，,。；;]|\bthen\b|\band\b|然后|之后|并且|同时|最后|否则",
+        text,
+        flags=re.IGNORECASE,
+    )
+    for boundary in boundaries:
+        if boundary.end() <= start:
+            clause_start = boundary.end()
+            continue
+        if boundary.start() >= match_end:
+            clause_end = boundary.start()
+            break
+    return text[clause_start:clause_end].strip()
+
+
+def _exclude_context_matches(
+    text: str,
+    matches: list[tuple[int, str]],
+    exclusions: tuple[str, ...],
+) -> list[tuple[int, str]]:
+    if not exclusions:
+        return matches
+    return [
+        (position, matched_text)
+        for position, matched_text in matches
+        if not any(
+            re.search(
+                exclusion,
+                _clause_for_match(text, position, matched_text),
+                flags=re.IGNORECASE,
+            )
+            for exclusion in exclusions
+        )
+    ]
 
 
 def _is_negated(text: str, start: int, keyword: str) -> bool:
@@ -476,6 +570,23 @@ class RuleIntentRecognizer:
                 continue
             keywords = tuple(definition.get("keywords") or ())
             matches = _find_keyword_spans(text, keywords)
+            pattern_matches: list[tuple[int, str]] = []
+            for pattern in definition.get("patterns") or ():
+                pattern_matches.extend(
+                    (match.start(), match.group(0))
+                    for match in re.finditer(str(pattern), text, flags=re.IGNORECASE)
+                )
+            matches.extend(
+                _exclude_context_matches(
+                    text,
+                    pattern_matches,
+                    tuple(
+                        str(item)
+                        for item in definition.get("context_exclusions") or ()
+                    ),
+                )
+            )
+            matches = sorted(set(matches))
             if not matches:
                 continue
             if name == "employee_information_query" and re.search(

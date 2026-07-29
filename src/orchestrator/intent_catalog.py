@@ -43,6 +43,14 @@ INTENT_CATALOG: dict[str, dict[str, Any]] = {
             "leave record",
             "leave records",
         ),
+        "patterns": (
+            r"(?:有没有|是否|有无).{0,8}(?:请假|休假)",
+            r"(?:请假|休假).{0,8}(?:情况|状态|记录)",
+        ),
+        "context_exclusions": (
+            r"(?:(?:请假|休假)[^，,。；;]*?(?:制度|政策|规定|规则|流程|权限)|"
+            r"(?:制度|政策|规定|规则|流程|权限)[^，,。；;]*?(?:请假|休假))",
+        ),
         "examples": ("查询李娜的请假记录", "查看员工休假申请记录"),
         "counter_examples": ("查询请假制度", "生成请假申请书"),
         "capabilities": ("HR", "Office"),
