@@ -835,6 +835,7 @@ def test_request_flag_disables_reuse_and_runs_normal_graph(tmp_path, monkeypatch
 
 
 def test_reused_plan_validation_failure_regenerates_with_normal_planner(monkeypatch):
+    import src.service.env as env_mod
     import src.workflow.coor_task as coor_task
 
     fake_cache = _FakeCache()
@@ -866,6 +867,11 @@ def test_reused_plan_validation_failure_regenerates_with_normal_planner(monkeypa
     )
     monkeypatch.setattr(coor_task, "apply_prompt_template", lambda *_args: [])
     monkeypatch.setattr(coor_task, "get_llm_by_type", lambda _kind: FakePlannerLLM())
+    # This test covers skill rejection + normal Planner regeneration, not the
+    # scheduler approval gate. Keep it independent from a developer's .env.
+    monkeypatch.setattr(
+        env_mod, "ORCHESTRATION_SCHEDULER_ENABLED", False, raising=False
+    )
 
     state = {
         "user_id": "alice",
