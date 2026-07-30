@@ -399,6 +399,18 @@ def _step_declared_intents(step: dict) -> list[str]:
     return _string_list(step.get("intent"))
 
 
+def _scheduler_profile_validation_state(state: State) -> State:
+    """Carry Scheduler strictness without changing the validation call contract."""
+
+    from src.service.env import ORCHESTRATION_SCHEDULER_ENABLED
+
+    validation_state = dict(state)
+    validation_state["_require_trusted_subtask_bindings"] = bool(
+        ORCHESTRATION_SCHEDULER_ENABLED
+    )
+    return validation_state
+
+
 def _validate_plan_against_task_profile(steps: list, state: State) -> list[str]:
     """检查 Planner 是否忠实覆盖画像，不自动补写或复制任何计划步骤。"""
     if not isinstance(steps, list):
@@ -438,6 +450,16 @@ def _validate_plan_against_task_profile(steps: list, state: State) -> list[str]:
         step for step in steps
         if isinstance(step, dict) and _step_subtask_ids(step)
     ]
+    if (
+        state.get("_require_trusted_subtask_bindings")
+        and not structured_steps
+    ):
+        errors.append(
+            "调度器模式下，TaskProfile 存在子任务时，"
+            "每个执行步骤必须包含可验证的 subtask_ids"
+        )
+        return list(dict.fromkeys(errors))
+
     if structured_steps:
         if len(structured_steps) != len(steps):
             errors.append(
@@ -1201,7 +1223,10 @@ async def planner_node(state: State) -> Command[Literal["publisher", "__end__"]]
                 data_flow_valid, data_flow_errors = await _validate_plan_data_flow(
                     steps, state.get("user_id", "")
                 )
-                profile_errors = _validate_plan_against_task_profile(steps, state)
+                profile_errors = _validate_plan_against_task_profile(
+                    steps,
+                    _scheduler_profile_validation_state(state),
+                )
                 validation_errors = list(data_flow_errors) + list(profile_errors)
                 skill_plan_valid = data_flow_valid and not profile_errors
             except Exception as exc:
@@ -1519,7 +1544,10 @@ async def planner_node(state: State) -> Command[Literal["publisher", "__end__"]]
             is_valid, validation_errors = await _validate_plan_data_flow(
                 steps, state.get("user_id", "")
             )
-            profile_errors = _validate_plan_against_task_profile(steps, state)
+            profile_errors = _validate_plan_against_task_profile(
+                steps,
+                _scheduler_profile_validation_state(state),
+            )
             validation_errors = list(validation_errors) + profile_errors
             is_valid = is_valid and not profile_errors
             validation_time = time.time() - validation_start
@@ -1605,7 +1633,8 @@ async def planner_node(state: State) -> Command[Literal["publisher", "__end__"]]
                                     fixed_steps, state.get("user_id", "")
                                 )
                                 fixed_profile_errors = _validate_plan_against_task_profile(
-                                    fixed_steps, state
+                                    fixed_steps,
+                                    _scheduler_profile_validation_state(state),
                                 )
                                 fixed_errors = list(
                                     fixed_errors) + fixed_profile_errors

@@ -16,12 +16,14 @@ from src.interface.task_graph import TaskGraph, TaskSpec, TaskStep
 from src.manager.executor.base import ExecuteResult, ExecutionStatus
 from src.orchestration.providers import RoutingResult, StubRoutingProvider
 from src.orchestration.runtime import (
+    TrustedSubtaskBindingError,
     _build_execution_context,
     _public_step_metrics,
     _required_step_outputs,
     build_task_graph_from_state,
     has_task_graph,
     run_scheduler_workflow,
+    scheduler_ready,
 )
 
 
@@ -152,6 +154,110 @@ def test_planner_security_metadata_cannot_override_trusted_authorization_profile
     assert (
         exc_info.value.payload["policy_result"]["decision"]
         == "DENY"
+    )
+
+
+def test_missing_trusted_subtask_binding_cannot_use_selected_agent_profile():
+    state = {
+        "workflow_id": "wf",
+        "user_id": "hr_manager",
+        "task_profile": {
+            "task_type": "HR",
+            "expected_capabilities": ["HR"],
+            "scenario_tags": ["salary_query"],
+            "subtasks": [
+                {
+                    "id": "subtask_hr",
+                    "intent": "salary_query",
+                    "task_type": "HR",
+                    "expected_capabilities": ["HR"],
+                    "scenario_tags": ["salary_query"],
+                }
+            ],
+        },
+    }
+    step = TaskStep(
+        step_id="report",
+        agent_name="reporter",
+        preferred_resource_id="reporter",
+        operation_mode="read",
+    )
+
+    with pytest.raises(
+        TrustedSubtaskBindingError,
+        match="missing trusted subtask_ids",
+    ):
+        _build_execution_context(state, step, "reporter")
+
+
+def test_scheduler_gate_rejects_incomplete_trusted_subtask_coverage():
+    state = {
+        "workflow_id": "wf",
+        "user_id": "hr_manager",
+        "task_profile": {
+            "subtasks": [
+                {
+                    "id": "subtask_hr",
+                    "intent": "salary_query",
+                },
+                {
+                    "id": "subtask_report",
+                    "intent": "report_generation",
+                },
+            ]
+        },
+        "task_graph": TaskGraph(
+            spec=TaskSpec(task_id="wf"),
+            steps=[
+                TaskStep(
+                    step_id="hr",
+                    preferred_resource_id="RemoteHRAssistantAgent",
+                    operation_mode="read",
+                    subtask_ids=["subtask_hr"],
+                )
+            ],
+        ).model_dump(),
+    }
+
+    ready, category, detail = scheduler_ready(state)
+
+    assert ready is False
+    assert category == "invalid"
+    assert "missing trusted subtasks" in detail
+
+
+def test_unclassified_agent_cannot_match_a_trusted_subtask():
+    state = {
+        "workflow_id": "wf",
+        "user_id": "hr_manager",
+        "task_profile": {
+            "subtasks": [
+                {
+                    "id": "subtask_hr",
+                    "intent": "salary_query",
+                    "task_type": "HR",
+                    "expected_capabilities": ["HR"],
+                    "scenario_tags": ["salary_query"],
+                }
+            ]
+        },
+    }
+    step = TaskStep(
+        step_id="unknown",
+        preferred_resource_id="UnclassifiedAgent",
+        operation_mode="read",
+        subtask_ids=["subtask_hr"],
+    )
+
+    context = _build_execution_context(
+        state,
+        step,
+        "UnclassifiedAgent",
+    )
+
+    assert (
+        context.metadata["task_profile"]["trusted_resource_fit"]["fit"]
+        == "mismatch"
     )
 
 
