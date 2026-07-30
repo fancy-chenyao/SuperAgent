@@ -66,8 +66,9 @@ decision rather than only a UI hint:
 3. after that retry is exhausted, the Scheduler may redispatch once when
    `SCHEDULER_REDISPATCH_ENABLED=true`;
 4. redispatch excludes the failed Agent, requires an authorized candidate with
-   a trusted compatible Agent Contract, rebuilds the execution context and
-   resolves inputs for the actual Agent;
+   a trusted compatible Agent Contract, checks input names, Schema references,
+   cardinality and required flags as well as output names/Schemas, rebuilds the
+   execution context and resolves inputs for the actual Agent;
 5. a runtime `CLARIFY`, `REJECT`, `NO_CAPABLE_AGENT`, invalid candidate, or
    routing exception is terminal for recovery and never reopens the
    workflow-wide clarification gate.
@@ -91,3 +92,13 @@ payloads remain excluded.
 Side-effect steps never enter automatic retry or redispatch.
 `SIDE_EFFECT_UNCONFIRMED` always requires manual reconciliation and must never
 trigger an automatic resend.
+
+A bare legacy `ExecuteResult(status=FAILED)` is not a trusted transient signal:
+it is classified as non-retryable and cannot trigger redispatch. Eligible
+signals are platform-classified transient failures such as timeout, or an
+adapter-validated structured result whose `result_retryable` verdict is true.
+
+Each read-only primary attempt, same-Agent retry and redispatch has a distinct
+Agent lifecycle identity carrying `attempt`, `phase`, `planned_agent` and
+`executed_agent`. Skill evidence attributes the result to `executed_agent`
+while retaining `planned_agent` for audit comparison.

@@ -325,7 +325,7 @@ def test_read_step_retry_behavior_is_preserved():
     async def execute(*, step, selected_agent, inputs, context):
         calls["n"] += 1
         if calls["n"] == 1:
-            return ExecuteResult(status=ExecutionStatus.FAILED, error="transient")
+            return ExecuteResult(status=ExecutionStatus.TIMEOUT, error="transient")
         return ExecuteResult(status=ExecutionStatus.SUCCESS, result={"ok": True})
 
     graph = TaskGraph(

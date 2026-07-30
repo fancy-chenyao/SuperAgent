@@ -17,8 +17,11 @@ from src.orchestration.scheduler import TaskScheduler
 def _contract(
     name: str = "policy.info",
     schema_ref: str = "policy.info@v1",
+    *,
+    requires: list[DataContractRef] | None = None,
 ) -> AgentContract:
     return AgentContract(
+        requires=list(requires or []),
         produces=[DataContractRef(name=name, schema_ref=schema_ref)]
     )
 
@@ -208,22 +211,34 @@ def test_unknown_executor_exception_is_not_retried():
     assert result.failure.retryable is False
 
 
-def test_raw_executor_failure_keeps_retry_semantics_but_caps_budget():
-    calls = {"n": 0}
+def test_raw_executor_failure_without_trusted_signal_is_not_retried():
+    calls: list[str] = []
+    routing = SequenceRoutingProvider(
+        RoutingResult(selected_agent="PrimaryAgent", decision="DISPATCH"),
+        RoutingResult(selected_agent="BackupAgent", decision="DISPATCH"),
+    )
 
-    async def execute(**kwargs):
-        calls["n"] += 1
+    async def execute(*, selected_agent, **kwargs):
+        calls.append(selected_agent)
         return ExecuteResult(status=ExecutionStatus.FAILED, error="unavailable")
 
     result = asyncio.run(
-        TaskScheduler(execute_step=execute).run(_graph(_step(retry=5)))
+        TaskScheduler(
+            execute_step=execute,
+            routing_provider=routing,
+            redispatch_enabled=True,
+        ).run(
+            _graph(_step(retry=5)),
+            context=_context(backup_contract=_contract()),
+        )
     )["lookup"]
 
-    assert calls["n"] == 2
+    assert calls == ["PrimaryAgent"]
+    assert routing.calls == [{"PrimaryAgent", "BackupAgent"}]
     assert result.failure.code == "AGENT_EXECUTION_FAILED"
-    assert result.failure.retryable is True
-    assert result.metrics["attempts"] == 2
-    assert len(result.metrics["attempt_failures"]) == 2
+    assert result.failure.retryable is False
+    assert result.metrics["attempts"] == 1
+    assert len(result.metrics["attempt_failures"]) == 1
 
 
 def test_retry_exhaustion_redispatches_once_to_trusted_equivalent_agent():
@@ -402,6 +417,76 @@ def test_incompatible_candidate_contract_is_rejected_before_execution():
     )
 
 
+@pytest.mark.parametrize(
+    ("candidate_input", "outcome"),
+    [
+        (None, "REDISPATCH_INPUT_MISSING"),
+        (
+            DataContractRef(
+                name="policy.query",
+                schema_ref="policy.query@v2",
+                required=False,
+            ),
+            "REDISPATCH_INPUT_SCHEMA_MISMATCH",
+        ),
+        (
+            DataContractRef(
+                name="policy.query",
+                schema_ref="policy.query@v1",
+                cardinality="many",
+                required=False,
+            ),
+            "REDISPATCH_INPUT_CARDINALITY_MISMATCH",
+        ),
+        (
+            DataContractRef(
+                name="policy.query",
+                schema_ref="policy.query@v1",
+                required=True,
+            ),
+            "REDISPATCH_INPUT_REQUIRED_MISMATCH",
+        ),
+    ],
+)
+def test_incompatible_candidate_input_contract_is_rejected_before_execution(
+    candidate_input,
+    outcome,
+):
+    calls: list[str] = []
+    routing = SequenceRoutingProvider(
+        RoutingResult(selected_agent="PrimaryAgent", decision="DISPATCH"),
+        RoutingResult(selected_agent="BackupAgent", decision="DISPATCH"),
+    )
+    planned_input = DataContractRef(
+        name="policy.query",
+        schema_ref="policy.query@v1",
+        required=False,
+    )
+    step = _step()
+    step.agent_contract = _contract(requires=[planned_input])
+    backup_requires = [candidate_input] if candidate_input is not None else []
+
+    async def execute(*, selected_agent, **kwargs):
+        calls.append(selected_agent)
+        return _ok(_envelope(selected_agent, status="error", retryable=True))
+
+    result = asyncio.run(
+        TaskScheduler(
+            execute_step=execute,
+            routing_provider=routing,
+            redispatch_enabled=True,
+        ).run(
+            _graph(step),
+            context=_context(
+                backup_contract=_contract(requires=backup_requires)
+            ),
+        )
+    )["lookup"]
+
+    assert calls == ["PrimaryAgent", "PrimaryAgent"]
+    assert result.metrics["redispatch_outcome"] == outcome
+
+
 def test_router_cannot_redispatch_to_unauthorized_agent():
     calls: list[str] = []
     routing = SequenceRoutingProvider(
@@ -474,7 +559,7 @@ def test_candidate_with_unresolved_required_input_is_not_invoked():
     assert calls == ["PrimaryAgent", "PrimaryAgent"]
     assert (
         result.metrics["redispatch_outcome"]
-        == "REDISPATCH_INPUT_RESOLUTION_FAILED"
+        == "REDISPATCH_INPUT_MISSING"
     )
 
 

@@ -75,6 +75,41 @@ def test_task_logger_persists_structured_failure_without_finalizing_early():
     assert loaded.failures[0]["blocked_by"] == ["hr_step"]
 
 
+def test_task_logger_persists_attempt_identity_for_redispatch_lifecycle():
+    logger = TaskLogger(task_id="task-attempt-lifecycle", workflow_id="wf-attempt")
+
+    logger.log_agent_start(
+        "scheduler",
+        step=2,
+        sub_agent_name="BackupAgent",
+        attempt=1,
+        phase="redispatch",
+        planned_agent="PrimaryAgent",
+        executed_agent="BackupAgent",
+    )
+    logger.log_agent_end(
+        "scheduler",
+        next_node="scheduler",
+        step=2,
+        sub_agent_name="BackupAgent",
+        attempt=1,
+        phase="redispatch",
+        planned_agent="PrimaryAgent",
+        executed_agent="BackupAgent",
+    )
+
+    lifecycle = logger.history[-2:]
+    assert [entry["event"] for entry in lifecycle] == [
+        "start_of_agent",
+        "end_of_agent",
+    ]
+    assert all(entry["attempt"] == 1 for entry in lifecycle)
+    assert all(entry["phase"] == "redispatch" for entry in lifecycle)
+    assert all(entry["selected_agent"] == "BackupAgent" for entry in lifecycle)
+    assert all(entry["planned_agent"] == "PrimaryAgent" for entry in lifecycle)
+    assert all(entry["executed_agent"] == "BackupAgent" for entry in lifecycle)
+
+
 def test_truncate_for_resume_rebuilds_failures_from_retained_history():
     logger = TaskLogger(task_id="task-resume-failures", workflow_id="wf-resume")
     early = make_failure("AGENT_EXECUTION_FAILED", step_id="s1")

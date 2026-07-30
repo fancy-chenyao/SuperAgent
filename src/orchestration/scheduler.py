@@ -208,6 +208,8 @@ class TaskScheduler:
         self._agent_to_steps: Dict[str, List[str]] = {}
         # Cached routing verdict per step id, filled by the pre-flight pass.
         self._routes: Dict[str, RoutingResult] = {}
+        self._on_attempt_start: Optional[StepHook] = None
+        self._on_attempt_end: Optional[StepHook] = None
 
     async def run(
         self,
@@ -220,6 +222,8 @@ class TaskScheduler:
         on_step_start: Optional[StepHook] = None,
         on_step_end: Optional[StepHook] = None,
         commit_step_result: Optional[StepHook] = None,
+        on_attempt_start: Optional[StepHook] = None,
+        on_attempt_end: Optional[StepHook] = None,
     ) -> "WorkflowResult":
         """Execute ``graph`` and return a :class:`WorkflowResult`.
 
@@ -238,6 +242,8 @@ class TaskScheduler:
         graph.validate_dag()
         smap = graph.step_map()
         context = context or {}
+        self._on_attempt_start = on_attempt_start
+        self._on_attempt_end = on_attempt_end
 
         self._outputs = {}
         if initial_outputs:
@@ -726,6 +732,17 @@ class TaskScheduler:
         attempt_failures: list[dict[str, Any]] = []
         for attempt_index in range(max_attempts):
             attempt_number = attempt_index + 1
+            if self._on_attempt_start is not None:
+                try:
+                    await self._on_attempt_start(
+                        step=step,
+                        selected_agent=selected_agent,
+                        inputs=inputs,
+                        attempt=attempt_number,
+                        phase=phase,
+                    )
+                except Exception:  # noqa: BLE001 - monitoring is best effort
+                    pass
             try:
                 exec_result = await self._invoke(
                     step,
@@ -803,7 +820,21 @@ class TaskScheduler:
                                 ),
                             }
                         )
-                        return candidate.model_copy(update={"metrics": metrics})
+                        candidate = candidate.model_copy(
+                            update={"metrics": metrics}
+                        )
+                        if self._on_attempt_end is not None:
+                            try:
+                                await self._on_attempt_end(
+                                    step=step,
+                                    selected_agent=selected_agent,
+                                    result=candidate,
+                                    attempt=attempt_number,
+                                    phase=phase,
+                                )
+                            except Exception:  # noqa: BLE001
+                                pass
+                        return candidate
                 else:
                     status = getattr(exec_result, "status", None)
                     metrics = {
@@ -825,10 +856,22 @@ class TaskScheduler:
                             metrics=metrics,
                         )
                     else:
+                        # A bare/legacy ExecuteResult.FAILED carries no trusted
+                        # transient classification. Treat it as terminal:
+                        # platform timeouts and adapter-validated
+                        # ``result_retryable=true`` are handled above/inside
+                        # result normalization and remain eligible for recovery.
+                        failure = make_failure(
+                            "AGENT_EXECUTION_FAILED",
+                            step_id=step.step_id,
+                            agent_id=selected_agent,
+                            retryable=False,
+                        )
                         candidate = StepResult(
                             step_id=step.step_id,
                             status=StepStatus.FAILED,
                             error=error,
+                            failure=failure,
                             metrics=metrics,
                         )
 
@@ -859,6 +902,17 @@ class TaskScheduler:
                 }
             )
             candidate = candidate.model_copy(update={"metrics": metrics})
+            if self._on_attempt_end is not None:
+                try:
+                    await self._on_attempt_end(
+                        step=step,
+                        selected_agent=selected_agent,
+                        result=candidate,
+                        attempt=attempt_number,
+                        phase=phase,
+                    )
+                except Exception:  # noqa: BLE001 - monitoring is best effort
+                    pass
             if (
                 not bool(getattr(candidate.failure, "retryable", False))
                 or attempt_number >= max_attempts
@@ -925,6 +979,23 @@ class TaskScheduler:
             planned_schema = planned_outputs.get(name)
             if planned_schema and candidate_outputs[name] != planned_schema:
                 return "REDISPATCH_OUTPUT_SCHEMA_MISMATCH"
+
+        planned_inputs = {
+            ref.name: ref for ref in planned_contract.requires
+        }
+        candidate_inputs = {
+            ref.name: ref for ref in candidate_contract.requires
+        }
+        if set(planned_inputs) != set(candidate_inputs):
+            return "REDISPATCH_INPUT_MISSING"
+        for name, planned_ref in planned_inputs.items():
+            candidate_ref = candidate_inputs[name]
+            if candidate_ref.schema_ref != planned_ref.schema_ref:
+                return "REDISPATCH_INPUT_SCHEMA_MISMATCH"
+            if candidate_ref.cardinality != planned_ref.cardinality:
+                return "REDISPATCH_INPUT_CARDINALITY_MISMATCH"
+            if candidate_ref.required != planned_ref.required:
+                return "REDISPATCH_INPUT_REQUIRED_MISMATCH"
         return None
 
     @staticmethod
