@@ -499,7 +499,7 @@ def web(host, port):
 
 @cli.command(name="run-l")
 @click.pass_context
-@click.option('--user-id', '-u', default="test", help='User ID')
+@click.option('--user-id', '-u', default="admin", show_default=True, help='S-ABAC demo user ID')
 @click.option('--message', '-m', required=True, multiple=True, help='Message content (use multiple times for multiple messages)')
 @click.option('--debug/--no-debug', default=False, help='Enable debug mode')
 @click.option('--deep-thinking/--no-deep-thinking', default=True, help='Enable deep thinking mode')
@@ -700,7 +700,7 @@ async def run_launch(ctx, user_id, message, debug, deep_thinking, search_before_
 
 @cli.command(name="run-p")
 @click.pass_context
-@click.option('--user-id', '-u', default="test", help='User ID')
+@click.option('--user-id', '-u', default="admin", show_default=True, help='S-ABAC demo user ID')
 @click.option('--messages', '-m', default=[],  multiple=True, help='Message content (use multiple times for multiple messages)')
 @click.option('--workflow-id', '-w', default="", help='Workflow ID')
 @async_command
@@ -943,7 +943,7 @@ async def run_production(ctx, user_id, messages, workflow_id):
 
 @cli.command()
 @click.pass_context
-@click.option('--user-id', '-u', default="test", help='User ID')
+@click.option('--user-id', '-u', default="admin", show_default=True, help='S-ABAC demo user ID')
 @click.option('--match', '-m', default="", help='Match string')
 @async_command 
 async def list_agents(ctx, user_id, match):
@@ -1526,7 +1526,7 @@ async def run_polish(ctx, user_id, match, interactive):
 @click.pass_context
 @click.option('--workflow-id', '-w', required=True, help='Workflow ID to resume')
 @click.option('--step', '-s', default=None, type=int, help='Step number to resume from (optional, defaults to latest)')
-@click.option('--user-id', '-u', default="test", help='User ID')
+@click.option('--user-id', '-u', default="admin", show_default=True, help='S-ABAC demo user ID')
 @async_command
 async def resume_workflow(ctx, workflow_id, step, user_id):
     """Resume a workflow from a specific checkpoint step"""

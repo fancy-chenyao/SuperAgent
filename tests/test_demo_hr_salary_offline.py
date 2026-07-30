@@ -25,6 +25,7 @@ acceptance points from the prototype closeout plan (phase 4):
 
 import asyncio
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -111,6 +112,15 @@ def _state(user_id="hr_manager"):
         "user_id": user_id,
         "task_graph": _salary_graph(),
         "USER_QUERY": "汇总员工工资信息",
+        "task_profile": {
+            "business_goal": "汇总员工工资信息",
+            "task_type": "HR",
+            "expected_capabilities": ["HR"],
+            "scenario_tags": ["salary_query"],
+            "operation_mode": "read",
+            "data_scope": "employee.salary",
+            "risk_profile": "LOW",
+        },
         # -> INTERNAL artifacts (owner reads succeed offline)
         "risk_profile": "LOW",
         "messages": [],
@@ -150,6 +160,33 @@ def test_demo_dependency_and_artifact_ref_passing():
     assert end["event"] == "end_of_workflow"
     assert end["data"]["status"] == "SUCCEEDED"
     assert state["completed_steps"] == ["s_query", "s_report"]
+
+
+def test_demo_s_abac_enabled_allows_hr_to_reporter_workflow(monkeypatch):
+    """The real scheduler context must authorize each target with a step profile."""
+    import src.security.enforcement as enforcement
+
+    monkeypatch.setattr(enforcement, "S_ABAC_ENABLED", True)
+
+    class _GovernedExecutor(_DemoExecutor):
+        async def __call__(self, *, step, selected_agent, inputs, context):
+            await enforcement.enforce_agent_dispatch(
+                SimpleNamespace(agent_name=selected_agent),
+                context,
+            )
+            return await super().__call__(
+                step=step,
+                selected_agent=selected_agent,
+                inputs=inputs,
+                context=context,
+            )
+
+    execute = _GovernedExecutor()
+    state = _state()
+    events = _drive(state, execute)
+
+    assert events[-1]["data"]["status"] == "SUCCEEDED"
+    assert execute.calls == ["s_query", "s_report"]
 
 
 def test_demo_checkpoint_state_has_no_salary_plaintext():

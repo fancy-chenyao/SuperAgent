@@ -286,6 +286,80 @@ async def _list_agents_and_authorized(state: dict) -> tuple[list, set]:
         return [], set()
 
 
+def _build_step_task_profile(state: dict, step: Any, selected_agent: str) -> dict:
+    """Scope the workflow profile to the step currently being dispatched.
+
+    S-ABAC evaluates one target at a time. Reusing an HR workflow profile for a
+    downstream reporting step makes a legitimate cross-agent DAG look like a
+    domain mismatch. Step-authored constraints take precedence; trusted
+    resource attributes provide a conservative fallback for older plans that
+    omitted the optional capability and scenario fields.
+    """
+    from config.s_abac_config import RESOURCE_SECURITY_ATTRIBUTES
+
+    global_profile = dict(state.get("task_profile") or {})
+    trusted_attrs = dict(
+        RESOURCE_SECURITY_ATTRIBUTES.get(selected_agent, {}) or {}
+    )
+
+    def _list_value(value: Any) -> list[str]:
+        if value is None:
+            return []
+        values = value if isinstance(value, (list, tuple, set)) else [value]
+        return [str(item) for item in values if str(item).strip()]
+
+    required_capabilities = _list_value(
+        getattr(step, "required_capabilities", None)
+    ) or _list_value(trusted_attrs.get("expected_capabilities"))
+    scenario_tags = _list_value(
+        getattr(step, "scenario_tags", None)
+    ) or _list_value(trusted_attrs.get("scenario_tags"))
+
+    global_risk = str(
+        global_profile.get("risk_profile")
+        or state.get("risk_profile")
+        or "LOW"
+    ).upper()
+    step_risk = str(getattr(step, "risk_level", "") or global_risk).upper()
+    risk_order = {"LOW": 0, "MEDIUM": 1, "HIGH": 2, "CRITICAL": 3}
+    risk_profile = max(
+        (global_risk, step_risk),
+        key=lambda value: risk_order.get(value, risk_order["CRITICAL"]),
+    )
+
+    business_goal = str(
+        getattr(step, "description", "")
+        or getattr(step, "title", "")
+        or global_profile.get("business_goal")
+        or state.get("original_user_query")
+        or state.get("USER_QUERY")
+        or ""
+    )
+    return {
+        **global_profile,
+        "business_goal": business_goal,
+        "task_type": str(
+            getattr(step, "task_type", "")
+            or trusted_attrs.get("capability_domain")
+            or global_profile.get("task_type")
+            or "GENERAL"
+        ).upper(),
+        "expected_capabilities": required_capabilities,
+        "scenario_tags": scenario_tags,
+        "operation_mode": str(
+            getattr(step, "operation_mode", "") or "read"
+        ).lower(),
+        "data_scope": str(
+            getattr(step, "data_scope", "")
+            or global_profile.get("data_scope")
+            or "task"
+        ),
+        "risk_profile": risk_profile,
+        "profile_scope": "step",
+        "step_id": str(getattr(step, "step_id", "")),
+    }
+
+
 def _build_execution_context(state: dict, step, selected_agent):
     """Build a per-step ExecutionContext carrying acting user + producer agent.
 
@@ -294,6 +368,7 @@ def _build_execution_context(state: dict, step, selected_agent):
     """
     from src.manager.executor.base import ExecutionContext
 
+    task_profile = _build_step_task_profile(state, step, selected_agent)
     return ExecutionContext(
         user_id=state.get("user_id"),
         workflow_id=state.get("workflow_id"),
@@ -306,10 +381,10 @@ def _build_execution_context(state: dict, step, selected_agent):
             "operation_mode": step.operation_mode,
             "producer_agent_id": selected_agent,
             "selected_agent": selected_agent,
-            "risk_profile": state.get("risk_profile", "LOW"),
-            "task_profile": state.get("task_profile", {}),
-            "scenario_tags": state.get("scenario_tags", []),
-            "expected_capabilities": state.get("expected_capabilities", []),
+            "risk_profile": task_profile["risk_profile"],
+            "task_profile": task_profile,
+            "scenario_tags": task_profile["scenario_tags"],
+            "expected_capabilities": task_profile["expected_capabilities"],
         },
     )
 

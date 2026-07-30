@@ -427,6 +427,9 @@ def plan_to_task_graph(
             input_bindings=inputs,
             title=raw.get("title", ""),
             description=raw.get("description", ""),
+            task_type=raw.get("task_type", ""),
+            scenario_tags=raw.get("scenario_tags", []) or [],
+            data_scope=raw.get("data_scope", ""),
             expected_schema_ref=(
                 raw.get("expected_schema_ref") or raw.get("output_schema_ref")
             ),

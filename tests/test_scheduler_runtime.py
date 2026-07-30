@@ -15,6 +15,7 @@ from src.interface.task_graph import TaskGraph, TaskSpec, TaskStep
 from src.manager.executor.base import ExecuteResult, ExecutionStatus
 from src.orchestration.providers import RoutingResult, StubRoutingProvider
 from src.orchestration.runtime import (
+    _build_execution_context,
     _public_step_metrics,
     _required_step_outputs,
     build_task_graph_from_state,
@@ -37,6 +38,42 @@ def _isolate_stores(tmp_path, monkeypatch):
 
 async def _fake_execute(*, step, selected_agent, inputs, context):
     return ExecuteResult(status=ExecutionStatus.SUCCESS, result={"ok": step.step_id})
+
+
+def test_execution_context_scopes_security_profile_to_current_step():
+    state = {
+        "workflow_id": "wf",
+        "user_id": "hr_manager",
+        "USER_QUERY": "汇总员工工资信息",
+        "task_profile": {
+            "task_type": "HR",
+            "expected_capabilities": ["HR"],
+            "scenario_tags": ["salary_query"],
+            "risk_profile": "HIGH",
+        },
+    }
+    step = TaskStep(
+        step_id="report",
+        agent_name="reporter",
+        preferred_resource_id="reporter",
+        operation_mode="read",
+        risk_level="LOW",
+    )
+
+    context = _build_execution_context(state, step, "reporter")
+    profile = context.metadata["task_profile"]
+
+    assert profile["profile_scope"] == "step"
+    assert profile["step_id"] == "report"
+    assert profile["task_type"] == "DOCUMENT"
+    assert profile["expected_capabilities"] == ["Document"]
+    assert profile["scenario_tags"] == [
+        "reporting",
+        "analysis_summary",
+        "document_generation",
+    ]
+    # A step cannot downgrade the workflow's security risk.
+    assert profile["risk_profile"] == "HIGH"
 
 
 def _collect(state):

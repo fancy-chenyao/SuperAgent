@@ -531,6 +531,29 @@ def test_pure_query_agent_stays_read_only():
     assert g.step_map()["step_1"].is_read_only is True
 
 
+def test_converter_preserves_step_security_profile_fields():
+    g = plan_to_task_graph(
+        [
+            {
+                "agent_name": "reporter",
+                "required_capabilities": ["Document"],
+                "scenario_tags": ["reporting"],
+                "task_type": "Document",
+                "data_scope": "employee.salary.summary",
+                "risk_level": "HIGH",
+            }
+        ],
+        task_id="t",
+    )
+    step = g.step_map()["step_1"]
+
+    assert step.required_capabilities == ["Document"]
+    assert step.scenario_tags == ["reporting"]
+    assert step.task_type == "Document"
+    assert step.data_scope == "employee.salary.summary"
+    assert step.risk_level == "HIGH"
+
+
 def test_unregistered_agent_is_unknown_not_read():
     """An unregistered agent must be 'unknown' (never defaulted to read)."""
     g = plan_to_task_graph([{"agent_name": "MysteryAgent"}], task_id="t")
