@@ -24,12 +24,16 @@ uv run --frozen --offline python -m experiments.failure_recovery.benchmark
 ```
 
 默认使用 5 个固定种子，每个种子和场景运行 20 次，即每个
-“场景 × 策略”有 100 个样本。输出：
+“场景 × 策略”有 100 个样本。默认输出到 Git 忽略的
+`.artifacts/failure_recovery/results/`：
 
-- `results/trials.csv`：逐次原始结果；
-- `results/summary.csv`：分场景汇总；
-- `results/summary.json`：机器可读汇总；
-- `results/summary.md`：总体摘要。
+- `.artifacts/failure_recovery/results/trials.csv`：逐次原始结果；
+- `.artifacts/failure_recovery/results/summary.csv`：分场景汇总；
+- `.artifacts/failure_recovery/results/summary.json`：机器可读汇总；
+- `.artifacts/failure_recovery/results/summary.md`：总体摘要。
+
+如需将结果保存到其他位置，请显式传入 `--output-dir <path>`。仓库不再
+跟踪默认运行产物，避免本地复现实验时覆盖版本化文件并弄脏工作区。
 
 ## 指标口径
 

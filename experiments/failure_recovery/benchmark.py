@@ -33,6 +33,7 @@ from src.orchestration.scheduler import TaskScheduler
 
 PRIMARY_AGENT = "PrimaryAgent"
 BACKUP_AGENT = "BackupAgent"
+DEFAULT_OUTPUT_DIR = Path(".artifacts/failure_recovery/results")
 SCENARIOS = (
     "transient_timeout",
     "persistent_primary_failure",
@@ -584,7 +585,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("experiments/failure_recovery/results"),
+        default=DEFAULT_OUTPUT_DIR,
     )
     return parser.parse_args()
 

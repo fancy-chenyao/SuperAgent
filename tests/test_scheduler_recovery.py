@@ -19,10 +19,17 @@ def _contract(
     schema_ref: str = "policy.info@v1",
     *,
     requires: list[DataContractRef] | None = None,
+    produces: list[DataContractRef] | None = None,
+    contract_version: str = "1.0",
 ) -> AgentContract:
     return AgentContract(
+        contract_version=contract_version,
         requires=list(requires or []),
-        produces=[DataContractRef(name=name, schema_ref=schema_ref)]
+        produces=(
+            list(produces)
+            if produces is not None
+            else [DataContractRef(name=name, schema_ref=schema_ref)]
+        ),
     )
 
 
@@ -386,7 +393,76 @@ def test_invalid_recovery_route_is_terminal_without_loop(verdict, outcome):
     assert result.metrics["redispatch_outcome"] == outcome
 
 
-def test_incompatible_candidate_contract_is_rejected_before_execution():
+@pytest.mark.parametrize(
+    ("candidate_outputs", "contract_version", "outcome"),
+    [
+        (
+            [DataContractRef(name="policy.info", schema_ref="policy.info@v2")],
+            "1.0",
+            "REDISPATCH_OUTPUT_SCHEMA_MISMATCH",
+        ),
+        (
+            [
+                DataContractRef(
+                    name="policy.info",
+                    schema_ref="policy.info@v1",
+                    required=False,
+                )
+            ],
+            "1.0",
+            "REDISPATCH_OUTPUT_REQUIRED_MISMATCH",
+        ),
+        (
+            [
+                DataContractRef(
+                    name="policy.info",
+                    schema_ref="policy.info@v1",
+                    cardinality="many",
+                )
+            ],
+            "1.0",
+            "REDISPATCH_OUTPUT_CARDINALITY_MISMATCH",
+        ),
+        (
+            [
+                DataContractRef(
+                    name="policy.info",
+                    schema_ref="policy.info@v1",
+                ),
+                DataContractRef(
+                    name="candidate.extra",
+                    schema_ref="candidate.extra@v1",
+                    required=False,
+                ),
+            ],
+            "1.0",
+            "REDISPATCH_OUTPUT_EXTRA",
+        ),
+        (
+            [],
+            "1.0",
+            "REDISPATCH_OUTPUT_MISSING",
+        ),
+        (
+            [DataContractRef(name="policy.info", schema_ref="policy.info@v1")],
+            "2.0",
+            "REDISPATCH_CONTRACT_VERSION_MISMATCH",
+        ),
+    ],
+    ids=[
+        "schema",
+        "required-downgrade",
+        "cardinality",
+        "extra-output",
+        "missing-output",
+        "contract-version",
+    ],
+)
+def test_incompatible_candidate_output_contract_is_rejected_before_execution(
+    candidate_outputs,
+    contract_version,
+    outcome,
+):
     calls: list[str] = []
     routing = SequenceRoutingProvider(
         RoutingResult(selected_agent="PrimaryAgent", decision="DISPATCH"),
@@ -405,16 +481,16 @@ def test_incompatible_candidate_contract_is_rejected_before_execution():
         ).run(
             _graph(),
             context=_context(
-                backup_contract=_contract(schema_ref="policy.info@v2")
+                backup_contract=_contract(
+                    produces=candidate_outputs,
+                    contract_version=contract_version,
+                )
             ),
         )
     )["lookup"]
 
     assert calls == ["PrimaryAgent", "PrimaryAgent"]
-    assert (
-        result.metrics["redispatch_outcome"]
-        == "REDISPATCH_OUTPUT_SCHEMA_MISMATCH"
-    )
+    assert result.metrics["redispatch_outcome"] == outcome
 
 
 @pytest.mark.parametrize(

@@ -968,17 +968,27 @@ class TaskScheduler:
         if not expected_outputs:
             return "REDISPATCH_EXPECTED_OUTPUTS_MISSING"
         planned_outputs = {
-            ref.name: ref.schema_ref for ref in planned_contract.produces
+            ref.name: ref for ref in planned_contract.produces
         }
         candidate_outputs = {
-            ref.name: ref.schema_ref for ref in candidate_contract.produces
+            ref.name: ref for ref in candidate_contract.produces
         }
-        for name in expected_outputs:
-            if name not in candidate_outputs:
-                return "REDISPATCH_OUTPUT_MISSING"
-            planned_schema = planned_outputs.get(name)
-            if planned_schema and candidate_outputs[name] != planned_schema:
+        if set(expected_outputs) != set(planned_outputs):
+            return "REDISPATCH_PLANNED_OUTPUT_BOUNDARY_MISMATCH"
+        if set(planned_outputs) - set(candidate_outputs):
+            return "REDISPATCH_OUTPUT_MISSING"
+        if set(candidate_outputs) - set(planned_outputs):
+            return "REDISPATCH_OUTPUT_EXTRA"
+        if candidate_contract.contract_version != planned_contract.contract_version:
+            return "REDISPATCH_CONTRACT_VERSION_MISMATCH"
+        for name, planned_ref in planned_outputs.items():
+            candidate_ref = candidate_outputs[name]
+            if candidate_ref.schema_ref != planned_ref.schema_ref:
                 return "REDISPATCH_OUTPUT_SCHEMA_MISMATCH"
+            if candidate_ref.cardinality != planned_ref.cardinality:
+                return "REDISPATCH_OUTPUT_CARDINALITY_MISMATCH"
+            if candidate_ref.required != planned_ref.required:
+                return "REDISPATCH_OUTPUT_REQUIRED_MISMATCH"
 
         planned_inputs = {
             ref.name: ref for ref in planned_contract.requires

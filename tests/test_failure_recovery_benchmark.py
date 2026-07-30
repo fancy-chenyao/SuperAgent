@@ -1,11 +1,18 @@
 """Tests for the seeded offline failure-recovery benchmark."""
 
+from pathlib import Path
+
 from experiments.failure_recovery.benchmark import (
+    DEFAULT_OUTPUT_DIR,
     SCENARIOS,
     STRATEGIES,
     run_benchmark,
     summarize,
 )
+
+
+def test_default_output_dir_is_ignored_artifact_path():
+    assert DEFAULT_OUTPUT_DIR == Path(".artifacts/failure_recovery/results")
 
 
 def test_benchmark_is_reproducible_and_has_complete_matrix():
