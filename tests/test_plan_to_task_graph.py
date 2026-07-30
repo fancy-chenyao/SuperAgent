@@ -554,6 +554,33 @@ def test_converter_preserves_step_security_profile_fields():
     assert step.risk_level == "HIGH"
 
 
+@pytest.mark.parametrize(
+    "planner_field,planner_value",
+    [
+        ("required_capabilities", ["HR"]),
+        ("scenario_tags", ["salary_query"]),
+        ("task_type", "HR"),
+    ],
+)
+def test_converter_rejects_planner_security_claims_outside_trusted_agent_profile(
+    planner_field,
+    planner_value,
+):
+    with pytest.raises(
+        TaskGraphValidationError,
+        match="outside trusted Agent security attributes",
+    ):
+        plan_to_task_graph(
+            [
+                {
+                    "agent_name": "reporter",
+                    planner_field: planner_value,
+                }
+            ],
+            task_id="t",
+        )
+
+
 def test_unregistered_agent_is_unknown_not_read():
     """An unregistered agent must be 'unknown' (never defaulted to read)."""
     g = plan_to_task_graph([{"agent_name": "MysteryAgent"}], task_id="t")
