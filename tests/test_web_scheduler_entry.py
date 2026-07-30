@@ -444,3 +444,69 @@ def test_scheduler_gate_failure_uses_safe_structured_protocol(monkeypatch):
     assert terminal["failed_steps"] == []
     assert terminal["blocked_steps"] == []
     assert "no explicit task graph" not in str(terminal)
+
+
+def test_profiled_graph_without_subtask_bindings_fails_closed(monkeypatch):
+    task_profile = {
+        "task_type": "HR",
+        "subtasks": [
+            {
+                "id": "subtask_hr",
+                "intent": "salary_query",
+                "task_type": "HR",
+                "expected_capabilities": ["HR"],
+                "scenario_tags": ["salary_query"],
+            }
+        ],
+    }
+    task_graph = plan_to_task_graph(
+        _STEPS,
+        task_id="wf-t12",
+        subject="u1",
+        goal="查询王强信息",
+    ).model_dump()
+    save_plan_snapshot(
+        workflow_id="wf-t12",
+        user_id="u1",
+        planning_steps=_STEPS,
+        task_graph=task_graph,
+    )
+    monkeypatch.setattr(
+        proc,
+        "orchestration_scheduler_enabled",
+        True,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        proc.cache,
+        "get_planning_steps",
+        lambda _workflow_id: _STEPS,
+        raising=False,
+    )
+
+    entered = {"value": False}
+
+    async def _fake_scheduler(*_args, **_kwargs):
+        entered["value"] = True
+        if False:  # pragma: no cover - keep this an async generator
+            yield {}
+
+    monkeypatch.setattr(
+        runtime_mod,
+        "run_scheduler_workflow",
+        _fake_scheduler,
+    )
+    state = _production_state()
+    state["task_profile"] = task_profile
+
+    events = _drive(
+        SimpleNamespace(start_node="coordinator", nodes={}),
+        state,
+        task_id="task-profile-binding-gate",
+        execution_phase="execution",
+    )
+
+    assert entered["value"] is False
+    terminal = events[-1]["data"]
+    assert terminal["status"] == "FAILED"
+    assert terminal["failures"][0]["code"] == "TASK_GRAPH_INVALID"
