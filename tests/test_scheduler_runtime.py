@@ -354,6 +354,17 @@ def test_public_step_metrics_excludes_result_and_remote_diagnostics():
     public = _public_step_metrics(
         {
             "attempts": 2,
+            "attempt_failures": [
+                {
+                    "attempt": 1,
+                    "phase": "primary",
+                    "code": "AGENT_TIMEOUT",
+                    "retryable": True,
+                }
+            ],
+            "recovery_path": ["primary", "same_agent_retry", "redispatch"],
+            "redispatch_count": 1,
+            "redispatch_outcome": "SUCCEEDED",
             "routing_decision": "DISPATCH",
             "result_error": "REMOTE_PRIVATE_CODE",
             "result_error_details": {
@@ -365,7 +376,13 @@ def test_public_step_metrics_excludes_result_and_remote_diagnostics():
         }
     )
 
-    assert public == {"attempts": 2, "routing_decision": "DISPATCH"}
+    assert public == {
+        "attempts": 2,
+        "recovery_path": ["primary", "same_agent_retry", "redispatch"],
+        "redispatch_count": 1,
+        "redispatch_outcome": "SUCCEEDED",
+        "routing_decision": "DISPATCH",
+    }
 
 
 def test_runtime_emits_workflow_and_agent_events_in_order():
@@ -385,6 +402,222 @@ def test_runtime_emits_workflow_and_agent_events_in_order():
         ("start_of_agent", "B"),
         ("end_of_agent", "B"),
     ]
+
+
+def test_custom_router_redispatch_has_trusted_context_and_attempt_lifecycle(
+    monkeypatch,
+):
+    import src.security.enforcement as enforcement
+
+    contract = AgentContract(
+        produces=[
+            DataContractRef(
+                name="policy.info",
+                schema_ref="policy.info@v1",
+            )
+        ]
+    )
+    graph = TaskGraph(
+        spec=TaskSpec(task_id="redispatch", subject="admin"),
+        steps=[
+            TaskStep(
+                step_id="lookup",
+                operation_mode="read",
+                retry=1,
+                agent_name="PrimaryAgent",
+                preferred_resource_id="PrimaryAgent",
+                expected_outputs=["policy.info"],
+                agent_contract=contract,
+            )
+        ],
+    )
+    state = {
+        "workflow_id": "wf-redispatch",
+        "user_id": "admin",
+        "task_graph": graph,
+        "USER_QUERY": "查询制度",
+        "task_profile": {
+            "task_type": "POLICY",
+            "expected_capabilities": ["Policy"],
+            "scenario_tags": ["policy_lookup"],
+            "operation_mode": "read",
+            "risk_profile": "LOW",
+        },
+        "messages": [],
+    }
+    trusted_agents = [
+        SimpleNamespace(
+            agent_name=name,
+            agent_contract=contract,
+            security_attributes={
+                "capability_domain": "Policy",
+                "expected_capabilities": ["Policy"],
+                "scenario_tags": ["policy_lookup"],
+            },
+        )
+        for name in ("PrimaryAgent", "BackupAgent")
+    ]
+
+    class _Routing:
+        def __init__(self):
+            self.calls = []
+
+        async def decide(self, step, *, authorized_agent_ids, **kwargs):
+            self.calls.append(set(authorized_agent_ids))
+            selected = "PrimaryAgent" if len(self.calls) == 1 else "BackupAgent"
+            return RoutingResult(
+                selected_agent=selected,
+                decision="DISPATCH",
+            )
+
+    routing = _Routing()
+    calls = []
+
+    class _RecordingTaskLogger:
+        def __init__(self):
+            self.starts = []
+            self.ends = []
+
+        def log_agent_start(self, **kwargs):
+            self.starts.append(kwargs)
+
+        def log_agent_end(self, **kwargs):
+            self.ends.append(kwargs)
+
+        def log_workflow_terminal(self, *args, **kwargs):
+            return None
+
+        def set_skill_execution_evidence(self, evidence):
+            return None
+
+    task_logger = _RecordingTaskLogger()
+
+    async def _fit(*args, **kwargs):
+        return {
+            "fit": "match",
+            "confidence": 1.0,
+            "reason": "test",
+            "suggested_agent_domains": ["Policy"],
+            "suggested_tool_domains": [],
+        }
+
+    async def execute(*, selected_agent, context, **kwargs):
+        calls.append(selected_agent)
+        agent = next(
+            item
+            for item in trusted_agents
+            if item.agent_name == selected_agent
+        )
+        await enforcement.enforce_agent_dispatch(agent, context["execution_context"])
+        failed = selected_agent == "PrimaryAgent"
+        payload = {
+            "contract_version": "1.0",
+            "status": "error" if failed else "success",
+            "outputs": (
+                {}
+                if failed
+                else {
+                    "policy.info": {
+                        "query": "制度",
+                        "answer": "已找到",
+                        "knowledge_items_count": 1,
+                        "policy_scope": "company",
+                    }
+                }
+            ),
+            "error": (
+                {
+                    "code": "UPSTREAM_TIMEOUT",
+                    "message": "temporary",
+                    "retryable": True,
+                    "details": {},
+                }
+                if failed
+                else None
+            ),
+            "metadata": {
+                "producer_agent": selected_agent,
+                "schema_version": "1.0",
+            },
+        }
+        return ExecuteResult(status=ExecutionStatus.SUCCESS, result=payload)
+
+    monkeypatch.setattr(enforcement, "S_ABAC_ENABLED", True)
+    monkeypatch.setattr(enforcement, "analyze_object_fit", _fit)
+
+    async def _run():
+        return [
+            event
+            async for event in run_scheduler_workflow(
+                state,
+                task_id="redispatch",
+                task_logger=task_logger,
+                execute_step=execute,
+                routing_provider=routing,
+                redispatch_enabled=True,
+                trusted_agents=trusted_agents,
+                authorized_agent_ids={"PrimaryAgent", "BackupAgent"},
+            )
+        ]
+
+    events = asyncio.run(_run())
+
+    assert calls == ["PrimaryAgent", "PrimaryAgent", "BackupAgent"]
+    assert routing.calls == [
+        {"PrimaryAgent", "BackupAgent"},
+        {"BackupAgent"},
+    ]
+    lifecycle = [
+        event["data"]
+        for event in events
+        if event["event"] in {"start_of_agent", "end_of_agent"}
+    ]
+    assert [
+        (
+            item["phase"],
+            item["attempt"],
+            item["selected_agent"],
+            item["executed_agent"],
+        )
+        for item in lifecycle
+    ] == [
+        ("primary", 1, "PrimaryAgent", "PrimaryAgent"),
+        ("primary", 1, "PrimaryAgent", "PrimaryAgent"),
+        ("primary", 2, "PrimaryAgent", "PrimaryAgent"),
+        ("primary", 2, "PrimaryAgent", "PrimaryAgent"),
+        ("redispatch", 1, "BackupAgent", "BackupAgent"),
+        ("redispatch", 1, "BackupAgent", "BackupAgent"),
+    ]
+    assert len({item["agent_id"] for item in lifecycle}) == 3
+    assert [
+        (
+            item["phase"],
+            item["attempt"],
+            item["planned_agent"],
+            item["executed_agent"],
+        )
+        for item in task_logger.starts
+    ] == [
+        ("primary", 1, "PrimaryAgent", "PrimaryAgent"),
+        ("primary", 2, "PrimaryAgent", "PrimaryAgent"),
+        ("redispatch", 1, "PrimaryAgent", "BackupAgent"),
+    ]
+    assert task_logger.ends == [
+        {
+            **start,
+            "next_node": "scheduler",
+        }
+        for start in task_logger.starts
+    ]
+    step_result = next(
+        event["data"] for event in events if event["event"] == "step_result"
+    )
+    assert step_result["planned_agent"] == "PrimaryAgent"
+    assert step_result["executed_agent"] == "BackupAgent"
+    evidence_step = state["skill_execution_evidence"]["steps"][0]
+    assert evidence_step["agent_name"] == "BackupAgent"
+    assert evidence_step["planned_agent"] == "PrimaryAgent"
+    assert evidence_step["executed_agent"] == "BackupAgent"
 
 
 def test_runtime_updates_state_completed_and_results():
@@ -580,6 +813,62 @@ def test_checkpoint_step_result_removes_raw_failure_diagnostics():
     assert saved["error"] == result.failure.message
     assert saved["metrics"] == {"attempts": 1}
     assert "secret provider response" not in json.dumps(saved)
+
+
+def test_checkpoint_step_result_keeps_only_safe_recovery_trace_fields():
+    import src.orchestration.runtime as runtime_mod
+    from src.orchestration.failure_mapper import make_failure
+
+    result = StepResult(
+        step_id="retry",
+        status=StepStatus.FAILED,
+        metrics={
+            "attempts": 2,
+            "recovery_path": [
+                "primary",
+                "same_agent_retry",
+                "redispatch",
+                "unexpected",
+            ],
+            "attempt_failures": [
+                {
+                    "attempt": 1,
+                    "phase": "primary",
+                    "code": "AGENT_TIMEOUT",
+                    "retryable": True,
+                    "raw_error": "secret",
+                },
+                {
+                    "attempt": 2,
+                    "phase": "invalid",
+                    "code": "<script>secret</script>",
+                    "retryable": True,
+                },
+            ],
+            "redispatched_to": "private-provider-id",
+            "redispatch_outcome": "<script>secret</script>",
+        },
+        failure=make_failure("AGENT_TIMEOUT", step_id="retry"),
+    )
+
+    saved = runtime_mod._checkpoint_step_result(result)
+
+    assert saved["metrics"]["recovery_path"] == [
+        "primary",
+        "same_agent_retry",
+        "redispatch",
+    ]
+    assert saved["metrics"]["attempt_failures"] == [
+        {
+            "attempt": 1,
+            "phase": "primary",
+            "code": "AGENT_TIMEOUT",
+            "retryable": True,
+        }
+    ]
+    assert "private-provider-id" not in json.dumps(saved)
+    assert "redispatch_outcome" not in saved["metrics"]
+    assert "secret" not in json.dumps(saved)
 
 
 def test_resume_missing_leaf_artifact_cannot_report_success():

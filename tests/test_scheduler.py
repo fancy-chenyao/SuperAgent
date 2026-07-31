@@ -39,7 +39,7 @@ class FakeExecutor:
                 return ExecuteResult(status=ExecutionStatus.FAILED, error="boom")
             if self.fail_once.get(step.step_id, 0) > 0:
                 self.fail_once[step.step_id] -= 1
-                return ExecuteResult(status=ExecutionStatus.FAILED, error="transient")
+                return ExecuteResult(status=ExecutionStatus.TIMEOUT, error="transient")
             return ExecuteResult(status=ExecutionStatus.SUCCESS, result={"ok": step.step_id})
         finally:
             self.concurrent -= 1

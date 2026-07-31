@@ -282,6 +282,9 @@ _PUBLIC_STEP_METRIC_KEYS = frozenset(
         "idempotent_reuse",
         "needs_reconciliation",
         "receipt_status",
+        "redispatch_count",
+        "redispatch_outcome",
+        "recovery_path",
         "retry_count",
         "routing_decision",
     }
@@ -298,8 +301,60 @@ _CHECKPOINT_STEP_METRIC_KEYS = _PUBLIC_STEP_METRIC_KEYS | frozenset(
         "persistence_failed",
         "receipt_store_corrupt",
         "result_error",
+        "attempt_failures",
     }
 )
+
+
+def _safe_recovery_path(value: Any) -> list[str]:
+    allowed = {"primary", "same_agent_retry", "redispatch"}
+    if not isinstance(value, list):
+        return []
+    return [
+        str(item)
+        for item in value[:3]
+        if isinstance(item, str) and item in allowed
+    ]
+
+
+def _safe_machine_token(value: Any, *, max_length: int = 64) -> Optional[str]:
+    if not isinstance(value, str):
+        return None
+    token = value.strip().upper()
+    if not token or not token.replace("_", "").isalnum():
+        return None
+    return token[:max_length]
+
+
+def _safe_attempt_failures(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    safe: list[dict[str, Any]] = []
+    for raw in value[:3]:
+        if not isinstance(raw, dict):
+            continue
+        attempt = raw.get("attempt")
+        phase = raw.get("phase")
+        code = raw.get("code")
+        retryable = raw.get("retryable")
+        if (
+            not isinstance(attempt, int)
+            or not isinstance(phase, str)
+            or phase not in {"primary", "redispatch"}
+            or not isinstance(code, str)
+            or not code.replace("_", "").isalnum()
+            or not isinstance(retryable, bool)
+        ):
+            continue
+        safe.append(
+            {
+                "attempt": attempt,
+                "phase": phase,
+                "code": code[:64],
+                "retryable": retryable,
+            }
+        )
+    return safe
 
 
 def _public_step_metrics(metrics: Any) -> dict[str, Any]:
@@ -310,6 +365,16 @@ def _public_step_metrics(metrics: Any) -> dict[str, Any]:
     public: dict[str, Any] = {}
     for key in _PUBLIC_STEP_METRIC_KEYS:
         value = metrics.get(key)
+        if key == "recovery_path":
+            path = _safe_recovery_path(value)
+            if path:
+                public[key] = path
+            continue
+        if key == "redispatch_outcome":
+            outcome = _safe_machine_token(value)
+            if outcome is not None:
+                public[key] = outcome
+            continue
         if value is None or not isinstance(value, (str, int, float, bool)):
             continue
         public[key] = value[:128] if isinstance(value, str) else value
@@ -326,12 +391,23 @@ def _checkpoint_step_result(result: StepResult) -> dict[str, Any]:
             failure.message if failure is not None else "The workflow step failed."
         )
     metrics = result.metrics if isinstance(result.metrics, dict) else {}
-    payload["metrics"] = {
+    safe_metrics = {
         key: value[:256] if isinstance(value, str) else value
         for key in _CHECKPOINT_STEP_METRIC_KEYS
         for value in [metrics.get(key)]
+        if key not in {"recovery_path", "redispatch_outcome", "attempt_failures"}
         if value is not None and isinstance(value, (str, int, float, bool))
     }
+    recovery_path = _safe_recovery_path(metrics.get("recovery_path"))
+    if recovery_path:
+        safe_metrics["recovery_path"] = recovery_path
+    redispatch_outcome = _safe_machine_token(metrics.get("redispatch_outcome"))
+    if redispatch_outcome is not None:
+        safe_metrics["redispatch_outcome"] = redispatch_outcome
+    attempt_failures = _safe_attempt_failures(metrics.get("attempt_failures"))
+    if attempt_failures:
+        safe_metrics["attempt_failures"] = attempt_failures
+    payload["metrics"] = safe_metrics
     return payload
 
 
@@ -700,6 +776,10 @@ async def run_scheduler_workflow(
     hook_engine: Any = None,
     execute_step: Optional[ExecuteStep] = None,
     routing_provider: Optional[RoutingProvider] = None,
+    redispatch_enabled: Optional[bool] = None,
+    retry_delay_seconds: Optional[float] = None,
+    trusted_agents: Optional[list[Any]] = None,
+    authorized_agent_ids: Optional[set[str]] = None,
 ) -> AsyncGenerator[dict, None]:
     """Drive the scheduler over the state's TaskGraph, yielding workflow events.
 
@@ -819,12 +899,51 @@ async def run_scheduler_workflow(
     resolver = ArtifactResolver(
         store, guard=PolicyEngineArtifactGuard(scenario=scenario_ctx))
 
-    if routing_provider is None:
-        routing = MainAgentRoutingProvider()
+    if redispatch_enabled is None or retry_delay_seconds is None:
+        from src.service.env import (
+            SCHEDULER_REDISPATCH_ENABLED,
+            SCHEDULER_RETRY_DELAY_SECONDS,
+        )
+
+        if redispatch_enabled is None:
+            redispatch_enabled = SCHEDULER_REDISPATCH_ENABLED
+        if retry_delay_seconds is None:
+            retry_delay_seconds = SCHEDULER_RETRY_DELAY_SECONDS
+
+    routing = routing_provider or MainAgentRoutingProvider()
+    agents: list[Any]
+    authorized: set[str]
+    if trusted_agents is not None:
+        agents = list(trusted_agents)
+        trusted_names = {
+            str(getattr(agent, "agent_name", "") or "")
+            for agent in agents
+            if str(getattr(agent, "agent_name", "") or "")
+        }
+        if authorized_agent_ids is None:
+            from config.s_abac_demo_users import get_user_available_agents
+
+            available = set(
+                get_user_available_agents(state.get("user_id")) or []
+            )
+            authorized = (
+                trusted_names if "*" in available else trusted_names & available
+            )
+        else:
+            authorized = trusted_names & {
+                str(agent_id) for agent_id in authorized_agent_ids
+            }
+    elif routing_provider is None or bool(redispatch_enabled):
+        # A custom router may choose the candidate, but it never supplies the
+        # trust root. Redispatch still loads contracts and authorization from
+        # the real registry unless the caller injected an explicit trusted set.
         agents, authorized = await _list_agents_and_authorized(state)
+        if authorized_agent_ids is not None:
+            authorized &= {
+                str(agent_id) for agent_id in authorized_agent_ids
+            }
     else:
-        routing = routing_provider
-        agents, authorized = (), set()
+        agents, authorized = [], set()
 
     execute = execute_step or _make_real_execute_step(state)
 
@@ -842,6 +961,10 @@ async def run_scheduler_workflow(
     async def on_step_start(*, step, selected_agent, inputs):
         selected_name = selected_agent or getattr(step, "agent_name", None) or step.step_id
         step_agents[step.step_id] = selected_name
+        # Read-only attempts have their own lifecycle below so retries and
+        # redispatches cannot be misattributed to the planned Agent.
+        if step.is_read_only:
+            return
         current_step = step_number(step.step_id)
         if task_logger is not None:
             try:
@@ -858,6 +981,108 @@ async def run_scheduler_workflow(
                     "agent_name": f"scheduler【{selected_name}】",
                     "agent_id": f"{workflow_id}_{step.step_id}",
                     "sub_agent_name": selected_name,
+                },
+            }
+        )
+
+    async def on_attempt_start(
+        *,
+        step,
+        selected_agent,
+        inputs,
+        attempt,
+        phase,
+    ):
+        planned_name = (
+            getattr(step, "agent_name", None)
+            or getattr(step, "preferred_resource_id", None)
+            or step.step_id
+        )
+        executed_name = selected_agent or planned_name
+        current_step = step_number(step.step_id)
+        if task_logger is not None:
+            try:
+                task_logger.log_agent_start(
+                    node_name="scheduler",
+                    step=current_step,
+                    sub_agent_name=executed_name,
+                    attempt=attempt,
+                    phase=phase,
+                    planned_agent=planned_name,
+                    executed_agent=executed_name,
+                )
+            except Exception:  # noqa: BLE001
+                pass
+        await event_queue.put(
+            {
+                "event": "start_of_agent",
+                "data": {
+                    "step_id": step.step_id,
+                    "agent_name": f"scheduler【{executed_name}】",
+                    "agent_id": (
+                        f"{workflow_id}_{step.step_id}_{phase}_{attempt}"
+                    ),
+                    "sub_agent_name": executed_name,
+                    "selected_agent": executed_name,
+                    "planned_agent": planned_name,
+                    "executed_agent": executed_name,
+                    "attempt": attempt,
+                    "phase": phase,
+                },
+            }
+        )
+
+    async def on_attempt_end(
+        *,
+        step,
+        selected_agent,
+        result,
+        attempt,
+        phase,
+    ):
+        planned_name = (
+            getattr(step, "agent_name", None)
+            or getattr(step, "preferred_resource_id", None)
+            or step.step_id
+        )
+        executed_name = selected_agent or planned_name
+        status_value = _status_value(result.status)
+        failure = getattr(result, "failure", None)
+        if task_logger is not None:
+            try:
+                task_logger.log_agent_end(
+                    node_name="scheduler",
+                    next_node="scheduler",
+                    step=step_number(step.step_id),
+                    sub_agent_name=executed_name,
+                    attempt=attempt,
+                    phase=phase,
+                    planned_agent=planned_name,
+                    executed_agent=executed_name,
+                )
+            except Exception:  # noqa: BLE001
+                pass
+        await event_queue.put(
+            {
+                "event": "end_of_agent",
+                "data": {
+                    "step_id": step.step_id,
+                    "agent_name": f"scheduler【{executed_name}】",
+                    "agent_id": (
+                        f"{workflow_id}_{step.step_id}_{phase}_{attempt}"
+                    ),
+                    "sub_agent_name": executed_name,
+                    "selected_agent": executed_name,
+                    "planned_agent": planned_name,
+                    "executed_agent": executed_name,
+                    "attempt": attempt,
+                    "phase": phase,
+                    "status": status_value,
+                    "failure": (
+                        failure.model_dump(mode="json")
+                        if failure is not None
+                        else None
+                    ),
                 },
             }
         )
@@ -941,12 +1166,17 @@ async def run_scheduler_workflow(
         # swallows exceptions here so a monitoring failure never fails a step).
         if task_logger is not None:
             try:
-                task_logger.log_agent_end(
-                    node_name="scheduler",
-                    next_node="scheduler",
-                    step=step_number(step.step_id),
-                    sub_agent_name=getattr(step, "agent_name", None),
-                )
+                if not step.is_read_only:
+                    task_logger.log_agent_end(
+                        node_name="scheduler",
+                        next_node="scheduler",
+                        step=step_number(step.step_id),
+                        sub_agent_name=(
+                            (result.metrics or {}).get("selected_agent")
+                            or step_agents.get(step.step_id)
+                            or getattr(step, "agent_name", None)
+                        ),
+                    )
                 failure = getattr(result, "failure", None)
                 if failure is not None and hasattr(task_logger, "log_failure"):
                     task_logger.log_failure(
@@ -959,15 +1189,22 @@ async def run_scheduler_workflow(
 
         status_value = _status_value(result.status)
         selected_name = (
-            step_agents.get(step.step_id)
-            or (result.metrics or {}).get("selected_agent")
+            (result.metrics or {}).get("selected_agent")
+            or step_agents.get(step.step_id)
             or getattr(step, "agent_name", None)
+            or step.step_id
+        )
+        planned_name = (
+            getattr(step, "agent_name", None)
+            or getattr(step, "preferred_resource_id", None)
             or step.step_id
         )
         result_data: dict[str, Any] = {
             "step_id": step.step_id,
             "agent_id": f"{workflow_id}_{step.step_id}",
             "agent_name": selected_name,
+            "planned_agent": planned_name,
+            "executed_agent": selected_name,
             "status": status_value,
             "outputs": {},
             "output_refs": {},
@@ -1003,23 +1240,26 @@ async def run_scheduler_workflow(
         # Emit the governed, materialized result before end_of_agent so the Web
         # execution card receives its body before the card is finalized.
         await event_queue.put({"event": "step_result", "data": result_data})
-        await event_queue.put(
-            {
-                "event": "end_of_agent",
-                "data": {
-                    "step_id": step.step_id,
-                    "agent_name": f"scheduler【{selected_name}】",
-                    "agent_id": f"{workflow_id}_{step.step_id}",
-                    "sub_agent_name": selected_name,
-                    "status": status_value,
-                    "failure": (
-                        failure.model_dump(mode="json")
-                        if failure is not None
-                        else None
-                    ),
-                },
-            }
-        )
+        if not step.is_read_only:
+            await event_queue.put(
+                {
+                    "event": "end_of_agent",
+                    "data": {
+                        "step_id": step.step_id,
+                        "agent_name": f"scheduler【{selected_name}】",
+                        "agent_id": f"{workflow_id}_{step.step_id}",
+                        "sub_agent_name": selected_name,
+                        "planned_agent": planned_name,
+                        "executed_agent": selected_name,
+                        "status": status_value,
+                        "failure": (
+                            failure.model_dump(mode="json")
+                            if failure is not None
+                            else None
+                        ),
+                    },
+                }
+            )
 
     receipt_store = PersistentReceiptStore(task_id)
 
@@ -1101,6 +1341,8 @@ async def run_scheduler_workflow(
         store=store,
         resolver=resolver,
         receipt_store=receipt_store,
+        redispatch_enabled=bool(redispatch_enabled),
+        retry_delay_seconds=max(0.0, float(retry_delay_seconds)),
     )
     ctx = {
         "user_query": state.get("USER_QUERY", "") or state.get("original_user_query", ""),
@@ -1163,6 +1405,8 @@ async def run_scheduler_workflow(
             on_step_start=on_step_start,
             on_step_end=on_step_end,
             commit_step_result=commit_step_result,
+            on_attempt_start=on_attempt_start,
+            on_attempt_end=on_attempt_end,
         )
     )
 
