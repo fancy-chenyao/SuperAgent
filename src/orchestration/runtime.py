@@ -53,6 +53,116 @@ logger = logging.getLogger(__name__)
 ExecuteStep = Callable[..., Awaitable[Any]]
 
 
+class TrustedSubtaskBindingError(ValueError):
+    """The scheduler graph cannot be tied to the trusted TaskProfile."""
+
+
+def _trusted_subtask_map(task_profile: Any) -> dict[str, dict[str, Any]]:
+    """Return the trusted TaskProfile subtasks keyed by their stable run-local IDs."""
+
+    if not isinstance(task_profile, dict):
+        return {}
+    raw_subtasks = task_profile.get("subtasks") or []
+    if not raw_subtasks:
+        return {}
+    if not isinstance(raw_subtasks, list):
+        raise TrustedSubtaskBindingError(
+            "trusted TaskProfile subtasks must be a list"
+        )
+
+    subtasks: dict[str, dict[str, Any]] = {}
+    for index, item in enumerate(raw_subtasks):
+        if not isinstance(item, dict):
+            raise TrustedSubtaskBindingError(
+                f"trusted TaskProfile subtask at index {index} is invalid"
+            )
+        subtask_id = str(item.get("id") or "").strip()
+        if not subtask_id:
+            raise TrustedSubtaskBindingError(
+                f"trusted TaskProfile subtask at index {index} has no id"
+            )
+        if subtask_id in subtasks:
+            raise TrustedSubtaskBindingError(
+                f"trusted TaskProfile contains duplicate subtask id {subtask_id!r}"
+            )
+        subtasks[subtask_id] = item
+    return subtasks
+
+
+def _step_subtask_ids(step: Any) -> list[str]:
+    raw_ids = (
+        getattr(step, "subtask_ids", None)
+        or getattr(step, "subtask_id", None)
+        or []
+    )
+    values = raw_ids if isinstance(raw_ids, (list, tuple, set)) else [raw_ids]
+    return [str(item).strip() for item in values if str(item).strip()]
+
+
+def _trusted_subtasks_for_step(
+    task_profile: Any,
+    step: Any,
+) -> list[dict[str, Any]]:
+    """Resolve one scheduler step to trusted subtasks, failing closed if needed."""
+
+    subtasks = _trusted_subtask_map(task_profile)
+    if not subtasks:
+        return []
+
+    step_id = str(getattr(step, "step_id", "") or "<unknown>")
+    bound_ids = _step_subtask_ids(step)
+    if not bound_ids:
+        raise TrustedSubtaskBindingError(
+            f"step {step_id!r} is missing trusted subtask_ids"
+        )
+    if len(bound_ids) != len(set(bound_ids)):
+        raise TrustedSubtaskBindingError(
+            f"step {step_id!r} contains duplicate subtask_ids"
+        )
+
+    unknown = [
+        subtask_id
+        for subtask_id in bound_ids
+        if subtask_id not in subtasks
+    ]
+    if unknown:
+        raise TrustedSubtaskBindingError(
+            f"step {step_id!r} references unknown trusted subtasks {unknown}"
+        )
+    return [subtasks[subtask_id] for subtask_id in bound_ids]
+
+
+def validate_trusted_subtask_bindings(
+    graph: TaskGraph,
+    task_profile: Any,
+) -> TaskGraph:
+    """Require exact TaskGraph coverage when the trusted profile has subtasks."""
+
+    trusted_subtasks = _trusted_subtask_map(task_profile)
+    if not trusted_subtasks:
+        return graph
+
+    coverage = {subtask_id: 0 for subtask_id in trusted_subtasks}
+    for step in graph.steps:
+        for subtask in _trusted_subtasks_for_step(task_profile, step):
+            coverage[str(subtask["id"])] += 1
+
+    missing = [
+        subtask_id for subtask_id, count in coverage.items() if count == 0
+    ]
+    duplicated = [
+        subtask_id for subtask_id, count in coverage.items() if count > 1
+    ]
+    if missing or duplicated:
+        details: list[str] = []
+        if missing:
+            details.append(f"missing trusted subtasks {missing}")
+        if duplicated:
+            details.append(f"duplicate trusted subtasks {duplicated}")
+        raise TrustedSubtaskBindingError("; ".join(details))
+    return graph
+
+
 def build_task_graph_from_state(state: dict) -> TaskGraph:
     """Resolve a :class:`TaskGraph` from state.
 
@@ -61,12 +171,21 @@ def build_task_graph_from_state(state: dict) -> TaskGraph:
     """
     tg = state.get("task_graph")
     if isinstance(tg, TaskGraph):
-        return tg.validate_dag()
-    if isinstance(tg, dict):
-        return TaskGraph(**tg).validate_dag()
-    steps = state.get("planning_steps") or []
-    task_id = state.get("task_id") or state.get("workflow_id") or "task"
-    return plan_to_task_graph(steps, task_id=task_id, subject=state.get("user_id"))
+        graph = tg.validate_dag()
+    elif isinstance(tg, dict):
+        graph = TaskGraph(**tg).validate_dag()
+    else:
+        steps = state.get("planning_steps") or []
+        task_id = state.get("task_id") or state.get("workflow_id") or "task"
+        graph = plan_to_task_graph(
+            steps,
+            task_id=task_id,
+            subject=state.get("user_id"),
+        )
+    return validate_trusted_subtask_bindings(
+        graph,
+        state.get("task_profile") or {},
+    )
 
 
 def has_task_graph(state: dict) -> bool:
@@ -286,6 +405,181 @@ async def _list_agents_and_authorized(state: dict) -> tuple[list, set]:
         return [], set()
 
 
+def _build_step_task_profile(state: dict, step: Any, selected_agent: str) -> dict:
+    """Scope the workflow profile to the step currently being dispatched.
+
+    S-ABAC evaluates one target at a time. The global task profile is produced
+    before planning, and the selected Agent's resource classification comes
+    from the trusted platform registry. Planner-authored descriptions,
+    capability/tag labels, task type and data scope are deliberately excluded
+    from the authorization profile: they may make a plan stricter during
+    conversion, but can never turn an authorization mismatch into a match.
+    """
+    from config.s_abac_config import RESOURCE_SECURITY_ATTRIBUTES
+
+    global_profile = dict(state.get("task_profile") or {})
+    trusted_attrs = dict(
+        RESOURCE_SECURITY_ATTRIBUTES.get(selected_agent, {}) or {}
+    )
+
+    def _list_value(value: Any) -> list[str]:
+        if value is None:
+            return []
+        values = value if isinstance(value, (list, tuple, set)) else [value]
+        return [str(item) for item in values if str(item).strip()]
+
+    def _ordered_values(items: Any, field: str) -> list[str]:
+        result: list[str] = []
+        seen: set[str] = set()
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            for value in _list_value(item.get(field)):
+                key = value.strip().lower()
+                if key and key not in seen:
+                    result.append(value)
+                    seen.add(key)
+        return result
+
+    trusted_subtasks = _trusted_subtasks_for_step(global_profile, step)
+
+    if trusted_subtasks:
+        required_capabilities = _ordered_values(
+            trusted_subtasks, "expected_capabilities"
+        )
+        scenario_tags = _ordered_values(trusted_subtasks, "scenario_tags")
+    else:
+        required_capabilities = _list_value(
+            trusted_attrs.get("expected_capabilities")
+        ) or _list_value(global_profile.get("expected_capabilities"))
+        scenario_tags = _list_value(
+            trusted_attrs.get("scenario_tags")
+        ) or _list_value(global_profile.get("scenario_tags"))
+
+    trusted_fit_result: dict[str, Any] = {}
+    if trusted_subtasks:
+        resource_capabilities = {
+            value.lower()
+            for value in _list_value(trusted_attrs.get("expected_capabilities"))
+        }
+        resource_tags = {
+            value.lower()
+            for value in _list_value(trusted_attrs.get("scenario_tags"))
+        }
+        resource_task_type = str(
+            trusted_attrs.get("capability_domain") or ""
+        ).strip().lower()
+        mismatch_reasons: list[str] = []
+        if not trusted_attrs:
+            mismatch_reasons.append(
+                "selected agent has no trusted resource security attributes"
+            )
+        for subtask in trusted_subtasks:
+            subtask_id = str(subtask.get("id") or "")
+            expected = {
+                value.lower()
+                for value in _list_value(
+                    subtask.get("expected_capabilities")
+                )
+            }
+            tags = {
+                value.lower()
+                for value in _list_value(subtask.get("scenario_tags"))
+            }
+            subtask_task_type = str(
+                subtask.get("task_type") or ""
+            ).strip().lower()
+            if expected and (
+                not resource_capabilities
+                or expected.isdisjoint(resource_capabilities)
+            ):
+                mismatch_reasons.append(
+                    f"{subtask_id} capabilities do not match trusted resource"
+                )
+            if tags and (
+                not resource_tags
+                or tags.isdisjoint(resource_tags)
+            ):
+                mismatch_reasons.append(
+                    f"{subtask_id} scenario tags do not match trusted resource"
+                )
+            if subtask_task_type and (
+                not resource_task_type
+                or subtask_task_type != resource_task_type
+            ):
+                mismatch_reasons.append(
+                    f"{subtask_id} task type does not match trusted resource"
+                )
+        if mismatch_reasons:
+            trusted_fit_result = {
+                "fit": "mismatch",
+                "confidence": 1.0,
+                "reason": "; ".join(mismatch_reasons),
+                "source": "trusted_task_profile_and_resource_registry",
+            }
+        else:
+            trusted_fit_result = {
+                "fit": "match",
+                "confidence": 1.0,
+                "reason": "Trusted subtask classification matches trusted resource",
+                "source": "trusted_task_profile_and_resource_registry",
+            }
+
+    global_risk = str(
+        global_profile.get("risk_profile")
+        or global_profile.get("risk_level")
+        or state.get("risk_profile")
+        or "LOW"
+    ).upper()
+    step_risk = str(getattr(step, "risk_level", "") or global_risk).upper()
+    risk_order = {"LOW": 0, "MEDIUM": 1, "HIGH": 2, "CRITICAL": 3}
+    risk_profile = max(
+        (global_risk, step_risk),
+        key=lambda value: risk_order.get(value, risk_order["CRITICAL"]),
+    )
+
+    trusted_subtask_goals = _ordered_values(trusted_subtasks, "goal")
+    business_goal = str(
+        "; ".join(trusted_subtask_goals)
+        or global_profile.get("business_goal")
+        or state.get("business_goal")
+        or state.get("original_user_query")
+        or state.get("USER_QUERY")
+        or ""
+    )
+    trusted_task_types = _ordered_values(trusted_subtasks, "task_type")
+    trusted_data_scope = _ordered_values(trusted_subtasks, "data_scope")
+    return {
+        **global_profile,
+        "business_goal": business_goal,
+        "task_type": str(
+            (trusted_task_types[0] if len(trusted_task_types) == 1 else "")
+            or trusted_attrs.get("capability_domain")
+            or global_profile.get("task_type")
+            or "GENERAL"
+        ).upper(),
+        "expected_capabilities": required_capabilities,
+        "scenario_tags": scenario_tags,
+        "operation_mode": str(
+            getattr(step, "operation_mode", "") or "read"
+        ).lower(),
+        "data_scope": str(
+            ",".join(trusted_data_scope)
+            or global_profile.get("data_scope")
+            or state.get("data_scope")
+            or "task"
+        ),
+        "risk_profile": risk_profile,
+        "profile_scope": "step",
+        "step_id": str(getattr(step, "step_id", "")),
+        "authorization_profile_sources": [
+            "global_task_profile",
+            "trusted_resource_registry",
+        ],
+        "trusted_resource_fit": trusted_fit_result,
+    }
+
+
 def _build_execution_context(state: dict, step, selected_agent):
     """Build a per-step ExecutionContext carrying acting user + producer agent.
 
@@ -294,6 +588,17 @@ def _build_execution_context(state: dict, step, selected_agent):
     """
     from src.manager.executor.base import ExecutionContext
 
+    task_profile = _build_step_task_profile(state, step, selected_agent)
+    scenario_fit_cache = dict(state.get("scenario_fit_cache") or {})
+    trusted_resource_fit = dict(
+        task_profile.get("trusted_resource_fit") or {}
+    )
+    if trusted_resource_fit:
+        # Enforcement looks up ``<object_type>:<object_id>`` before invoking
+        # the optional fit analyzer. This trusted entry prevents Planner text
+        # from replacing the deterministic subtask/resource compatibility
+        # decision during Agent dispatch.
+        scenario_fit_cache[f"agent:{selected_agent}"] = trusted_resource_fit
     return ExecutionContext(
         user_id=state.get("user_id"),
         workflow_id=state.get("workflow_id"),
@@ -306,10 +611,11 @@ def _build_execution_context(state: dict, step, selected_agent):
             "operation_mode": step.operation_mode,
             "producer_agent_id": selected_agent,
             "selected_agent": selected_agent,
-            "risk_profile": state.get("risk_profile", "LOW"),
-            "task_profile": state.get("task_profile", {}),
-            "scenario_tags": state.get("scenario_tags", []),
-            "expected_capabilities": state.get("expected_capabilities", []),
+            "risk_profile": task_profile["risk_profile"],
+            "task_profile": task_profile,
+            "scenario_tags": task_profile["scenario_tags"],
+            "expected_capabilities": task_profile["expected_capabilities"],
+            "scenario_fit_cache": scenario_fit_cache,
         },
     )
 

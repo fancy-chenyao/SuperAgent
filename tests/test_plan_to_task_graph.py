@@ -531,6 +531,56 @@ def test_pure_query_agent_stays_read_only():
     assert g.step_map()["step_1"].is_read_only is True
 
 
+def test_converter_preserves_step_security_profile_fields():
+    g = plan_to_task_graph(
+        [
+            {
+                "agent_name": "reporter",
+                "required_capabilities": ["Document"],
+                "scenario_tags": ["reporting"],
+                "task_type": "Document",
+                "data_scope": "employee.salary.summary",
+                "risk_level": "HIGH",
+            }
+        ],
+        task_id="t",
+    )
+    step = g.step_map()["step_1"]
+
+    assert step.required_capabilities == ["Document"]
+    assert step.scenario_tags == ["reporting"]
+    assert step.task_type == "Document"
+    assert step.data_scope == "employee.salary.summary"
+    assert step.risk_level == "HIGH"
+
+
+@pytest.mark.parametrize(
+    "planner_field,planner_value",
+    [
+        ("required_capabilities", ["HR"]),
+        ("scenario_tags", ["salary_query"]),
+        ("task_type", "HR"),
+    ],
+)
+def test_converter_rejects_planner_security_claims_outside_trusted_agent_profile(
+    planner_field,
+    planner_value,
+):
+    with pytest.raises(
+        TaskGraphValidationError,
+        match="outside trusted Agent security attributes",
+    ):
+        plan_to_task_graph(
+            [
+                {
+                    "agent_name": "reporter",
+                    planner_field: planner_value,
+                }
+            ],
+            task_id="t",
+        )
+
+
 def test_unregistered_agent_is_unknown_not_read():
     """An unregistered agent must be 'unknown' (never defaulted to read)."""
     g = plan_to_task_graph([{"agent_name": "MysteryAgent"}], task_id="t")

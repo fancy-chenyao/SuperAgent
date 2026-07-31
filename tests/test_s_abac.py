@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from uuid import uuid4
 from collections import deque
 
+import src.security.enforcement as enforcement
 import src.security.scenario_analyzer as scenario_analyzer
 from src.security.approval import ApprovalStore
 from src.security.context import SecurityContextBuilder, UnknownSecurityUserError
@@ -12,6 +13,10 @@ from src.security.policy import Action, Object, PolicyEngine, Scenario, Subject
 from src.security.scenario_analyzer import analyze_object_fit, analyze_task_context
 from src.workflow.coor_task import _extract_plan_steps, _fallback_plan_steps
 from src.workflow.cache import WorkflowCache
+
+
+def _raise_llm_unavailable(*_args, **_kwargs):
+    raise RuntimeError("LLM disabled for deterministic offline test")
 
 
 def test_policy_engine_allows_low_sensitivity_by_clearance():
@@ -319,7 +324,10 @@ def test_security_context_builder_maps_agent_and_tool():
     assert action.attributes["amount"] == 200000
 
 
-def test_scenario_analyzer_heuristic_task_profile():
+def test_scenario_analyzer_heuristic_task_profile(monkeypatch):
+    monkeypatch.setattr(
+        scenario_analyzer, "get_llm_by_type", _raise_llm_unavailable
+    )
     profile = __import__("asyncio").run(
         analyze_task_context("Please send a batch notification email to all employees")
     )
@@ -328,7 +336,10 @@ def test_scenario_analyzer_heuristic_task_profile():
     assert "mass_notification" in profile["scenario_tags"]
 
 
-def test_scenario_analyzer_detects_chinese_hr_salary_query():
+def test_scenario_analyzer_detects_chinese_hr_salary_query(monkeypatch):
+    monkeypatch.setattr(
+        scenario_analyzer, "get_llm_by_type", _raise_llm_unavailable
+    )
     profile = __import__("asyncio").run(analyze_task_context("查询员工 E001 的工资信息"))
     assert profile["task_type"] == "HR"
     assert "HR" in profile["expected_capabilities"]
@@ -477,7 +488,11 @@ def test_enforcement_populates_scenario_fit_result_in_context():
     assert fit_result["fit"] in {"match", "uncertain"}
 
 
-def test_permission_payload_contains_scenario_fit_result():
+def test_permission_payload_contains_scenario_fit_result(monkeypatch):
+    # enforcement freezes S_ABAC_ENABLED at import time; pin it ON here so
+    # the deny path is exercised even without a .env (fresh clone / CI).
+    monkeypatch.setattr(enforcement, "S_ABAC_ENABLED", True)
+
     class DummyContext:
         def __init__(self):
             self.user_id = "communication_officer"
@@ -552,6 +567,66 @@ def test_scenario_analyzer_preserves_hr_profile_over_llm_general(monkeypatch):
     assert profile["task_type"] == "HR"
     assert "HR" in profile["expected_capabilities"]
     assert "salary_query" in profile["scenario_tags"]
+
+
+def test_scenario_analyzer_merges_coarse_and_fine_labels_in_order():
+    fallback = {
+        "task_type": "HR",
+        "expected_capabilities": ["HR"],
+        "scenario_tags": ["salary_query"],
+    }
+    llm_result = {
+        "task_type": "HR",
+        "expected_capabilities": ["HR_DATA_ACCESS"],
+        "scenario_tags": ["employee_compensation_access"],
+    }
+
+    merged = scenario_analyzer._merge_task_profile(fallback, llm_result)
+
+    assert merged["expected_capabilities"] == ["HR", "HR_DATA_ACCESS"]
+    assert merged["scenario_tags"] == [
+        "salary_query",
+        "employee_compensation_access",
+    ]
+
+
+def test_scenario_analyzer_merges_labels_case_insensitively():
+    fallback = {
+        "task_type": "HR",
+        "expected_capabilities": ["HR"],
+        "scenario_tags": ["salary_query"],
+    }
+    llm_result = {
+        "task_type": "HR",
+        "expected_capabilities": ["hr", " HR_DATA_ACCESS ", ""],
+        "scenario_tags": ["SALARY_QUERY", "employee_info"],
+    }
+
+    merged = scenario_analyzer._merge_task_profile(fallback, llm_result)
+
+    assert merged["expected_capabilities"] == ["HR", "HR_DATA_ACCESS"]
+    assert merged["scenario_tags"] == ["salary_query", "employee_info"]
+
+
+def test_scenario_analyzer_keeps_conflicting_domain_protection_before_union():
+    fallback = {
+        "task_type": "HR",
+        "business_goal": "查询工资",
+        "expected_capabilities": ["HR"],
+        "scenario_tags": ["salary_query"],
+    }
+    llm_result = {
+        "task_type": "COMMUNICATION",
+        "expected_capabilities": ["Communication"],
+        "scenario_tags": ["mass_notification"],
+    }
+
+    merged = scenario_analyzer._merge_task_profile(fallback, llm_result)
+
+    assert merged["task_type"] == "HR"
+    assert merged["expected_capabilities"] == ["HR"]
+    assert merged["scenario_tags"] == ["salary_query"]
+    assert merged["reason"] == "heuristic domain preserved over conflicting llm result"
 
 
 def test_scenario_analyzer_preserves_match_over_llm_mismatch():

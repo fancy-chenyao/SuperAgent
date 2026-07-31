@@ -1,5 +1,6 @@
 from src.workflow.coor_task import (
     _infer_step_intents,
+    _scheduler_profile_validation_state,
     _validate_plan_against_task_profile,
 )
 from src.orchestration.plan_to_task_graph import plan_to_task_graph
@@ -223,3 +224,38 @@ def test_legacy_merged_step_allows_internal_dependency():
     ]
 
     assert _validate_plan_against_task_profile(steps, state) == []
+
+
+def test_scheduler_rejects_steps_without_trusted_subtask_bindings(monkeypatch):
+    monkeypatch.setattr(
+        "src.service.env.ORCHESTRATION_SCHEDULER_ENABLED",
+        True,
+        raising=False,
+    )
+    state = {
+        "task_profile": {
+            "subtasks": [
+                {
+                    "id": "subtask_1",
+                    "intent": "salary_query",
+                    "depends_on": [],
+                }
+            ]
+        }
+    }
+    steps = [
+        {
+            "agent_name": "RemoteHRAssistantAgent",
+            "title": "查询员工工资",
+        }
+    ]
+
+    errors = _validate_plan_against_task_profile(
+        steps,
+        _scheduler_profile_validation_state(state),
+    )
+
+    assert any(
+        "每个执行步骤必须包含可验证的 subtask_ids" in error
+        for error in errors
+    )

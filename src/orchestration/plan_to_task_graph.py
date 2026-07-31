@@ -80,12 +80,9 @@ def _classify_single(mode: str) -> str:
     return "unknown"
 
 
-def _config_operation_modes(agent_name: str) -> Optional[List[str]]:
-    """Return an agent's declared ``allowed_operation_modes`` from S-ABAC config.
+def _config_security_attributes(agent_name: str) -> Optional[dict[str, Any]]:
+    """Return one Agent's trusted S-ABAC resource attributes."""
 
-    Lazy import keeps this module importable without the security/config stack.
-    Returns ``None`` when the agent is not registered.
-    """
     if not agent_name:
         return None
     try:
@@ -95,7 +92,72 @@ def _config_operation_modes(agent_name: str) -> Optional[List[str]]:
     attrs = RESOURCE_SECURITY_ATTRIBUTES.get(agent_name)
     if not isinstance(attrs, dict):
         return None
+    return dict(attrs)
+
+
+def _config_operation_modes(agent_name: str) -> Optional[List[str]]:
+    """Return an agent's declared ``allowed_operation_modes`` from S-ABAC config.
+
+    Lazy import keeps this module importable without the security/config stack.
+    Returns ``None`` when the agent is not registered.
+    """
+
+    attrs = _config_security_attributes(agent_name)
+    if attrs is None:
+        return None
     return list(attrs.get("allowed_operation_modes", []) or [])
+
+
+def _constraint_tokens(value: Any) -> set[str]:
+    if value is None:
+        return set()
+    values = value if isinstance(value, (list, tuple, set)) else [value]
+    return {
+        str(item).strip().lower()
+        for item in values
+        if str(item).strip()
+    }
+
+
+def _validate_planner_security_constraints(
+    agent_name: str,
+    raw_step: dict[str, Any],
+) -> None:
+    """Reject Planner claims that contradict trusted Agent classification.
+
+    Planner security fields remain useful as audit/deny-only constraints, but
+    they must never widen the target's trusted capability or scenario domain.
+    Runtime authorization is built from the global task profile plus these
+    trusted resource attributes, not from the raw fields validated here.
+    """
+
+    attrs = _config_security_attributes(agent_name)
+    if attrs is None:
+        return
+
+    for planner_field, trusted_field in (
+        ("required_capabilities", "expected_capabilities"),
+        ("scenario_tags", "scenario_tags"),
+    ):
+        claimed = _constraint_tokens(raw_step.get(planner_field))
+        trusted = _constraint_tokens(attrs.get(trusted_field))
+        if claimed and not claimed.issubset(trusted):
+            raise TaskGraphValidationError(
+                f"step for {agent_name!r} has Planner {planner_field} "
+                "outside trusted Agent security attributes"
+            )
+
+    claimed_task_type = str(raw_step.get("task_type") or "").strip().lower()
+    trusted_task_type = str(attrs.get("capability_domain") or "").strip().lower()
+    if (
+        claimed_task_type
+        and trusted_task_type
+        and claimed_task_type != trusted_task_type
+    ):
+        raise TaskGraphValidationError(
+            f"step for {agent_name!r} has Planner task_type outside trusted "
+            "Agent security attributes"
+        )
 
 
 def _derive_operation_mode(
@@ -409,6 +471,7 @@ def plan_to_task_graph(
         operation_mode, operation_mode_source, operation_mode_reason = _derive_operation_mode(
             agent_name, raw.get("operation_mode"), write_agents
         )
+        _validate_planner_security_constraints(agent_name, raw)
 
         step = TaskStep(
             step_id=step_id,
@@ -427,6 +490,9 @@ def plan_to_task_graph(
             input_bindings=inputs,
             title=raw.get("title", ""),
             description=raw.get("description", ""),
+            task_type=raw.get("task_type", ""),
+            scenario_tags=raw.get("scenario_tags", []) or [],
+            data_scope=raw.get("data_scope", ""),
             expected_schema_ref=(
                 raw.get("expected_schema_ref") or raw.get("output_schema_ref")
             ),

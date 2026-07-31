@@ -105,21 +105,20 @@ AUTO_RECOVERY_ENABLED = _parse_bool("AUTO_RECOVERY_ENABLED", False)
 S_ABAC_ENABLED = _parse_bool("S_ABAC_ENABLED", False)
 
 # Execution-engine feature flags.
-# ARTIFACT_CAPTURE_ENABLED        -> Phase 2: capture each executed step's
-#                                    output as a typed Artifact. Kept OFF until
-#                                    sensitive-artifact redaction/audit lands.
+# ARTIFACT_CAPTURE_ENABLED        -> Legacy publisher/while compatibility
+#                                    capture. Its code default stays OFF; the
+#                                    scheduler persists governed Artifacts
+#                                    independently through its runtime.
 # ORCHESTRATION_SCHEDULER_ENABLED -> Phase 3: drive the workflow through the
 #                                    TaskGraph scheduler when the plan yields a
-#                                    fully-classified task graph. Default OFF
-#                                    (safe baseline): only turn it on for a
-#                                    gated rollout via an explicit env var. When
-#                                    ON, the runtime enters the scheduler for a
-#                                    scheduler-ready graph, stays on the legacy
-#                                    publisher/while loop during the planning
-#                                    phase, and FAILS CLOSED (never falls back)
-#                                    for an invalid/unclassified graph or a
-#                                    missing graph in the production execution
-#                                    phase.
+#                                    fully-classified task graph. The code
+#                                    default stays OFF as the no-configuration
+#                                    safety baseline; the prototype template
+#                                    explicitly opts in. When ON, planning may
+#                                    stay on the legacy publisher/while path,
+#                                    while production execution FAILS CLOSED for
+#                                    a missing/invalid graph or rejected
+#                                    snapshot.
 ARTIFACT_CAPTURE_ENABLED = _parse_bool("ARTIFACT_CAPTURE_ENABLED", False)
 ORCHESTRATION_SCHEDULER_ENABLED = _parse_bool(
     "ORCHESTRATION_SCHEDULER_ENABLED", False)
