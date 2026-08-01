@@ -85,6 +85,38 @@ def test_t9_repeated_run_after_restart_does_not_resend(tmp_path):
     assert results["send"].metrics.get("idempotent_reuse") is True
 
 
+def test_pre_side_effect_validation_failure_releases_receipt_for_safe_retry(
+    tmp_path,
+):
+    class _ValidationFailure:
+        calls = 0
+
+        async def __call__(self, **_kwargs):
+            self.calls += 1
+            return ExecuteResult(
+                status=ExecutionStatus.FAILED,
+                error="could not convert string to float: '待补充'",
+                metadata={
+                    "side_effect_started": False,
+                    "failure_phase": "validation",
+                    "safe_to_retry": True,
+                },
+            )
+
+    execute = _ValidationFailure()
+    receipts = PersistentReceiptStore("task-email", base_dir=tmp_path)
+    results = _run(execute, receipts)
+
+    assert execute.calls == 1
+    assert results.terminal_status == WorkflowStatus.FAILED
+    assert results["send"].metrics["safe_to_retry"] is True
+    assert results["send"].metrics["receipt_released"] is True
+    key = idempotency_key("task-email", "send", {})
+    assert PersistentReceiptStore(
+        "task-email", base_dir=tmp_path
+    ).get(key) is None
+
+
 # --------------------------------------------------------------------------- #
 # C4: crash window + receipt-write failure -> NEEDS_RECONCILIATION (no re-send)
 # --------------------------------------------------------------------------- #

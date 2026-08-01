@@ -263,6 +263,13 @@ def test_reused_plan_still_passes_agentproxy_authorization(tmp_path, monkeypatch
 
     checks = []
     fake_cache = _FakeCache()
+    fake_cache.steps = [
+        {
+            "step_id": "step_1",
+            "agent_name": "reporter",
+            "operation_mode": "read",
+        }
+    ]
     agent = SimpleNamespace(agent_name="reporter")
 
     class Registry:
@@ -305,7 +312,7 @@ def test_reused_plan_still_passes_agentproxy_authorization(tmp_path, monkeypatch
     assert checks == [("reporter", "alice", "alice:wf")]
     assert command.goto == "publisher"
     assert command.update["workflow_execution_failed"] is False
-    step_evidence = command.update["skill_step_evidence"]["2:reporter"]
+    step_evidence = command.update["skill_step_evidence"]["step_1"]
     assert step_evidence["technical_success"] is True
     assert step_evidence["business_success"] is True
     assert fake_cache.updated is True
@@ -313,7 +320,7 @@ def test_reused_plan_still_passes_agentproxy_authorization(tmp_path, monkeypatch
     execution_status[0] = ExecutionStatus.FAILED
     failed_command = asyncio.run(coor_task.agent_proxy_node(state))
     assert failed_command.update["workflow_execution_failed"] is True
-    failed_evidence = failed_command.update["skill_step_evidence"]["2:reporter"]
+    failed_evidence = failed_command.update["skill_step_evidence"]["step_1"]
     assert failed_evidence["technical_success"] is False
 
 
@@ -921,3 +928,53 @@ def test_data_flow_validation_rejects_missing_current_agent(monkeypatch):
 
     assert is_valid is False
     assert "MissingAgent" in errors[0]
+
+
+def test_data_flow_validation_infers_exact_upstream_bindings(monkeypatch):
+    import src.workflow.coor_task as coor_task
+
+    class Registry:
+        async def list(self):
+            return [
+                SimpleNamespace(
+                    user_id="share",
+                    agent_name="RemoteHRAssistantAgent",
+                    requires=[],
+                    produces=["employee.id", "employee.name"],
+                ),
+                SimpleNamespace(
+                    user_id="share",
+                    agent_name="RemoteOfficeAssistantAgent",
+                    requires=["employee.id", "employee.name"],
+                    produces=["employee.leave_records"],
+                ),
+            ]
+
+    monkeypatch.setattr(
+        coor_task,
+        "agent_manager",
+        SimpleNamespace(agent_registry=Registry()),
+    )
+    steps = [
+        {"step_id": "step_hr", "agent_name": "RemoteHRAssistantAgent", "inputs": []},
+        {"step_id": "step_leave", "agent_name": "RemoteOfficeAssistantAgent", "inputs": []},
+    ]
+
+    is_valid, errors = asyncio.run(
+        coor_task._validate_plan_data_flow(steps, "alice")
+    )
+
+    assert is_valid is True
+    assert errors == []
+    assert steps[1]["inputs"] == [
+        {
+            "parameter_name": "employee.id",
+            "source_step": "step_hr",
+            "source_output": "employee.id",
+        },
+        {
+            "parameter_name": "employee.name",
+            "source_step": "step_hr",
+            "source_output": "employee.name",
+        },
+    ]

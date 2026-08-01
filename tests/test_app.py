@@ -2,6 +2,12 @@
 import requests
 from typing import Dict, List, Any
 
+# This module is an operator-run API smoke script (see the ``__main__`` block),
+# not a pytest test module.  Its functions require command-line arguments and a
+# separately running server, so pytest must not collect them as fixture-based
+# unit tests.
+__test__ = False
+
 BASE_URL = "http://localhost:8001"
 
 def test_workflow_api(user_id: str, message_content: str) -> None:

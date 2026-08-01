@@ -96,8 +96,11 @@ class PolicyEngineArtifactGuard:
         # or not S-ABAC is enabled (fail closed on cross-user reads).
         meta = getattr(artifact, "metadata", None) or {}
         owner = meta.get("owner_user_id")
-        allowed_readers = {str(r)
-                           for r in (meta.get("allowed_reader_ids") or [])}
+        allowed_readers: set[str] = set()
+        if meta.get("reader_grants_source") == "trusted_server":
+            allowed_readers = {
+                str(r) for r in (meta.get("allowed_reader_ids") or [])
+            }
         cross_user = bool(owner) and str(owner) != str(subject)
         if cross_user and str(subject) not in allowed_readers:
             logger.warning(
@@ -124,6 +127,27 @@ class PolicyEngineArtifactGuard:
                 )
                 return False, f"sabac_off_sensitive:{sensitivity}"
             return True, "sabac_off_allowed"
+
+        scenario_src = scenario if isinstance(scenario, dict) else self._scenario
+        consumer_agent = scenario_src.get("consumer_agent_id")
+        if consumer_agent:
+            try:
+                from config.s_abac_demo_users import get_user_available_agents
+
+                available = get_user_available_agents(str(subject))
+                if available != ["*"] and str(consumer_agent) not in available:
+                    logger.warning(
+                        "artifact-guard: deny unauthorized consumer=%s subject=%s name=%s",
+                        consumer_agent,
+                        subject,
+                        getattr(artifact, "logical_name", ""),
+                    )
+                    return False, "consumer_agent_denied"
+            except Exception as exc:  # noqa: BLE001 - lookup failure fails closed
+                logger.warning(
+                    "artifact-guard: deny consumer authorization error: %s", exc
+                )
+                return False, "consumer_authorization_error"
 
         try:
             allowed = self._evaluate(

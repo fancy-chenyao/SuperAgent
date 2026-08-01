@@ -588,7 +588,12 @@ def test_governed_cross_user_read_allowed_for_listed_reader(tmp_path, monkeypatc
     fake = FakeExecutor()
     sched = TaskScheduler(execute_step=fake, store=store, resolver=resolver)
     results = asyncio.run(sched.run(
-        _governed_graph(producer_extra={"allowed_reader_ids": ["bob"]}),
+        _governed_graph(
+            producer_extra={
+                "allowed_reader_ids": ["bob"],
+                "allowed_reader_ids_trusted": True,
+            }
+        ),
         context={"task_id": "t", "subject": "bob",
                  "context_factory": _alice_factory},
     ))

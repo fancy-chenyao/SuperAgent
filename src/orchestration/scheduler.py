@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from collections.abc import Mapping
 from typing import Any, Awaitable, Callable, Dict, List, Optional
@@ -39,6 +40,7 @@ from src.orchestration.completion import (
     normalize_input,
 )
 from src.orchestration.providers import RoutingProvider, RoutingResult
+from src.orchestration.recovery import classify_failure, retry_delay_seconds
 from src.orchestration.resolver import (
     ArtifactAccessDenied,
     ArtifactResolver,
@@ -69,6 +71,12 @@ def _is_dispatch_permission_error(exc: BaseException) -> bool:
     except Exception:  # noqa: BLE001 - optional security dependencies
         return False
     return isinstance(exc, PermissionDeniedError)
+
+
+# Optional authorization hook. It runs after routing/context construction but
+# before a side-effect receipt is claimed, so an approval pause never leaves a
+# misleading STARTED receipt behind.
+AuthorizeStep = Callable[..., Awaitable[Any]]
 # Optional async lifecycle hooks (used by the runtime bridge for SSE/logging).
 StepHook = Callable[..., Awaitable[None]]
 
@@ -147,6 +155,7 @@ class WorkflowResult(dict):
         *,
         terminal_status: WorkflowStatus,
         clarifications: Optional[List[str]] = None,
+        approval_required_steps: Optional[List[str]] = None,
         rejected_steps: Optional[List[str]] = None,
         needs_reconciliation: Optional[List[str]] = None,
         blocked_steps: Optional[List[str]] = None,
@@ -155,6 +164,7 @@ class WorkflowResult(dict):
         super().__init__(step_results or {})
         self.terminal_status = terminal_status
         self.clarifications = list(clarifications or [])
+        self.approval_required_steps = list(approval_required_steps or [])
         self.rejected_steps = list(rejected_steps or [])
         self.needs_reconciliation = list(needs_reconciliation or [])
         self.blocked_steps = list(blocked_steps or [])
@@ -186,6 +196,7 @@ class TaskScheduler:
         self,
         *,
         execute_step: ExecuteStep,
+        authorize_step: Optional[AuthorizeStep] = None,
         routing_provider: Optional[RoutingProvider] = None,
         store: Optional[ArtifactStore] = None,
         resolver: Optional[ArtifactResolver] = None,
@@ -194,6 +205,7 @@ class TaskScheduler:
         retry_delay_seconds: float = 0.0,
     ) -> None:
         self._execute_step = execute_step
+        self._authorize_step = authorize_step
         self._routing = routing_provider
         self.store = store or ArtifactStore()
         self.resolver = resolver or ArtifactResolver(self.store)
@@ -221,6 +233,7 @@ class TaskScheduler:
         initial_results: Optional[Dict[str, StepResult]] = None,
         on_step_start: Optional[StepHook] = None,
         on_step_end: Optional[StepHook] = None,
+        on_retry: Optional[StepHook] = None,
         commit_step_result: Optional[StepHook] = None,
         on_attempt_start: Optional[StepHook] = None,
         on_attempt_end: Optional[StepHook] = None,
@@ -342,7 +355,7 @@ class TaskScheduler:
             batch = self._select_batch(runnable, smap)
             coros = [
                 self._run_step(smap[sid], context, on_step_start,
-                               on_step_end, commit_step_result)
+                               on_step_end, on_retry, commit_step_result)
                 for sid in batch
             ]
             batch_results = await asyncio.gather(*coros)
@@ -510,6 +523,9 @@ class TaskScheduler:
         blocked = [
             sid for sid, r in results.items() if r.status == StepStatus.SKIPPED
         ]
+        approval_required = [
+            sid for sid, r in results.items() if (r.metrics or {}).get("approval_required")
+        ]
         failed = [sid for sid, r in results.items() if r.status !=
                   StepStatus.SUCCEEDED]
         primary_failed = [
@@ -520,6 +536,8 @@ class TaskScheduler:
 
         if needs_recon:
             status = WorkflowStatus.NEEDS_RECONCILIATION
+        elif approval_required:
+            status = WorkflowStatus.APPROVAL_REQUIRED
         elif not failed:
             status = WorkflowStatus.SUCCEEDED
         elif succeeded:
@@ -532,6 +550,7 @@ class TaskScheduler:
         return WorkflowResult(
             results,
             terminal_status=status,
+            approval_required_steps=approval_required,
             rejected_steps=rejected,
             needs_reconciliation=needs_recon,
             blocked_steps=blocked,
@@ -576,13 +595,17 @@ class TaskScheduler:
         context: dict,
         on_step_start: Optional[StepHook],
         on_step_end: Optional[StepHook],
+        on_retry: Optional[StepHook] = None,
         commit_step_result: Optional[StepHook] = None,
     ) -> StepResult:
         # A single step must never crash the whole batch: routing, input
         # resolution, the start hook or completion evaluation raising would
         # otherwise abort ``asyncio.gather`` and kill independent branches.
+        started_at = time.monotonic()
         try:
-            result = await self._execute_step_core(step, context, on_step_start)
+            result = await self._execute_step_core(
+                step, context, on_step_start, on_retry
+            )
         except Exception as exc:  # noqa: BLE001 - degrade to a failed step
             result = StepResult(
                 step_id=step.step_id,
@@ -619,6 +642,15 @@ class TaskScheduler:
         # A commit failure replaces the original outcome, so classify that new
         # persistence/reconciliation failure as well.
         result = self._with_failure(step, result)
+
+        metrics = dict(result.metrics or {})
+        metrics.setdefault("operation_mode", str(step.operation_mode or ""))
+        metrics.setdefault("risk_level", str(step.risk_level or ""))
+        metrics.setdefault("max_attempts", max(1, int(step.retry or 0) + 1))
+        metrics["duration_seconds"] = round(
+            max(0.0, time.monotonic() - started_at), 6
+        )
+        result.metrics = metrics
 
         # Non-critical end hook (logging / SSE / monitoring): best effort only.
         if on_step_end is not None:
@@ -725,6 +757,7 @@ class TaskScheduler:
         *,
         retry_budget: int,
         phase: str,
+        on_retry: Optional[StepHook] = None,
     ) -> StepResult:
         """Execute one read-only Agent with a retryable-driven bounded budget."""
 
@@ -767,6 +800,9 @@ class TaskScheduler:
                     },
                 )
             except Exception as exc:  # noqa: BLE001 - classify and fail closed
+                governed = self._policy_failure_result(step, selected_agent, exc)
+                if governed is not None:
+                    return governed
                 if _is_dispatch_permission_error(exc):
                     failure = make_failure(
                         "AGENT_DISPATCH_DENIED",
@@ -856,16 +892,33 @@ class TaskScheduler:
                             metrics=metrics,
                         )
                     else:
-                        # A bare/legacy ExecuteResult.FAILED carries no trusted
-                        # transient classification. Treat it as terminal:
-                        # platform timeouts and adapter-validated
-                        # ``result_retryable=true`` are handled above/inside
-                        # result normalization and remain eligible for recovery.
+                        classification = classify_failure(
+                            error,
+                            metrics,
+                            read_only=True,
+                        )
+                        # Free-form failure text is not itself a trusted retry
+                        # signal. Only a recognized transient/timeout/rate-limit
+                        # class may consume the bounded read retry budget.
+                        retryable = bool(
+                            classification.retryable
+                            and classification.category.value != "UNKNOWN"
+                        )
                         failure = make_failure(
                             "AGENT_EXECUTION_FAILED",
                             step_id=step.step_id,
                             agent_id=selected_agent,
-                            retryable=False,
+                            retryable=retryable,
+                            details_safe={
+                                "reason_code": classification.reason_code,
+                            },
+                        )
+                        metrics.update(
+                            {
+                                "failure_category": classification.category.value,
+                                "reason_code": classification.reason_code,
+                                "retryable": retryable,
+                            }
                         )
                         candidate = StepResult(
                             step_id=step.step_id,
@@ -918,6 +971,25 @@ class TaskScheduler:
                 or attempt_number >= max_attempts
             ):
                 return candidate
+            if on_retry is not None:
+                classification = classify_failure(
+                    candidate.error,
+                    candidate.metrics,
+                    read_only=True,
+                )
+                try:
+                    await on_retry(
+                        step=step,
+                        selected_agent=selected_agent,
+                        attempt=attempt_number,
+                        next_attempt=attempt_number + 1,
+                        max_attempts=max_attempts,
+                        delay_seconds=self.retry_delay_seconds,
+                        error=candidate.error,
+                        reason_code=classification.reason_code,
+                    )
+                except Exception:  # noqa: BLE001 - monitoring is best effort
+                    pass
             if self.retry_delay_seconds:
                 await asyncio.sleep(self.retry_delay_seconds)
 
@@ -1143,6 +1215,7 @@ class TaskScheduler:
         step: TaskStep,
         context: dict,
         on_step_start: Optional[StepHook],
+        on_retry: Optional[StepHook] = None,
     ) -> StepResult:
         # Reuse the pre-flight routing verdict; only route here if a step was
         # somehow not covered by the pre-flight pass (defensive).
@@ -1223,6 +1296,31 @@ class TaskScheduler:
                 },
             )
 
+        # Authorize dispatch after the isolated context and governed Artifact
+        # inputs are prepared, but before any side-effect receipt is claimed.
+        if self._authorize_step is not None:
+            try:
+                authorization_result = await self._authorize_step(
+                    step=step,
+                    selected_agent=selected_agent,
+                    context=step_ctx,
+                )
+                step_ctx["agent_dispatch_authorized"] = True
+                if isinstance(authorization_result, Mapping):
+                    step_ctx["permission_decision"] = str(
+                        authorization_result.get("decision")
+                        or ("ALLOW" if authorization_result.get("allowed") else "DENY")
+                    ).upper()
+                else:
+                    step_ctx["permission_decision"] = "ALLOW"
+            except Exception as exc:  # noqa: BLE001 - classify policy verdict
+                governed = self._policy_failure_result(step, selected_agent, exc)
+                if governed is not None:
+                    return governed
+                raise
+        else:
+            step_ctx["permission_decision"] = "NOT_ENFORCED"
+
         # Idempotency + crash-safety for side-effect steps: a single ATOMIC
         # claim replaces the old separate get()+put(STARTED) so two instances
         # can never both execute the same side effect.
@@ -1275,6 +1373,8 @@ class TaskScheduler:
                     selected_agent,
                     "needs reconciliation: side-effect claimed by another instance or prior outcome unconfirmed",
                     external_op_id=prior.get("external_op_id"),
+                    idempotency_key=idem_key,
+                    receipt=prior,
                 )
             if claim.status == ClaimStatus.CORRUPT:
                 # Fail closed: the receipt store is unparseable so we cannot know
@@ -1299,8 +1399,32 @@ class TaskScheduler:
                 exec_result = await self._invoke(step, selected_agent, inputs, step_ctx)
             except asyncio.TimeoutError:
                 return self._needs_reconciliation(
-                    step, selected_agent, f"timeout after {step.timeout}s")
+                    step,
+                    selected_agent,
+                    f"timeout after {step.timeout}s",
+                    idempotency_key=idem_key,
+                    receipt={"claim_id": claim_id},
+                )
             except Exception as exc:  # noqa: BLE001 - indeterminate outcome
+                governed = self._policy_failure_result(step, selected_agent, exc)
+                if governed is not None:
+                    # A tool-level policy verdict may occur after the Agent has
+                    # already started a side-effect step. Keep the STARTED
+                    # receipt and require reconciliation instead of claiming
+                    # that no external effect occurred.
+                    metrics = dict(governed.metrics or {})
+                    metrics["needs_reconciliation"] = True
+                    metrics["approval_after_side_effect_start"] = bool(
+                        metrics.get("approval_required")
+                    )
+                    metrics["idempotency_key"] = idem_key
+                    metrics["receipt"] = {"claim_id": claim_id}
+                    return StepResult(
+                        step_id=step.step_id,
+                        status=StepStatus.FAILED,
+                        error=governed.error,
+                        metrics=metrics,
+                    )
                 if _is_dispatch_permission_error(exc):
                     return StepResult(
                         step_id=step.step_id,
@@ -1312,13 +1436,48 @@ class TaskScheduler:
                         },
                     )
                 return self._needs_reconciliation(
-                    step, selected_agent, f"side-effect executor error: {exc}")
+                    step,
+                    selected_agent,
+                    f"side-effect executor error: {exc}",
+                    idempotency_key=idem_key,
+                    receipt={"claim_id": claim_id},
+                )
             if not getattr(exec_result, "is_success", True):
+                exec_metadata = dict(getattr(exec_result, "metadata", {}) or {})
+                if exec_metadata.get("side_effect_started") is False:
+                    try:
+                        self.receipt_store.release_for_retry(idem_key, claim_id)
+                    except Exception as exc:  # noqa: BLE001 - uncertain release
+                        return self._needs_reconciliation(
+                            step,
+                            selected_agent,
+                            f"safe failure reported but receipt release failed: {exc}",
+                            idempotency_key=idem_key,
+                            receipt={"claim_id": claim_id},
+                        )
+                    return StepResult(
+                        step_id=step.step_id,
+                        status=StepStatus.FAILED,
+                        error=getattr(exec_result, "error", None)
+                        or "side-effect validation failed before execution",
+                        metrics={
+                            "safe_to_retry": True,
+                            "side_effect_started": False,
+                            "failure_phase": exec_metadata.get(
+                                "failure_phase", "pre_execution"
+                            ),
+                            "receipt_released": True,
+                            "idempotency_key": idem_key,
+                            "selected_agent": selected_agent,
+                        },
+                    )
                 return self._needs_reconciliation(
                     step,
                     selected_agent,
                     getattr(exec_result, "error",
                             None) or "side-effect step failed",
+                    idempotency_key=idem_key,
+                    receipt={"claim_id": claim_id},
                 )
             result: Optional[StepResult] = self._record_success(
                 step, exec_result, step_ctx, 1, selected_agent)
@@ -1346,6 +1505,7 @@ class TaskScheduler:
                     inputs,
                     retry_budget=step.retry,
                     phase="primary",
+                    on_retry=on_retry,
                 )
                 if not result.is_success:
                     return await self._maybe_redispatch_read_only(
@@ -1375,6 +1535,9 @@ class TaskScheduler:
                         },
                     )
                 except Exception as exc:  # noqa: BLE001
+                    governed = self._policy_failure_result(step, selected_agent, exc)
+                    if governed is not None:
+                        return governed
                     if _is_dispatch_permission_error(exc):
                         return StepResult(
                             step_id=step.step_id,
@@ -1415,11 +1578,27 @@ class TaskScheduler:
                 if not result.is_success:
                     return result
 
+        result.metrics.setdefault(
+            "permission_decision",
+            step_ctx.get("permission_decision", "NOT_ENFORCED"),
+        )
+
         # Completion conditions gate success; a failing predicate marks FAILED.
         passed, failed_expr = evaluate_completion(
             step.completion_conditions, result.outputs, result.metrics, "SUCCEEDED"
         )
         if not passed:
+            if idem_key is not None:
+                return self._needs_reconciliation(
+                    step,
+                    selected_agent,
+                    f"side effect returned but completion condition failed: {failed_expr}",
+                    external_op_id=(result.metrics or {}).get(
+                        "external_op_id"
+                    ),
+                    idempotency_key=idem_key,
+                    receipt={"claim_id": claim_id},
+                )
             return StepResult(
                 step_id=step.step_id,
                 status=StepStatus.FAILED,
@@ -1456,8 +1635,54 @@ class TaskScheduler:
                     f"side effect succeeded but receipt persistence failed: {exc}",
                     external_op_id=(result.metrics or {}).get(
                         "external_op_id"),
+                    idempotency_key=idem_key,
+                    receipt={"claim_id": claim_id},
                 )
         return result
+
+    @staticmethod
+    def _policy_failure_result(
+        step: TaskStep,
+        selected_agent: Optional[str],
+        exc: Exception,
+    ) -> Optional[StepResult]:
+        """Convert S-ABAC denial/review exceptions into structured results."""
+
+        payload = getattr(exc, "payload", None)
+        if not isinstance(payload, dict):
+            return None
+        policy_result = payload.get("policy_result")
+        if not isinstance(policy_result, dict):
+            return None
+
+        decision = str(policy_result.get("decision") or "DENY").upper()
+        metrics: Dict[str, Any] = {
+            "selected_agent": selected_agent,
+            "governance_decision": decision,
+        }
+        if decision == "REVIEW_REQUIRED":
+            metrics.update(
+                {
+                    "approval_required": True,
+                    "approval_payload": payload,
+                    "approval_signature": payload.get("approval_signature"),
+                }
+            )
+            error = policy_result.get("reason") or "human approval required"
+        else:
+            metrics.update(
+                {
+                    "permission_denied": True,
+                    "permission_payload": payload,
+                }
+            )
+            error = policy_result.get("reason") or "permission denied"
+        return StepResult(
+            step_id=step.step_id,
+            status=StepStatus.FAILED,
+            error=str(error),
+            metrics=metrics,
+        )
 
     def _needs_reconciliation(
         self,
@@ -1466,6 +1691,8 @@ class TaskScheduler:
         error: str,
         *,
         external_op_id: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
+        receipt: Optional[Dict[str, Any]] = None,
     ) -> StepResult:
         """A side effect with an unconfirmed outcome: FAILED + needs_reconciliation.
 
@@ -1480,6 +1707,8 @@ class TaskScheduler:
                 "needs_reconciliation": True,
                 "selected_agent": selected_agent,
                 "external_op_id": external_op_id,
+                "idempotency_key": idempotency_key,
+                "receipt": dict(receipt or {}),
             },
         )
 

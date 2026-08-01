@@ -23,7 +23,18 @@ def test_web_keys_parallel_step_cards_by_scheduler_event_identity():
     assert "executionStepCardsByKey = new Map()" in source
     assert "const findStepCard = (data = {})" in source
     assert "data.agent_id, data.step_id" in source
+    assert 'if (existing.status === "running")' in source
+    assert "executionStepCardsByKey.delete(normalizedKey)" in source
     assert "finalizeStepCard(findStepCard(data) || currentStepCard)" in source
+
+
+def test_legacy_workflow_emits_unique_identity_for_each_node_execution():
+    process_source = (
+        Path(__file__).resolve().parents[1] / "src" / "workflow" / "process.py"
+    ).read_text(encoding="utf-8")
+
+    assert 'node_event_id = f"{workflow_id}_{original_node_name}_{step_count}"' in process_source
+    assert process_source.count('"agent_id": node_event_id') == 2
 
 
 def test_web_handles_all_scheduler_terminal_statuses():
@@ -34,6 +45,7 @@ def test_web_handles_all_scheduler_terminal_statuses():
         "FAILED",
         "PARTIAL_FAILED",
         "CLARIFY_REQUIRED",
+        "APPROVAL_REQUIRED",
         "REJECTED",
         "NEEDS_RECONCILIATION",
     ):
@@ -86,4 +98,27 @@ def test_web_renders_terminal_failure_and_blocked_step_summary():
     assert "workflowData.blocked_steps" in source
     assert "renderWorkflowFailureSummaryInto(workflowFailureSummary, frag)" in source
     assert 'section.setAttribute("aria-label", "工作流失败摘要")' in source
+def test_web_routes_reconciliation_to_security_queue():
+    source = _source()
+
+    assert 'eventName === "reconciliation_required"' in source
+    assert "Security → 人工核对队列" in source
+    security_source = (
+        Path(__file__).resolve().parents[1] / "web" / "security.js"
+    ).read_text(encoding="utf-8")
+    assert "/api/security/reconciliations?requester_id=" in security_source
+    for decision in ("retry", "succeeded", "freeze", "terminate"):
+        assert f'data-decision="{decision}"' in security_source
+
+
+def test_clear_conversation_cascades_backend_history_before_local_storage():
+    source = _source()
+
+    assert 'fetch(`/api/tasks/${encodeURIComponent(taskId)}?${query}`' in source
+    assert 'fetch(`/api/conversation-history?${query}`' in source
+    fetch_index = source.index('fetch(`/api/conversation-history?${query}`')
+    local_delete_index = source.index(
+        "localStorage.removeItem(getChatHistoryKey(userId))"
+    )
+    assert fetch_index < local_delete_index
 

@@ -355,6 +355,50 @@ class ReceiptStore:
         receipt.setdefault("claim_id", claim_id)
         self.put(key, receipt)
 
+    def release_for_retry(self, key: str, claim_id: Optional[str] = None) -> None:
+        """Release an unconfirmed STARTED claim after a human confirms no effect."""
+        existing = self._receipts.get(key)
+        if not isinstance(existing, dict):
+            raise KeyError(f"receipt not found: {key}")
+        if existing.get("status") != "STARTED":
+            raise ValueError(
+                f"receipt is not releasable in status={existing.get('status')}"
+            )
+        owner = existing.get("claim_id")
+        if claim_id and owner and owner != claim_id:
+            raise ReceiptClaimMismatch(
+                f"claim id mismatch for {key}: {owner!r} != {claim_id!r}"
+            )
+        del self._receipts[key]
+
+    def confirm_succeeded(
+        self,
+        key: str,
+        *,
+        claim_id: Optional[str],
+        external_operation_id: str,
+        outputs: Optional[Dict[str, Any]] = None,
+        operator: str = "",
+    ) -> None:
+        """Turn an uncertain STARTED receipt into a human-confirmed success."""
+        if not str(external_operation_id or "").strip():
+            raise ValueError("external_operation_id is required")
+        existing = self._receipts.get(key)
+        if not isinstance(existing, dict):
+            raise KeyError(f"receipt not found: {key}")
+        self.complete(
+            key,
+            claim_id,
+            {
+                **existing,
+                "status": "SUCCEEDED",
+                "external_op_id": str(external_operation_id),
+                "outputs": dict(outputs or {}),
+                "confirmed_by": operator,
+                "timestamp": time.time(),
+            },
+        )
+
 
 def _json_default(obj: Any) -> Any:
     """Serialize pydantic models (e.g. ArtifactRef) inside a receipt."""
@@ -565,3 +609,59 @@ class PersistentReceiptStore(ReceiptStore):
                 self._load()
                 self._receipts[key] = receipt
                 self._flush()
+
+    def release_for_retry(self, key: str, claim_id: Optional[str] = None) -> None:
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        with self._lock:
+            with _FileLock(self._path):
+                data = self._read_strict()
+                existing = data.get(key)
+                if not isinstance(existing, dict):
+                    raise KeyError(f"receipt not found: {key}")
+                if existing.get("status") != "STARTED":
+                    raise ValueError(
+                        f"receipt is not releasable in status={existing.get('status')}"
+                    )
+                owner = existing.get("claim_id")
+                if claim_id and owner and owner != claim_id:
+                    raise ReceiptClaimMismatch(
+                        f"claim id mismatch for {key}: {owner!r} != {claim_id!r}"
+                    )
+                del data[key]
+                self._flush_data(data)
+                self._receipts = data
+
+    def confirm_succeeded(
+        self,
+        key: str,
+        *,
+        claim_id: Optional[str],
+        external_operation_id: str,
+        outputs: Optional[Dict[str, Any]] = None,
+        operator: str = "",
+    ) -> None:
+        if not str(external_operation_id or "").strip():
+            raise ValueError("external_operation_id is required")
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        with self._lock:
+            with _FileLock(self._path):
+                data = self._read_strict()
+                existing = data.get(key)
+                if not isinstance(existing, dict):
+                    raise KeyError(f"receipt not found: {key}")
+                owner = existing.get("claim_id")
+                if claim_id and owner and owner != claim_id:
+                    raise ReceiptClaimMismatch(
+                        f"claim id mismatch for {key}: {owner!r} != {claim_id!r}"
+                    )
+                succeeded = {
+                    **existing,
+                    "status": "SUCCEEDED",
+                    "external_op_id": str(external_operation_id),
+                    "outputs": dict(outputs or {}),
+                    "confirmed_by": operator,
+                    "timestamp": time.time(),
+                }
+                data[key] = succeeded
+                self._flush_data(data)
+                self._receipts = data

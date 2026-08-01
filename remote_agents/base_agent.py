@@ -3,6 +3,7 @@
 
 from typing import Any, Dict, List, Optional
 from abc import ABC, abstractmethod
+from contextvars import ContextVar, Token
 import logging
 
 from src.contracts.agent_contract import AgentContract
@@ -14,6 +15,38 @@ from src.contracts.agent_result import (
 )
 
 logger = logging.getLogger(__name__)
+
+_authorized_remote_tools: ContextVar[Optional[frozenset[str]]] = ContextVar(
+    "authorized_remote_tools", default=None
+)
+
+
+def bind_authorized_remote_tools(context: Dict[str, Any]) -> Token:
+    """Bind a request-scoped platform authorization manifest."""
+
+    raw = context.get("authorized_remote_tools")
+    if not isinstance(raw, list) or not raw:
+        return _authorized_remote_tools.set(None)
+    names = {
+        str(item.get("tool_name") or "")
+        for item in raw
+        if isinstance(item, dict) and item.get("tool_name")
+    }
+    return _authorized_remote_tools.set(frozenset(names))
+
+
+def reset_authorized_remote_tools(token: Token) -> None:
+    _authorized_remote_tools.reset(token)
+
+
+class RemoteToolExecutionError(RuntimeError):
+    """Tool failure carrying machine-readable side-effect phase metadata."""
+
+    def __init__(self, tool_name: str, result: Dict[str, Any]):
+        detail = result.get("error") or result.get("message") or "unknown tool error"
+        super().__init__(f"Tool {tool_name} failed: {detail}")
+        self.tool_name = tool_name
+        self.tool_result = dict(result)
 
 
 class BaseRemoteAgent(ABC):
@@ -118,6 +151,12 @@ class BaseRemoteAgent(ABC):
         """
         import httpx
 
+        allowed_tools = _authorized_remote_tools.get()
+        if allowed_tools is not None and tool_name not in allowed_tools:
+            raise PermissionError(
+                f"Remote tool '{tool_name}' is outside the platform-authorized manifest"
+            )
+
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(timeout, read=timeout)) as client:
                 resp = await client.post(
@@ -133,8 +172,7 @@ class BaseRemoteAgent(ABC):
                         f"Tool {tool_name} returned an invalid result payload"
                     )
                 if str(result.get("status") or "").lower() in {"error", "failed"}:
-                    detail = result.get("error") or result.get("message") or "unknown tool error"
-                    raise RuntimeError(f"Tool {tool_name} failed: {detail}")
+                    raise RemoteToolExecutionError(tool_name, result)
                 logger.info(f"Tool {tool_name} executed successfully")
                 return result
         except httpx.TimeoutException as exc:

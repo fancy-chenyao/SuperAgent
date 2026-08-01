@@ -22,6 +22,12 @@ class HookPoint(Enum):
     """钩子触发点。"""
     NODE_START = "node_start"       # 节点开始前
     NODE_END = "node_end"           # 节点结束后
+    STEP_START = "step_start"       # Scheduler 步骤开始
+    STEP_END = "step_end"           # Scheduler 步骤完成
+    STEP_FAILED = "step_failed"     # Scheduler 步骤失败
+    PERMISSION_DENIED = "permission_denied"
+    PERSISTENCE_FAILED = "persistence_failed"
+    RECONCILIATION_REQUIRED = "reconciliation_required"
     WORKFLOW_END = "workflow_end"   # 工作流结束
     ERROR = "error"                 # 异常发生时
 
