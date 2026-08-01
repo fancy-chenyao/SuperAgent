@@ -42,6 +42,34 @@ AGENT_SCHEMA_CATALOG: dict[str, dict[str, Any]] = {
                 "type": "string",
                 "enum": ["company", "statutory", "mixed", "unknown"],
             },
+            "sources": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": [
+                        "id",
+                        "category",
+                        "source",
+                        "effective_date",
+                        "policy_scope",
+                    ],
+                    "properties": {
+                        "id": {"type": "string"},
+                        "category": {"type": "string"},
+                        "source": {"type": "string"},
+                        "effective_date": {"type": "string"},
+                        "policy_scope": {
+                            "type": "string",
+                            "enum": ["company", "statutory", "mixed", "unknown"],
+                        },
+                    },
+                },
+            },
+            "matched_items": {
+                "type": "array",
+                "items": {"type": "string"},
+            },
+            "not_found": {"type": "boolean"},
         },
     },
     "report.sources@v1": {

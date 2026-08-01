@@ -108,7 +108,9 @@ Contract v1 registers these schemas in the existing `SchemaRegistry`:
 
 - `employee.info@v1`: employee record collection, optional query and match count.
 - `employee.salary@v1`: salary record collection and match count.
-- `policy.info@v1`: query, answer, knowledge item count, and policy scope.
+- `policy.info@v1`: query, answer, knowledge item count, and policy scope. The
+  prototype may also include `sources`, `matched_items`, and `not_found` metadata
+  so a caller can show provenance and handle an empty match without guessing.
 - `report.sources@v1`: generic report sources, instruction, and title.
 - `report.markdown@v1`: title, Markdown body, and source count.
 
@@ -121,8 +123,11 @@ Statutory material must not be presented as a current internal company policy.
 salary request, `employee.salary`.
 
 `RemoteKnowledgeAgent` produces `policy.info`. The current demonstration
-knowledge base contains statutory material, so results default to
-`policy_scope=statutory` unless the tool supplies explicit provenance.
+knowledge base is stored in `assets/knowledge_base.json`; the tool performs a
+small keyword match before sending only the top matches to the LLM. Results
+default to `policy_scope=statutory` unless the tool supplies explicit provenance.
+When no item matches, the tool returns `not_found=true`, an empty `sources` list,
+and does not call the LLM.
 
 `RemoteReportAgent` requires the generic `report.sources` input and produces
 `report.markdown`. Its contract is not tied to HR-specific source names.

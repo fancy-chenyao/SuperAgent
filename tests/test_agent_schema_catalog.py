@@ -41,6 +41,32 @@ def test_policy_scope_enum_fails_closed() -> None:
     assert "expected one of" in errors[0]
 
 
+def test_policy_sources_and_not_found_metadata_are_optional_but_typed() -> None:
+    registry = register_agent_schemas(SchemaRegistry())
+    valid, errors = registry.validate(
+        {
+            "query": "报销",
+            "answer": "请提交报销单",
+            "knowledge_items_count": 1,
+            "policy_scope": "company",
+            "sources": [
+                {
+                    "id": "reimbursement_001",
+                    "category": "公司制度-费用报销",
+                    "source": "演示公司财务报销制度（模拟）",
+                    "effective_date": "2026-01-01",
+                    "policy_scope": "company",
+                }
+            ],
+            "matched_items": ["reimbursement_001"],
+            "not_found": False,
+        },
+        "policy.info@v1",
+    )
+
+    assert valid, errors
+
+
 def test_report_source_items_require_logical_name_schema_and_payload() -> None:
     registry = register_agent_schemas(SchemaRegistry())
 

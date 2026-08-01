@@ -441,6 +441,92 @@ def _load_knowledge() -> Dict[str, Any]:
     return _KNOWLEDGE_CACHE
 
 
+def _normalize_knowledge_text(value: Any) -> str:
+    """Normalize a query or indexed field for deterministic demo matching."""
+    return re.sub(r"\s+", "", str(value or "").strip().lower())
+
+
+def _knowledge_search_score(item: Dict[str, Any], query: str) -> Tuple[int, List[str]]:
+    """Score one knowledge item using its curated keywords and metadata.
+
+    The prototype intentionally uses a small deterministic matcher before the
+    LLM call.  This keeps unrelated entries out of the prompt and gives the
+    demo a reliable not-found path without adding a vector database.
+    """
+    query_text = _normalize_knowledge_text(query)
+    if not query_text:
+        return 0, []
+
+    matched_keywords: List[str] = []
+    score = 0
+    for keyword in item.get("keywords", []) or []:
+        keyword_text = _normalize_knowledge_text(keyword)
+        if len(keyword_text) >= 2 and keyword_text in query_text:
+            matched_keywords.append(str(keyword))
+            score += 4 + min(len(keyword_text), 4)
+
+    question = _normalize_knowledge_text(item.get("question"))
+    category = _normalize_knowledge_text(item.get("category"))
+    if question and question in query_text:
+        score += 8
+    if category and category in query_text:
+        score += 5
+
+    return score, matched_keywords
+
+
+def _rank_knowledge_items(
+    knowledge_items: List[Dict[str, Any]],
+    query: str,
+    limit: int = 3,
+) -> List[Tuple[Dict[str, Any], List[str]]]:
+    """Return the highest-scoring knowledge items for a user query."""
+    ranked: List[Tuple[int, str, Dict[str, Any], List[str]]] = []
+    for item in knowledge_items:
+        score, matched_keywords = _knowledge_search_score(item, query)
+        if score > 0:
+            ranked.append(
+                (score, str(item.get("id") or ""), item, matched_keywords)
+            )
+
+    ranked.sort(key=lambda entry: (-entry[0], entry[1]))
+    return [(item, matched_keywords) for _, _, item, matched_keywords in ranked[:limit]]
+
+
+def _knowledge_sources(
+    ranked_items: List[Tuple[Dict[str, Any], List[str]]],
+) -> List[Dict[str, str]]:
+    """Build compact, UI/report-friendly provenance records."""
+    sources: List[Dict[str, str]] = []
+    for item, _ in ranked_items:
+        sources.append(
+            {
+                "id": str(item.get("id") or ""),
+                "category": str(item.get("category") or ""),
+                "source": str(item.get("source") or "演示知识库"),
+                "effective_date": str(item.get("effective_date") or ""),
+                "policy_scope": str(item.get("policy_scope") or "unknown"),
+            }
+        )
+    return sources
+
+
+def _knowledge_policy_scope(
+    ranked_items: List[Tuple[Dict[str, Any], List[str]]],
+) -> str:
+    scopes = {
+        str(item.get("policy_scope") or "unknown")
+        for item, _ in ranked_items
+    }
+    scopes.discard("")
+    if not scopes:
+        return "unknown"
+    if len(scopes) == 1:
+        scope = next(iter(scopes))
+        return scope if scope in {"company", "statutory", "mixed", "unknown"} else "unknown"
+    return "mixed"
+
+
 def _flatten_text(person: Dict[str, Any]) -> str:
     parts: List[str] = []
     for value in person.values():
@@ -1635,61 +1721,82 @@ async def tool(req: ToolRequest, authorization: Optional[str] = Header(default=N
         try:
             data = _load_knowledge()
             knowledge_items = data.get("knowledge_items", [])
-            query = req.arguments.get("query", "")
+            query = str(req.arguments.get("query", "") or "").strip()
 
             if not query:
                 raise ValueError("query parameter is required")
 
-            # 使用LLM理解问题并从知识库中检索答案
-            llm = get_llm_by_type("basic")
+            ranked_items = _rank_knowledge_items(knowledge_items, query)
+            sources = _knowledge_sources(ranked_items)
+            policy_scope = _knowledge_policy_scope(ranked_items)
 
-            # 构建知识库内容字符串
-            knowledge_content = []
-            for idx, item in enumerate(knowledge_items, 1):
-                knowledge_content.append(f"[知识条目 {idx}]")
-                knowledge_content.append(f"类别: {item.get('category', '')}")
-                knowledge_content.append(f"问题: {item.get('question', '')}")
-                knowledge_content.append(f"内容:\n{item.get('content', '')}")
-                knowledge_content.append("")
+            if not ranked_items:
+                result = {
+                    "status": "success",
+                    "query": query,
+                    "answer": "知识库暂未收录与该问题直接相关的内容，请补充更具体的关键词或咨询人工服务。",
+                    "knowledge_items_count": 0,
+                    "policy_scope": "unknown",
+                    "sources": [],
+                    "matched_items": [],
+                    "not_found": True,
+                }
+                logger.info("Knowledge search found no matching item for query: %s", query)
+            else:
+                # 使用LLM基于已命中的条目组织答案，而不是把整库内容放入提示词。
+                matched_items = []
+                for index, (item, matched_keywords) in enumerate(ranked_items, 1):
+                    matched_items.append(f"[知识条目 {index}]")
+                    matched_items.append(f"编号: {item.get('id', '')}")
+                    matched_items.append(f"类别: {item.get('category', '')}")
+                    matched_items.append(f"问题: {item.get('question', '')}")
+                    matched_items.append(f"关键词命中: {', '.join(matched_keywords) or '元数据匹配'}")
+                    matched_items.append(f"来源: {item.get('source', '演示知识库')}")
+                    matched_items.append(f"生效日期: {item.get('effective_date', '')}")
+                    matched_items.append(f"适用范围: {item.get('policy_scope', 'unknown')}")
+                    matched_items.append(f"内容:\n{item.get('content', '')}")
+                    matched_items.append("")
 
-            knowledge_text = "\n".join(knowledge_content)
+                knowledge_text = "\n".join(matched_items)
+                llm = get_llm_by_type("basic")
 
-            # 构建prompt
-            prompt = f"""你是一位专业的知识库查询助手。用户提出了一个问题，请从以下知识库中找到相关信息，并生成详细的回答。
+                prompt = f"""你是一位专业的知识库查询助手。请仅根据下面已经命中的知识条目回答用户问题。
 
 # 用户问题
 {query}
 
-# 知识库内容
+# 命中的知识条目
 {knowledge_text}
 
 # 回答要求
-1. 仔细分析用户问题，理解其真实意图
-2. 从知识库中找到最相关的信息
-3. 基于知识库内容生成详细、准确的回答
-4. 如果知识库中有法律法规依据，请在回答中引用
-5. 回答应该完整、专业，包含必要的说明和注意事项
-6. 如果知识库中没有相关信息，请明确告知用户
+1. 只使用命中条目中的事实，不要补充知识库之外的具体规定
+2. 直接回答用户问题，必要时给出办理步骤或注意事项
+3. 在回答中注明相关来源；如果是公司模拟制度，明确说明“演示制度”
+4. 法规材料与公司制度必须区分，不要把法定规定表述为公司现行政策
+5. 这是原型演示知识库，涉及具体权益时提醒用户以正式制度和主管部门发布内容为准
 
-请直接输出回答内容，不要添加任何前缀或解释。"""
+请直接输出回答内容，不要添加“回答：”等前缀。"""
 
-            # 调用LLM
-            response = llm.invoke(prompt) if hasattr(llm, "invoke") else None
-            if hasattr(response, "content"):
-                answer = response.content
-            else:
-                answer = str(response) if response is not None else "无法生成回答"
+                response = llm.invoke(prompt) if hasattr(llm, "invoke") else None
+                if hasattr(response, "content"):
+                    answer = response.content
+                else:
+                    answer = str(response) if response is not None else "无法生成回答"
 
-            # 记录完整答案
-            logger.info(f"Knowledge search completed for query: {query}")
-            logger.info(f"Full answer:\n{answer}")
+                logger.info("Knowledge search completed for query: %s", query)
+                logger.info("Knowledge matches: %s", [source["id"] for source in sources])
+                logger.info("Full answer:\n%s", answer)
 
-            result = {
-                "status": "success",
-                "query": query,
-                "answer": answer,
-                "knowledge_items_count": len(knowledge_items)
-            }
+                result = {
+                    "status": "success",
+                    "query": query,
+                    "answer": answer,
+                    "knowledge_items_count": len(ranked_items),
+                    "policy_scope": policy_scope,
+                    "sources": sources,
+                    "matched_items": [source["id"] for source in sources],
+                    "not_found": False,
+                }
         except Exception as exc:
             import traceback
             result = {
