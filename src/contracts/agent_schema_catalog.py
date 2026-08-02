@@ -50,7 +50,6 @@ AGENT_SCHEMA_CATALOG: dict[str, dict[str, Any]] = {
                         "id",
                         "category",
                         "source",
-                        "effective_date",
                         "policy_scope",
                     ],
                     "properties": {
@@ -58,6 +57,8 @@ AGENT_SCHEMA_CATALOG: dict[str, dict[str, Any]] = {
                         "category": {"type": "string"},
                         "source": {"type": "string"},
                         "effective_date": {"type": "string"},
+                        "source_updated_at": {"type": "string"},
+                        "is_demo": {"type": "boolean"},
                         "policy_scope": {
                             "type": "string",
                             "enum": ["company", "statutory", "mixed", "unknown"],

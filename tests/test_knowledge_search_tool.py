@@ -25,11 +25,51 @@ def _knowledge_items() -> list[dict]:
     return json.loads(path.read_text(encoding="utf-8"))["knowledge_items"]
 
 
+def test_knowledge_base_items_have_unique_ids_and_required_metadata() -> None:
+    items = _knowledge_items()
+    required = {
+        "id",
+        "category",
+        "question",
+        "keywords",
+        "content",
+        "source",
+        "policy_scope",
+        "is_demo",
+    }
+
+    assert len(items) == 12
+    assert len({item["id"] for item in items}) == len(items)
+    for item in items:
+        assert required <= item.keys(), item.get("id")
+        assert item["policy_scope"] in {"company", "statutory"}
+        assert item["is_demo"] is True
+        assert item.get("effective_date") or item.get("source_updated_at")
+
+
 def test_knowledge_search_ranks_curated_keywords() -> None:
     ranked = tool_skill._rank_knowledge_items(_knowledge_items(), "工作十二年休几天")
 
     assert [item[0]["id"] for item in ranked] == ["annual_leave_001"]
     assert "十二年" in ranked[0][1]
+
+
+def test_specific_query_filters_weak_generic_matches() -> None:
+    ranked = tool_skill._rank_knowledge_items(
+        _knowledge_items(),
+        "个人养老金怎么缴存",
+    )
+
+    assert [item[0]["id"] for item in ranked] == ["pension_001"]
+
+
+def test_ambiguous_query_can_keep_multiple_relevant_matches() -> None:
+    ranked = tool_skill._rank_knowledge_items(_knowledge_items(), "账户怎么缴存")
+
+    assert [item[0]["id"] for item in ranked] == [
+        "pension_001",
+        "housing_fund_001",
+    ]
 
 
 def test_knowledge_search_limits_llm_context_and_returns_sources(monkeypatch) -> None:
@@ -52,6 +92,7 @@ def test_knowledge_search_limits_llm_context_and_returns_sources(monkeypatch) ->
     assert result["matched_items"] == ["reimbursement_001"]
     assert result["sources"][0]["source"] == "演示公司财务报销制度（模拟）"
     assert result["sources"][0]["policy_scope"] == "company"
+    assert result["sources"][0]["is_demo"] is True
     assert result["not_found"] is False
     assert len(fake_llm.prompts) == 1
     assert "reimbursement_001" in fake_llm.prompts[0]

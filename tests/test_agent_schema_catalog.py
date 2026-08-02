@@ -67,6 +67,33 @@ def test_policy_sources_and_not_found_metadata_are_optional_but_typed() -> None:
     assert valid, errors
 
 
+def test_policy_source_snapshot_date_does_not_require_effective_date() -> None:
+    registry = register_agent_schemas(SchemaRegistry())
+    valid, errors = registry.validate(
+        {
+            "query": "养老金",
+            "answer": "演示答案",
+            "knowledge_items_count": 1,
+            "policy_scope": "statutory",
+            "sources": [
+                {
+                    "id": "pension_001",
+                    "category": "社保-养老金",
+                    "source": "公开办事说明（演示摘录）",
+                    "source_updated_at": "2026-01-01",
+                    "policy_scope": "statutory",
+                    "is_demo": True,
+                }
+            ],
+            "matched_items": ["pension_001"],
+            "not_found": False,
+        },
+        "policy.info@v1",
+    )
+
+    assert valid, errors
+
+
 def test_report_source_items_require_logical_name_schema_and_payload() -> None:
     registry = register_agent_schemas(SchemaRegistry())
 

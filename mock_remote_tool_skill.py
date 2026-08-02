@@ -480,7 +480,7 @@ def _rank_knowledge_items(
     query: str,
     limit: int = 3,
 ) -> List[Tuple[Dict[str, Any], List[str]]]:
-    """Return the highest-scoring knowledge items for a user query."""
+    """Return relevant knowledge items without leaking weak matches into Top-K."""
     ranked: List[Tuple[int, str, Dict[str, Any], List[str]]] = []
     for item in knowledge_items:
         score, matched_keywords = _knowledge_search_score(item, query)
@@ -490,24 +490,36 @@ def _rank_knowledge_items(
             )
 
     ranked.sort(key=lambda entry: (-entry[0], entry[1]))
-    return [(item, matched_keywords) for _, _, item, matched_keywords in ranked[:limit]]
+    if not ranked:
+        return []
+
+    best_score = ranked[0][0]
+    relevance_cutoff = max(6, best_score * 0.5)
+    relevant = [entry for entry in ranked if entry[0] >= relevance_cutoff]
+    return [
+        (item, matched_keywords)
+        for _, _, item, matched_keywords in relevant[:limit]
+    ]
 
 
 def _knowledge_sources(
     ranked_items: List[Tuple[Dict[str, Any], List[str]]],
-) -> List[Dict[str, str]]:
+) -> List[Dict[str, Any]]:
     """Build compact, UI/report-friendly provenance records."""
-    sources: List[Dict[str, str]] = []
+    sources: List[Dict[str, Any]] = []
     for item, _ in ranked_items:
-        sources.append(
-            {
-                "id": str(item.get("id") or ""),
-                "category": str(item.get("category") or ""),
-                "source": str(item.get("source") or "演示知识库"),
-                "effective_date": str(item.get("effective_date") or ""),
-                "policy_scope": str(item.get("policy_scope") or "unknown"),
-            }
-        )
+        source: Dict[str, Any] = {
+            "id": str(item.get("id") or ""),
+            "category": str(item.get("category") or ""),
+            "source": str(item.get("source") or "演示知识库"),
+            "policy_scope": str(item.get("policy_scope") or "unknown"),
+            "is_demo": bool(item.get("is_demo", True)),
+        }
+        if item.get("effective_date"):
+            source["effective_date"] = str(item["effective_date"])
+        if item.get("source_updated_at"):
+            source["source_updated_at"] = str(item["source_updated_at"])
+        sources.append(source)
     return sources
 
 
@@ -1752,8 +1764,14 @@ async def tool(req: ToolRequest, authorization: Optional[str] = Header(default=N
                     matched_items.append(f"问题: {item.get('question', '')}")
                     matched_items.append(f"关键词命中: {', '.join(matched_keywords) or '元数据匹配'}")
                     matched_items.append(f"来源: {item.get('source', '演示知识库')}")
-                    matched_items.append(f"生效日期: {item.get('effective_date', '')}")
+                    if item.get("effective_date"):
+                        matched_items.append(f"生效日期: {item['effective_date']}")
+                    if item.get("source_updated_at"):
+                        matched_items.append(f"资料更新日期: {item['source_updated_at']}")
                     matched_items.append(f"适用范围: {item.get('policy_scope', 'unknown')}")
+                    matched_items.append(
+                        f"演示数据: {'是' if item.get('is_demo', True) else '否'}"
+                    )
                     matched_items.append(f"内容:\n{item.get('content', '')}")
                     matched_items.append("")
 
