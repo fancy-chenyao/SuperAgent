@@ -6,6 +6,23 @@ const readinessHint = document.getElementById("readinessHint");
 const tabs = document.querySelectorAll(".tab");
 const panels = document.querySelectorAll(".panel");
 
+const TASK_OWNER_TOKEN_KEY = "superagentTaskOwnerCapability";
+const getTaskOwnerToken = () => {
+  let token = window.localStorage.getItem(TASK_OWNER_TOKEN_KEY) || "";
+  if (!token) {
+    const bytes = new Uint8Array(32);
+    window.crypto.getRandomValues(bytes);
+    token = Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("");
+    window.localStorage.setItem(TASK_OWNER_TOKEN_KEY, token);
+  }
+  return token;
+};
+const getTaskCleanupHeaders = (includeJson = false) => ({
+  ...(includeJson ? { "Content-Type": "application/json" } : {}),
+  "X-Task-Owner-Token": getTaskOwnerToken(),
+});
+window.getTaskCleanupHeaders = getTaskCleanupHeaders;
+
 const userIdInput = document.getElementById("userId");
 const deepThinkingInput = document.getElementById("deepThinking");
 const searchBeforeInput = document.getElementById("searchBefore");
@@ -1131,7 +1148,7 @@ const clearChatHistory = async () => {
     await Promise.all(taskIds.map(async (taskId) => {
       const response = await fetch(`/api/tasks/${encodeURIComponent(taskId)}`, {
         method: "DELETE",
-        headers: window.getGovernanceAuthHeaders(false),
+        headers: window.getTaskCleanupHeaders(false),
       });
       const data = await response.json().catch(() => ({}));
       if (!response.ok && response.status !== 404) {
@@ -1142,7 +1159,7 @@ const clearChatHistory = async () => {
       const query = new URLSearchParams({ workflow_id: workflowId });
       const response = await fetch(`/api/conversation-history?${query}`, {
         method: "DELETE",
-        headers: window.getGovernanceAuthHeaders(false),
+        headers: window.getTaskCleanupHeaders(false),
       });
       const data = await response.json().catch(() => ({}));
       if (!response.ok) {
@@ -1731,7 +1748,7 @@ const runPlannerUpdate = async (instruction, appendHistory = true) => {
   try {
     const response = await fetch("/api/workflows/run", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: window.getTaskCleanupHeaders(true),
       body: JSON.stringify(payload),
       signal: plannerOnlyController.signal,
     });
@@ -3649,7 +3666,7 @@ const runWorkflow = async () => {
   try {
     const response = await fetch("/api/workflows/run", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: window.getTaskCleanupHeaders(true),
       body: JSON.stringify(payload),
       signal: currentAbortController.signal,
     });
@@ -3778,7 +3795,7 @@ const runExecution = async () => {
   try {
     const response = await fetch("/api/workflows/run", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: window.getTaskCleanupHeaders(true),
       body: JSON.stringify(payload),
       signal: currentAbortController.signal,
     });
@@ -5601,7 +5618,7 @@ const resumeTask = async () => {
   try {
     const response = await fetch("/api/tasks/resume", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: window.getTaskCleanupHeaders(true),
       body: JSON.stringify(payload),
       signal: resumeAbortController.signal,
     });
@@ -5747,7 +5764,7 @@ const deleteTaskById = async (taskId) => {
   try {
     const res = await fetch(`/api/tasks/${encodeURIComponent(taskId)}`, {
       method: "DELETE",
-      headers: window.getGovernanceAuthHeaders(false),
+      headers: window.getTaskCleanupHeaders(false),
     });
     if (!res.ok) {
       const err = await res.json();

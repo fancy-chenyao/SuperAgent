@@ -238,6 +238,49 @@ def test_side_effect_step_not_re_executed_across_resume():
     assert r2["email"].metrics.get("idempotent_reuse") is True
 
 
+def test_succeeded_receipt_missing_expected_output_is_not_reused_as_success():
+    receipts = ReceiptStore()
+    calls = {"n": 0}
+
+    async def exec_step(*, step, selected_agent, inputs, context):
+        calls["n"] += 1
+        return ExecuteResult(status=ExecutionStatus.SUCCESS, result={"message_id": "new"})
+
+    step = TaskStep(
+        step_id="email",
+        operation_mode="write",
+        preferred_resource_id="EmailAgent",
+        expected_outputs=["message_id"],
+    )
+    key = idempotency_key("T", "email", {})
+    receipts.put(
+        key,
+        {
+            "idempotency_key": key,
+            "task_id": "T",
+            "step_id": "email",
+            "agent": "EmailAgent",
+            "status": "SUCCEEDED",
+            "normalized_input": normalize_input({}),
+            "external_op_id": "mail-1",
+            "outputs": {},
+            "timestamp": 1.0,
+        },
+    )
+
+    results = asyncio.run(
+        TaskScheduler(
+            execute_step=exec_step,
+            routing_provider=StubRoutingProvider(),
+            receipt_store=receipts,
+        ).run(_graph(step), context={"task_id": "T"})
+    )
+
+    assert calls["n"] == 0
+    assert results["email"].status == StepStatus.FAILED
+    assert results["email"].metrics["receipt_output_contract_invalid"] is True
+
+
 def test_read_only_step_has_no_idempotency_receipt():
     receipts = ReceiptStore()
 

@@ -1551,6 +1551,7 @@ async def run_scheduler_workflow(
                         or ""
                     ),
                     receipt=receipt,
+                    expected_outputs=list(step.expected_outputs),
                 )
                 reconciliation_data = {
                     "reconciliation_id": reconciliation.reconciliation_id,

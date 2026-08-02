@@ -9,6 +9,14 @@ from typing import Any, Iterable
 from src.utils.path_utils import get_project_root
 
 
+class TrustedRecipientResolutionError(ValueError):
+    """A semantic recipient could not be resolved without expanding access."""
+
+
+class AmbiguousTrustedRecipientError(TrustedRecipientResolutionError):
+    """A recipient label maps to more than one trusted mailbox."""
+
+
 def _normalized(value: Any) -> str:
     return unicodedata.normalize("NFKC", str(value or "")).strip().casefold()
 
@@ -42,21 +50,43 @@ def _trusted_directory() -> list[dict[str, Any]]:
 
 
 def resolve_trusted_recipient_addresses(recipients: Any) -> list[str]:
-    """Resolve semantic recipients using only platform-controlled local data."""
+    """Resolve each recipient to exactly one platform-controlled mailbox.
 
-    requested = {_normalized(item) for item in _recipient_values(recipients)}
+    Exact directory email addresses are valid identities.  Semantic labels
+    (name or position) must resolve uniquely; returning every match for an
+    ambiguous title would silently widen the send authorization.
+    """
+
+    requested = [item for item in _recipient_values(recipients) if _normalized(item)]
     if not requested:
         return []
+    directory = _trusted_directory()
     resolved: set[str] = set()
-    for entry in _trusted_directory():
-        email = str(entry.get("email") or "").strip()
-        if not email:
-            continue
-        identities = {
-            _normalized(entry.get("name")),
-            _normalized(entry.get("position")),
-            _normalized(entry.get("alternate_position")),
-        } - {""}
-        if requested & identities:
-            resolved.add(email)
+    for raw_recipient in requested:
+        recipient = _normalized(raw_recipient)
+        email_matches = {
+            str(entry.get("email") or "").strip()
+            for entry in directory
+            if _normalized(entry.get("email")) == recipient
+            and str(entry.get("email") or "").strip()
+        }
+        matches = email_matches
+        if not matches:
+            matches = {
+                str(entry.get("email") or "").strip()
+                for entry in directory
+                if str(entry.get("email") or "").strip()
+                and recipient
+                in {
+                    _normalized(entry.get("name")),
+                    _normalized(entry.get("position")),
+                    _normalized(entry.get("alternate_position")),
+                }
+            }
+        if len(matches) > 1:
+            raise AmbiguousTrustedRecipientError(
+                f"trusted recipient is ambiguous: {raw_recipient!r} matches "
+                f"{len(matches)} mailboxes"
+            )
+        resolved.update(matches)
     return sorted(resolved, key=str.casefold)

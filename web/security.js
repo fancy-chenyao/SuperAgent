@@ -115,6 +115,7 @@ window.getGovernanceAuthHeaders = governanceAuthHeaders;
 
 async function decideSecurityReconciliation(reconciliationId, decision) {
     let externalOperationId = "";
+    let outputs = {};
     if (decision === "succeeded") {
         externalOperationId = window.prompt(
             "请输入外部系统中的操作编号（例如邮件 ID、文档 ID、流水号）：",
@@ -123,6 +124,38 @@ async function decideSecurityReconciliation(reconciliationId, decision) {
         if (externalOperationId === null) return null;
         if (!externalOperationId.trim()) {
             throw new Error("确认成功必须填写外部操作编号");
+        }
+    }
+    if (decision === "succeeded") {
+        const reconciliation = secReconciliations.find(
+            (item) => item.reconciliation_id === reconciliationId
+        );
+        const expectedOutputs = Array.isArray(reconciliation?.expected_outputs)
+            ? reconciliation.expected_outputs.filter(Boolean)
+            : [];
+        if (expectedOutputs.length) {
+            const suggested = Object.fromEntries(
+                expectedOutputs.map((name) => [name, externalOperationId.trim()])
+            );
+            const rawOutputs = window.prompt(
+                `请确认输出 Contract（必填：${expectedOutputs.join(", ")}），格式为 JSON：`,
+                JSON.stringify(suggested)
+            );
+            if (rawOutputs === null) return null;
+            try {
+                outputs = JSON.parse(rawOutputs);
+            } catch (_error) {
+                throw new Error("输出 Contract 必须是有效的 JSON 对象");
+            }
+            if (!outputs || Array.isArray(outputs) || typeof outputs !== "object") {
+                throw new Error("输出 Contract 必须是 JSON 对象");
+            }
+            const missing = expectedOutputs.filter(
+                (name) => !(name in outputs) || outputs[name] === null
+            );
+            if (missing.length) {
+                throw new Error(`输出 Contract 缺少必填项：${missing.join(", ")}`);
+            }
         }
     }
     const prompts = {
@@ -141,6 +174,7 @@ async function decideSecurityReconciliation(reconciliationId, decision) {
             body: JSON.stringify({
                 comment,
                 external_operation_id: externalOperationId.trim(),
+                outputs,
             }),
         }
     );

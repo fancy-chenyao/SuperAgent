@@ -82,6 +82,18 @@ def _find_argument(arguments: Dict[str, Any], aliases: tuple[str, ...]) -> tuple
     return False, None
 
 
+def _find_all_arguments(
+    arguments: Dict[str, Any], aliases: tuple[str, ...]
+) -> list[Any]:
+    """Return every alias value, including nested values, for conflict checks."""
+
+    values = [arguments[key] for key in aliases if key in arguments]
+    for value in arguments.values():
+        if isinstance(value, dict):
+            values.extend(_find_all_arguments(value, aliases))
+    return values
+
+
 def _arguments_match_authorization(
     tool_name: str,
     expected: Dict[str, Any],
@@ -91,17 +103,43 @@ def _arguments_match_authorization(
     for key in keys:
         aliases = _SECURITY_ARGUMENT_ALIASES[key]
         expected_found, expected_value = _find_argument(expected, aliases)
-        actual_found, actual_value = _find_argument(actual, aliases)
-        if expected_found != actual_found:
+        actual_values = _find_all_arguments(actual, aliases)
+        if expected_found != bool(actual_values):
             return False
         if not expected_found:
             continue
         plural = key in {"recipient", "recipients", "resolved_recipient_addresses"}
-        if _normalize_security_value(expected_value, plural=plural) != _normalize_security_value(
-            actual_value, plural=plural
-        ):
-            return False
+        normalized_expected = _normalize_security_value(expected_value, plural=plural)
+        for actual_value in actual_values:
+            if normalized_expected != _normalize_security_value(
+                actual_value, plural=plural
+            ):
+                return False
     return True
+
+
+def _canonical_authorized_arguments(
+    tool_name: str,
+    expected: Dict[str, Any],
+    actual: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Build the outbound arguments from the validated trusted boundary."""
+
+    outbound = dict(actual)
+    if tool_name == "remote_email_tool":
+        found, addresses = _find_argument(
+            expected, _SECURITY_ARGUMENT_ALIASES["resolved_recipient_addresses"]
+        )
+        normalized = _normalize_security_value(addresses, plural=True) if found else ()
+        if not normalized:
+            raise PermissionError(
+                "Remote email has no uniquely resolved platform-authorized recipient"
+            )
+        # The downstream tool consumes ``to``.  Never forward a model-supplied
+        # alias after validation; write the platform-resolved value instead.
+        outbound["to"] = ",".join(normalized)
+        outbound.pop("resolved_recipient_addresses", None)
+    return outbound
 
 
 def bind_authorized_remote_tools(context: Dict[str, Any]) -> Token:
@@ -248,19 +286,29 @@ class BaseRemoteAgent(ABC):
             raise PermissionError(
                 f"Remote tool '{tool_name}' is outside the platform-authorized manifest"
             )
-        if not isinstance(arguments, dict) or not any(
-            _arguments_match_authorization(tool_name, expected, arguments)
-            for expected in matching_entries
-        ):
+        matching_expected = None
+        if isinstance(arguments, dict):
+            matching_expected = next(
+                (
+                    expected
+                    for expected in matching_entries
+                    if _arguments_match_authorization(tool_name, expected, arguments)
+                ),
+                None,
+            )
+        if matching_expected is None:
             raise PermissionError(
                 f"Remote tool '{tool_name}' arguments do not match the platform-authorized manifest"
             )
+        outbound_arguments = _canonical_authorized_arguments(
+            tool_name, matching_expected, arguments
+        )
 
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(timeout, read=timeout)) as client:
                 resp = await client.post(
                     tool_service_url,
-                    json={"tool": tool_name, "arguments": arguments},
+                    json={"tool": tool_name, "arguments": outbound_arguments},
                     headers={"Content-Type": "application/json"},
                 )
                 resp.raise_for_status()

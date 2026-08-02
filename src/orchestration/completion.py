@@ -185,6 +185,15 @@ def normalize_input(inputs: Any) -> str:
         return str(inputs)
 
 
+def missing_receipt_outputs(outputs: Any, expected_outputs: Iterable[str]) -> list[str]:
+    """Return required logical outputs absent from a receipt payload."""
+
+    required = [str(name) for name in expected_outputs if str(name)]
+    if not isinstance(outputs, dict):
+        return required
+    return [name for name in required if name not in outputs or outputs[name] is None]
+
+
 def idempotency_key(task_id: str, step_id: str, inputs: Any) -> str:
     """Stable key: ``sha256(task_id | step_id | normalized_input)``."""
     return _key_from_normalized(task_id, step_id, normalize_input(inputs))

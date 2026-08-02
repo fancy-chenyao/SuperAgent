@@ -10,6 +10,10 @@ from remote_agents.base_agent import (
     reset_authorized_remote_tools,
 )
 from src.security.remote_tool_gate import required_remote_tool_authorizations
+from src.security.trusted_recipients import (
+    AmbiguousTrustedRecipientError,
+    resolve_trusted_recipient_addresses,
+)
 
 
 def test_every_registered_remote_tool_has_security_attributes():
@@ -215,6 +219,77 @@ def test_email_dispatch_accepts_trusted_name_to_email_resolution(monkeypatch):
             ))
     finally:
         reset_authorized_remote_tools(token)
+
+
+def test_email_dispatch_rejects_conflicting_authorized_and_forwarded_recipient(
+    monkeypatch,
+):
+    """Every recipient-shaped field must agree with the trusted manifest."""
+
+    import httpx
+
+    forwarded = []
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"result": {"status": "success", "message_id": "mail-1"}}
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, *_args, **kwargs):
+            forwarded.append(kwargs["json"]["arguments"])
+            return FakeResponse()
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **_kwargs: FakeClient())
+    token = bind_authorized_remote_tools(
+        {
+            "authorized_remote_tools": [
+                {
+                    "tool_name": "remote_email_tool",
+                    "arguments": {
+                        "resolved_recipient_addresses": ["limishu@ccb.com"],
+                    },
+                }
+            ]
+        }
+    )
+    try:
+        with pytest.raises(PermissionError, match="arguments do not match"):
+            asyncio.run(
+                BaseRemoteAgent.call_tool(
+                    object(),
+                    "remote_email_tool",
+                    {
+                        "resolved_recipient_addresses": ["limishu@ccb.com"],
+                        "to": "attacker@example.com",
+                        "subject": "report",
+                        "body": "content",
+                    },
+                )
+            )
+    finally:
+        reset_authorized_remote_tools(token)
+
+    assert forwarded == []
+
+
+def test_trusted_recipient_accepts_exact_directory_email():
+    assert resolve_trusted_recipient_addresses("limishu@ccb.com") == [
+        "limishu@ccb.com"
+    ]
+
+
+def test_trusted_recipient_rejects_ambiguous_position():
+    with pytest.raises(AmbiguousTrustedRecipientError, match="ambiguous"):
+        resolve_trusted_recipient_addresses("综合处处长")
 
 
 def test_remote_agent_rejects_tool_outside_request_manifest():

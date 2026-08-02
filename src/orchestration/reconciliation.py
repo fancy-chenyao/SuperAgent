@@ -14,7 +14,7 @@ from typing import Any, Optional
 
 from src.utils.path_utils import get_project_root
 from src.utils.file_lock import FileLock
-from src.orchestration.completion import ReceiptClaimMismatch
+from src.orchestration.completion import ReceiptClaimMismatch, missing_receipt_outputs
 
 
 @dataclass
@@ -34,6 +34,7 @@ class ReconciliationRequest:
     claim_id: str = ""
     external_operation_id: str = ""
     receipt: dict[str, Any] = field(default_factory=dict)
+    expected_outputs: list[str] = field(default_factory=list)
     resolution: dict[str, Any] = field(default_factory=dict)
 
 
@@ -60,6 +61,7 @@ class ReconciliationStore:
         claim_id: str = "",
         external_operation_id: str = "",
         receipt: Optional[dict[str, Any]] = None,
+        expected_outputs: Optional[list[str]] = None,
     ) -> ReconciliationRequest:
         with self._lock, FileLock(self._file_lock_path):
             self._recover_transaction_unlocked()
@@ -77,6 +79,7 @@ class ReconciliationStore:
                 idempotency_key=idempotency_key, claim_id=claim_id,
                 external_operation_id=external_operation_id,
                 receipt=dict(receipt or {}),
+                expected_outputs=list(expected_outputs or []),
             )
             self._save(request)
             return request
@@ -202,6 +205,23 @@ class ReconciliationStore:
                 else:
                     if not str(external_operation_id).strip():
                         raise ValueError("external_operation_id is required")
+                    trusted_expected = existing.get("expected_outputs")
+                    if trusted_expected is None:
+                        trusted_expected = request.expected_outputs
+                    elif request.expected_outputs and set(trusted_expected) != set(
+                        request.expected_outputs
+                    ):
+                        raise ValueError(
+                            "receipt output contract does not match reconciliation request"
+                        )
+                    missing = missing_receipt_outputs(
+                        outputs, trusted_expected or []
+                    )
+                    if missing:
+                        raise ValueError(
+                            "confirmed outputs violate the trusted output contract; "
+                            f"missing: {', '.join(missing)}"
+                        )
                     receipt_data[key] = {
                         **existing,
                         "status": "SUCCEEDED",

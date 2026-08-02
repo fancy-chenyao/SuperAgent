@@ -36,6 +36,10 @@ from src.orchestration.completion import (
 )
 from src.orchestration.reconciliation import get_reconciliation_store
 from src.security.approval import get_approval_store
+from src.security.cleanup_capabilities import (
+    CleanupCapabilityError,
+    get_cleanup_capability_store,
+)
 from config.s_abac_demo_users import get_demo_user, list_demo_users, get_user_available_agents
 from config.s_abac_config import (
     AGENT_SECURITY_ATTRIBUTES,
@@ -160,6 +164,44 @@ def _authenticate_governance_operator(
     actor_id = str(GOVERNANCE_ADMIN_ACTOR_ID or "").strip()
     _require_governance_reviewer(actor_id)
     return actor_id
+
+
+def _authorize_runtime_cleanup(
+    *,
+    task_id: str = "",
+    workflow_id: str = "",
+    owner_token: str = "",
+    authorization: str = "",
+) -> str:
+    """Accept a resource-owner capability or a governance-admin credential."""
+
+    capabilities = get_cleanup_capability_store()
+    if task_id and capabilities.authorize_task(task_id, owner_token):
+        return "task_owner"
+    if workflow_id and capabilities.authorize_workflow(workflow_id, owner_token):
+        return "workflow_owner"
+    if authorization:
+        return _authenticate_governance_operator(authorization)
+    raise HTTPException(
+        status_code=401,
+        detail="runtime cleanup authentication failed",
+    )
+
+
+def _bind_runtime_cleanup_capability(
+    *, token: str, user_id: str, workflow_id: str, task_id: str = ""
+) -> None:
+    if not token or not workflow_id:
+        return
+    try:
+        get_cleanup_capability_store().bind(
+            token=token,
+            user_id=user_id,
+            workflow_id=workflow_id,
+            task_id=task_id,
+        )
+    except CleanupCapabilityError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
 
 
 def _task_record_owner_ids(task_id: str) -> set[str]:
@@ -676,14 +718,34 @@ def create_app() -> FastAPI:
     @app.post("/api/workflows/run")
     async def run_workflow(request: Request, body: AgentRequest):
         server = Server()
+        cleanup_token = str(request.headers.get("X-Task-Owner-Token") or "")
+        if body.workflow_id:
+            _bind_runtime_cleanup_capability(
+                token=cleanup_token,
+                user_id=body.user_id,
+                workflow_id=body.workflow_id,
+            )
 
         async def event_stream() -> AsyncGenerator[str, None]:
             active_task_id: Optional[str] = None
+            bound_records: set[tuple[str, str]] = set()
             disconnected = False
             try:
                 async for event in server._run_agent_workflow(body):
                     event_data = event.get("data") or {}
                     active_task_id = event_data.get("task_id") or active_task_id
+                    active_workflow_id = str(
+                        event_data.get("workflow_id") or body.workflow_id or ""
+                    )
+                    binding = (active_workflow_id, str(active_task_id or ""))
+                    if cleanup_token and active_workflow_id and binding not in bound_records:
+                        _bind_runtime_cleanup_capability(
+                            token=cleanup_token,
+                            user_id=body.user_id,
+                            workflow_id=active_workflow_id,
+                            task_id=str(active_task_id or ""),
+                        )
+                        bound_records.add(binding)
                     if await request.is_disconnected():
                         disconnected = True
                         break
@@ -1243,11 +1305,17 @@ def create_app() -> FastAPI:
     @app.delete("/api/tasks/{task_id}")
     async def delete_task(
         task_id: str,
-        _operator: str = Depends(_authenticate_governance_operator),
+        authorization: Optional[str] = Header(default=None),
+        x_task_owner_token: Optional[str] = Header(default=None),
     ):
         """
         Delete a task's operational history and Security queue records.
         """
+        _authorize_runtime_cleanup(
+            task_id=task_id,
+            owner_token=str(x_task_owner_token or ""),
+            authorization=str(authorization or ""),
+        )
         try:
             deleted = _delete_task_runtime_records(task_id)
             if not any(deleted.values()):
@@ -1255,6 +1323,7 @@ def create_app() -> FastAPI:
                     status_code=404,
                     detail=f"Task runtime records not found: {task_id}",
                 )
+            get_cleanup_capability_store().delete_task_binding(task_id)
             return {
                 "result": "success",
                 "task_id": task_id,
@@ -1269,7 +1338,8 @@ def create_app() -> FastAPI:
     @app.delete("/api/conversation-history")
     async def delete_conversation_history(
         workflow_id: str,
-        _operator: str = Depends(_authenticate_governance_operator),
+        authorization: Optional[str] = Header(default=None),
+        x_task_owner_token: Optional[str] = Header(default=None),
     ):
         """Remove orphan Security records for a deleted browser conversation.
 
@@ -1280,6 +1350,11 @@ def create_app() -> FastAPI:
         owner_id, _ = _parse_workflow_id(workflow_id)
         if not owner_id:
             raise HTTPException(status_code=400, detail="invalid workflow id")
+        _authorize_runtime_cleanup(
+            workflow_id=workflow_id,
+            owner_token=str(x_task_owner_token or ""),
+            authorization=str(authorization or ""),
+        )
 
         # Older browser history entries did not persist exact task ids. Remove
         # their workflow-scoped queue cards, but do not guess which task logs
@@ -1292,6 +1367,7 @@ def create_app() -> FastAPI:
                 workflow_id=workflow_id,
             ),
         }
+        get_cleanup_capability_store().delete_workflow_binding(workflow_id)
 
         return {
             "result": "success",

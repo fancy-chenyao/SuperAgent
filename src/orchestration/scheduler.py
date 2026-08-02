@@ -37,6 +37,7 @@ from src.orchestration.completion import (
     ReceiptStore,
     evaluate_completion,
     idempotency_key,
+    missing_receipt_outputs,
     normalize_input,
 )
 from src.orchestration.providers import RoutingProvider, RoutingResult
@@ -1346,6 +1347,7 @@ class TaskScheduler:
                     "agent": selected_agent,
                     "status": "STARTED",
                     "normalized_input": normalize_input(inputs),
+                    "expected_outputs": list(step.expected_outputs),
                     "external_op_id": None,
                     "timestamp": time.time(),
                 },
@@ -1353,6 +1355,25 @@ class TaskScheduler:
             if claim.status == ClaimStatus.SUCCEEDED:
                 # Confirmed prior success: never re-run the side effect.
                 prior = claim.receipt or {}
+                missing_outputs = missing_receipt_outputs(
+                    prior.get("outputs"), step.expected_outputs
+                )
+                if missing_outputs:
+                    return StepResult(
+                        step_id=step.step_id,
+                        status=StepStatus.FAILED,
+                        error=(
+                            "succeeded receipt violates the trusted output contract; "
+                            f"missing: {', '.join(missing_outputs)}"
+                        ),
+                        metrics={
+                            "idempotent_reuse": False,
+                            "selected_agent": selected_agent,
+                            "idempotency_key": idem_key,
+                            "receipt_status": "SUCCEEDED",
+                            "receipt_output_contract_invalid": True,
+                        },
+                    )
                 return StepResult(
                     step_id=step.step_id,
                     status=StepStatus.SUCCEEDED,
@@ -1622,6 +1643,7 @@ class TaskScheduler:
                         "agent": selected_agent,
                         "status": "SUCCEEDED",
                         "normalized_input": normalize_input(inputs),
+                        "expected_outputs": list(step.expected_outputs),
                         "external_op_id": (result.metrics or {}).get("external_op_id"),
                         "outputs": result.outputs,
                         "timestamp": time.time(),
