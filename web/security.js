@@ -97,8 +97,20 @@ async function loadSecurityReconciliations() {
     }
 }
 
+function governanceMutationHeaders() {
+    let token = window.sessionStorage.getItem("governanceAdminApiKey") || "";
+    if (!token) {
+        token = window.prompt("请输入治理管理员凭据：", "") || "";
+        if (!token) throw new Error("未提供治理管理员凭据");
+        window.sessionStorage.setItem("governanceAdminApiKey", token);
+    }
+    return {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${token}`,
+    };
+}
+
 async function decideSecurityReconciliation(reconciliationId, decision) {
-    const operator = document.getElementById("userId")?.value || "user";
     let externalOperationId = "";
     if (decision === "succeeded") {
         externalOperationId = window.prompt(
@@ -122,9 +134,8 @@ async function decideSecurityReconciliation(reconciliationId, decision) {
         `/api/security/reconciliations/${encodeURIComponent(reconciliationId)}/${decision}`,
         {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: governanceMutationHeaders(),
             body: JSON.stringify({
-                operator,
                 comment,
                 external_operation_id: externalOperationId.trim(),
             }),
@@ -132,6 +143,9 @@ async function decideSecurityReconciliation(reconciliationId, decision) {
     );
     const data = await response.json().catch(() => ({}));
     if (!response.ok) {
+        if (response.status === 401) {
+            window.sessionStorage.removeItem("governanceAdminApiKey");
+        }
         throw new Error(data.detail || `HTTP ${response.status}`);
     }
     await loadSecurityReconciliations();
@@ -225,7 +239,6 @@ function renderSecurityReconciliations() {
 }
 
 async function decideSecurityApproval(approvalId, decision) {
-    const approver = document.getElementById("userId")?.value || "user";
     const comment = window.prompt(
         decision === "approve" ? "审批意见（可选）" : "拒绝原因（可选）",
         ""
@@ -235,12 +248,15 @@ async function decideSecurityApproval(approvalId, decision) {
         `/api/security/approvals/${encodeURIComponent(approvalId)}/${decision}`,
         {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ approver, comment }),
+            headers: governanceMutationHeaders(),
+            body: JSON.stringify({ comment }),
         }
     );
     if (!response.ok) {
         const data = await response.json().catch(() => ({}));
+        if (response.status === 401) {
+            window.sessionStorage.removeItem("governanceAdminApiKey");
+        }
         throw new Error(data.detail || `HTTP ${response.status}`);
     }
     await loadSecurityApprovals();

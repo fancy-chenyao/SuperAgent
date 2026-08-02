@@ -90,6 +90,7 @@ class RemoteCommunicationAgent(BaseRemoteAgent):
                 contacts_result = await self.call_tool(
                     tool_name="remote_contact_query_tool",
                     arguments={"names": recipients},
+                    authorization_arguments={"recipient": recipients},
                 )
                 unresolved = contacts_result.get("unresolved_names") or []
                 contacts = contacts_result.get("contacts") or []
@@ -129,6 +130,7 @@ class RemoteCommunicationAgent(BaseRemoteAgent):
             sent = await self.call_tool(
                 tool_name="remote_email_tool",
                 arguments=email_arguments,
+                authorization_arguments={"recipient": recipients},
             )
             return {
                 "status": "success",

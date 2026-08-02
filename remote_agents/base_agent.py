@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional
 from abc import ABC, abstractmethod
 from contextvars import ContextVar, Token
 import logging
+import unicodedata
 
 from src.contracts.agent_contract import AgentContract
 from src.contracts.agent_result import (
@@ -16,23 +17,109 @@ from src.contracts.agent_result import (
 
 logger = logging.getLogger(__name__)
 
-_authorized_remote_tools: ContextVar[Optional[frozenset[str]]] = ContextVar(
-    "authorized_remote_tools", default=None
+_authorized_remote_tools: ContextVar[tuple[tuple[str, Dict[str, Any]], ...]] = ContextVar(
+    "authorized_remote_tools", default=()
 )
+
+_SECURITY_ARGUMENT_ALIASES: Dict[str, tuple[str, ...]] = {
+    "employee_name": ("employee_name", "keyword"),
+    "employee_id": ("employee_id", "employee_id_list"),
+    "recipient": ("recipient", "recipients", "names", "to"),
+    "recipients": ("recipients", "recipient", "names", "to"),
+    "document_type": ("document_type", "template_name"),
+    "date": ("date",),
+    "start_date": ("start_date",),
+    "end_date": ("end_date",),
+    "location": ("location", "destination"),
+}
+
+_TOOL_SECURITY_ARGUMENTS: Dict[str, frozenset[str]] = {
+    "remote_person_info_tool": frozenset({"employee_name", "employee_id"}),
+    "remote_salary_info_tool": frozenset({"employee_name", "employee_id"}),
+    "remote_contact_query_tool": frozenset({"recipient", "recipients"}),
+    "remote_email_tool": frozenset({"recipient", "recipients"}),
+    "remote_docx_generator_tool": frozenset({"document_type"}),
+    "query_leave_record": frozenset({"employee_name", "employee_id", "start_date", "end_date"}),
+    "save_leave_record": frozenset({"employee_name", "employee_id", "start_date", "end_date"}),
+    "query_travel_record": frozenset({"employee_name", "employee_id", "start_date", "end_date", "location"}),
+    "save_travel_record": frozenset({"employee_name", "employee_id", "start_date", "end_date", "location"}),
+    "get_calendar_events_tool": frozenset({"date", "start_date", "end_date"}),
+    "create_calendar_event_tool": frozenset({"date", "start_date", "end_date", "location"}),
+    "remote_meeting_scheduling_tool": frozenset({"date", "start_date", "end_date", "location", "recipient", "recipients"}),
+}
+
+
+def _normalize_security_value(value: Any, *, plural: bool = False) -> Any:
+    if isinstance(value, str):
+        normalized = unicodedata.normalize("NFKC", value).strip().casefold()
+        if plural:
+            parts = [part.strip() for part in normalized.replace(";", ",").split(",")]
+            return tuple(sorted(part for part in parts if part))
+        return normalized
+    if isinstance(value, (list, tuple, set, frozenset)):
+        items = [_normalize_security_value(item) for item in value]
+        return tuple(sorted(items, key=repr))
+    if isinstance(value, dict):
+        return tuple(
+            sorted(
+                (str(key), _normalize_security_value(item))
+                for key, item in value.items()
+            )
+        )
+    return value
+
+
+def _find_argument(arguments: Dict[str, Any], aliases: tuple[str, ...]) -> tuple[bool, Any]:
+    for key in aliases:
+        if key in arguments:
+            return True, arguments[key]
+    for value in arguments.values():
+        if isinstance(value, dict):
+            found, nested = _find_argument(value, aliases)
+            if found:
+                return True, nested
+    return False, None
+
+
+def _arguments_match_authorization(
+    tool_name: str,
+    expected: Dict[str, Any],
+    actual: Dict[str, Any],
+) -> bool:
+    keys = _TOOL_SECURITY_ARGUMENTS.get(tool_name, frozenset())
+    for key in keys:
+        aliases = _SECURITY_ARGUMENT_ALIASES[key]
+        expected_found, expected_value = _find_argument(expected, aliases)
+        actual_found, actual_value = _find_argument(actual, aliases)
+        if expected_found != actual_found:
+            return False
+        if not expected_found:
+            continue
+        plural = key in {"recipient", "recipients"}
+        if _normalize_security_value(expected_value, plural=plural) != _normalize_security_value(
+            actual_value, plural=plural
+        ):
+            return False
+    return True
 
 
 def bind_authorized_remote_tools(context: Dict[str, Any]) -> Token:
     """Bind a request-scoped platform authorization manifest."""
 
     raw = context.get("authorized_remote_tools")
-    if not isinstance(raw, list) or not raw:
-        return _authorized_remote_tools.set(None)
-    names = {
-        str(item.get("tool_name") or "")
-        for item in raw
-        if isinstance(item, dict) and item.get("tool_name")
-    }
-    return _authorized_remote_tools.set(frozenset(names))
+    manifest: list[tuple[str, Dict[str, Any]]] = []
+    if isinstance(raw, list):
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            tool_name = str(item.get("tool_name") or "").strip()
+            arguments = item.get("arguments")
+            if tool_name and isinstance(arguments, dict):
+                manifest.append((tool_name, dict(arguments)))
+    # Missing, malformed and explicitly empty manifests all bind to an empty
+    # tuple. call_tool therefore fails closed instead of treating None as an
+    # instruction to disable the gate.
+    return _authorized_remote_tools.set(tuple(manifest))
 
 
 def reset_authorized_remote_tools(token: Token) -> None:
@@ -134,6 +221,7 @@ class BaseRemoteAgent(ABC):
         self,
         tool_name: str,
         arguments: Dict[str, Any],
+        authorization_arguments: Optional[Dict[str, Any]] = None,
         tool_service_url: str = "http://127.0.0.1:8011/tool",
         timeout: int = 10
     ) -> Any:
@@ -151,10 +239,22 @@ class BaseRemoteAgent(ABC):
         """
         import httpx
 
-        allowed_tools = _authorized_remote_tools.get()
-        if allowed_tools is not None and tool_name not in allowed_tools:
+        manifest = _authorized_remote_tools.get()
+        matching_entries = [
+            expected for authorized_tool, expected in manifest
+            if authorized_tool == tool_name
+        ]
+        if not matching_entries:
             raise PermissionError(
                 f"Remote tool '{tool_name}' is outside the platform-authorized manifest"
+            )
+        security_arguments = authorization_arguments or arguments
+        if not isinstance(security_arguments, dict) or not any(
+            _arguments_match_authorization(tool_name, expected, security_arguments)
+            for expected in matching_entries
+        ):
+            raise PermissionError(
+                f"Remote tool '{tool_name}' arguments do not match the platform-authorized manifest"
             )
 
         try:

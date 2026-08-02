@@ -1,4 +1,7 @@
 from fastapi.testclient import TestClient
+import pytest
+
+import src.service.web_app as web_app
 
 from src.orchestration.completion import (
     PersistentReceiptStore,
@@ -11,6 +14,18 @@ from src.orchestration.governance import record_governance_event
 from src.robust.task_logger import TaskLogger
 from src.security.approval import get_approval_store
 from src.service.web_app import create_app
+
+
+@pytest.fixture(autouse=True)
+def _configured_governance_identity(monkeypatch):
+    monkeypatch.setattr(web_app, "GOVERNANCE_ADMIN_API_KEY", "test-governance-key")
+    monkeypatch.setattr(web_app, "GOVERNANCE_ADMIN_ACTOR_ID", "admin")
+
+
+def _client() -> TestClient:
+    client = TestClient(create_app())
+    client.headers["Authorization"] = "Bearer test-governance-key"
+    return client
 
 
 def _approval():
@@ -40,7 +55,7 @@ def test_approval_api_lists_approves_and_exposes_resume_contract(
         "GOVERNANCE_EVENT_STORE_DIR", str(tmp_path / "governance")
     )
     approval = _approval()
-    client = TestClient(create_app())
+    client = _client()
 
     listed = client.get(
         "/api/security/approvals",
@@ -77,7 +92,7 @@ def test_approval_api_rejects_request(tmp_path, monkeypatch):
         "GOVERNANCE_EVENT_STORE_DIR", str(tmp_path / "governance")
     )
     approval = _approval()
-    client = TestClient(create_app())
+    client = _client()
 
     rejected = client.post(
         f"/api/security/approvals/{approval.approval_id}/reject",
@@ -136,7 +151,7 @@ def test_reconciliation_api_releases_receipt_then_exposes_resume(
     tmp_path, monkeypatch
 ):
     reconciliation, key = _reconciliation(tmp_path, monkeypatch)
-    client = TestClient(create_app())
+    client = _client()
 
     listed = client.get(
         "/api/security/reconciliations",
@@ -168,7 +183,7 @@ def test_reconciliation_api_confirms_success_with_external_operation_id(
     tmp_path, monkeypatch
 ):
     reconciliation, key = _reconciliation(tmp_path, monkeypatch)
-    client = TestClient(create_app())
+    client = _client()
 
     missing_id = client.post(
         (
@@ -200,7 +215,7 @@ def test_reconciliation_api_confirms_success_with_external_operation_id(
 
 def test_reconciliation_api_can_freeze_and_terminate(tmp_path, monkeypatch):
     reconciliation, key = _reconciliation(tmp_path, monkeypatch)
-    client = TestClient(create_app())
+    client = _client()
 
     frozen = client.post(
         (
@@ -282,7 +297,7 @@ def test_deleting_conversation_cascades_runtime_and_security_records(
         policy_result={"decision": "REVIEW_REQUIRED"},
     )
 
-    client = TestClient(create_app())
+    client = _client()
     response = client.delete(
         f"/api/tasks/{task_id}",
         params={"user_id": "admin"},
@@ -314,7 +329,7 @@ def test_deleting_legacy_conversation_removes_orphan_security_records_only(
         error="outcome unknown",
     )
 
-    response = TestClient(create_app()).delete(
+    response = _client().delete(
         "/api/conversation-history",
         params={"workflow_id": "u1:demo", "user_id": "u1"},
     )
@@ -333,7 +348,7 @@ def test_deleting_conversation_rejects_cross_user_cleanup(
     monkeypatch.setenv(
         "RECONCILIATION_STORE_DIR", str(tmp_path / "reconciliations")
     )
-    client = TestClient(create_app())
+    client = _client()
 
     response = client.delete(
         "/api/conversation-history",
@@ -343,7 +358,7 @@ def test_deleting_conversation_rejects_cross_user_cleanup(
     assert response.status_code == 403
 
 
-def test_governance_mutations_require_reviewer_role(tmp_path, monkeypatch):
+def test_governance_mutations_require_authenticated_server_identity(tmp_path, monkeypatch):
     monkeypatch.setenv("APPROVAL_STORE_DIR", str(tmp_path / "approvals"))
     monkeypatch.setenv(
         "RECONCILIATION_STORE_DIR", str(tmp_path / "reconciliations")
@@ -354,22 +369,22 @@ def test_governance_mutations_require_reviewer_role(tmp_path, monkeypatch):
 
     denied_approval = client.post(
         f"/api/security/approvals/{approval.approval_id}/approve",
-        json={"approver": "guest", "comment": "self approve"},
+        json={"approver": "admin", "comment": "spoofed admin"},
     )
     denied_reconciliation = client.post(
         (
             "/api/security/reconciliations/"
             f"{reconciliation.reconciliation_id}/freeze"
         ),
-        json={"operator": "hr_manager", "comment": "not a reviewer"},
+        json={"operator": "admin", "comment": "spoofed admin"},
     )
     unknown_listing = client.get(
         "/api/security/approvals",
         params={"requester_id": "not-a-demo-user"},
     )
 
-    assert denied_approval.status_code == 403
-    assert denied_reconciliation.status_code == 403
+    assert denied_approval.status_code == 401
+    assert denied_reconciliation.status_code == 401
     assert unknown_listing.status_code == 403
     assert get_approval_store().get(approval.approval_id).status == "pending"
     assert (
@@ -378,6 +393,32 @@ def test_governance_mutations_require_reviewer_role(tmp_path, monkeypatch):
         .status
         == "pending"
     )
+
+
+def test_governance_mutations_ignore_body_actor_and_record_server_actor(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("APPROVAL_STORE_DIR", str(tmp_path / "approvals"))
+    monkeypatch.setenv(
+        "RECONCILIATION_STORE_DIR", str(tmp_path / "reconciliations")
+    )
+    approval = _approval()
+    reconciliation, _ = _reconciliation(tmp_path, monkeypatch)
+    client = _client()
+
+    approved = client.post(
+        f"/api/security/approvals/{approval.approval_id}/approve",
+        json={"approver": "guest", "comment": "body actor is ignored"},
+    )
+    frozen = client.post(
+        f"/api/security/reconciliations/{reconciliation.reconciliation_id}/freeze",
+        json={"operator": "guest", "comment": "body actor is ignored"},
+    )
+
+    assert approved.status_code == 200
+    assert approved.json()["decision"]["approver"] == "admin"
+    assert frozen.status_code == 200
+    assert frozen.json()["resolution"]["operator"] == "admin"
 
 
 def test_task_cleanup_requires_owner_or_governance_reviewer(tmp_path, monkeypatch):
@@ -393,7 +434,7 @@ def test_task_cleanup_requires_owner_or_governance_reviewer(tmp_path, monkeypatc
         agent_name="RemoteEmailDispatchAgent",
         error="unknown outcome",
     )
-    client = TestClient(create_app())
+    client = _client()
 
     denied = client.delete(
         "/api/tasks/task-owned-by-hr",
@@ -414,7 +455,7 @@ def test_security_precheck_matches_static_policy_constraints(monkeypatch):
     import src.service.web_app as web_app
 
     monkeypatch.setattr(web_app, "S_ABAC_ENABLED", True)
-    client = TestClient(create_app())
+    client = _client()
 
     salary_review = client.get(
         "/api/security/tool-check",
@@ -450,7 +491,7 @@ def test_agent_precheck_enforces_user_agent_roster(monkeypatch):
     import src.service.web_app as web_app
 
     monkeypatch.setattr(web_app, "S_ABAC_ENABLED", True)
-    client = TestClient(create_app())
+    client = _client()
 
     denied = client.get(
         "/api/security/check",

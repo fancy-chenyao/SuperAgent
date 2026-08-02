@@ -62,6 +62,45 @@ def test_dag_recovery_keeps_independent_success_and_retries_downstream():
     assert set(state["skill_step_evidence"]) == {"keep"}
 
 
+def test_skipped_side_effect_descendant_does_not_block_read_failure_recovery():
+    graph = TaskGraph(
+        spec=TaskSpec(task_id="read-then-write"),
+        steps=[
+            TaskStep(
+                step_id="read",
+                preferred_resource_id="Reader",
+                operation_mode="read",
+            ),
+            TaskStep(
+                step_id="write",
+                depends_on=["read"],
+                preferred_resource_id="Writer",
+                operation_mode="write",
+            ),
+        ],
+    )
+    results = {
+        "read": StepResult(
+            step_id="read",
+            status=StepStatus.FAILED,
+            error="temporary network unavailable",
+        ),
+        "write": StepResult(
+            step_id="write",
+            status=StepStatus.SKIPPED,
+            error="dependency failed: read",
+        ),
+    }
+
+    plan = build_dag_recovery_plan(graph, results, completed_steps=set())
+
+    assert plan.automatic is True
+    assert plan.reason_code == "DAG_BRANCH_SAFE_TO_RETRY"
+    assert plan.failed_steps == ["read"]
+    assert plan.retry_steps == ["read", "write"]
+    assert set(plan.classifications) == {"read"}
+
+
 def test_reconciliation_and_permission_failures_never_auto_recover():
     for metrics in (
         {"needs_reconciliation": True},

@@ -215,6 +215,12 @@ WORKFLOW_SKILL_FAILURE_THRESHOLD = _parse_int("WORKFLOW_SKILL_FAILURE_THRESHOLD"
 WORKFLOW_SKILL_DB_PATH = os.getenv("WORKFLOW_SKILL_DB_PATH")
 WORKFLOW_SKILL_ADMIN_API_KEY = os.getenv("WORKFLOW_SKILL_ADMIN_API_KEY")
 
+# Governance mutations are privileged operations. The bearer credential
+# authenticates one server-configured principal; request bodies never choose
+# the approver/operator identity.
+GOVERNANCE_ADMIN_API_KEY = os.getenv("GOVERNANCE_ADMIN_API_KEY")
+GOVERNANCE_ADMIN_ACTOR_ID = os.getenv("GOVERNANCE_ADMIN_ACTOR_ID", "admin")
+
 if not DEBUG:
     logging.basicConfig(
         level=logging.WARNING,

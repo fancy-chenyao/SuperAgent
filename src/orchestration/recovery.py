@@ -187,11 +187,14 @@ def build_dag_recovery_plan(
 ) -> DAGRecoveryPlan:
     """Preserve independent successes and isolate the failed DAG branch."""
     smap = graph.step_map()
+    # SKIPPED nodes are consequences of an upstream failure, not independent
+    # failures. Classify only root FAILED nodes; descendants (including
+    # SKIPPED writes) are still included in retry_set below.
     failed = [
         sid
         for sid, result in results.items()
         if str(getattr(getattr(result, "status", None), "value", getattr(result, "status", "")))
-        != "SUCCEEDED"
+        == "FAILED"
     ]
     retry_set = descendants(graph, set(failed))
     order = graph.topological_order()

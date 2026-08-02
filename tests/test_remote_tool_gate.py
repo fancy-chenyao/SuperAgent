@@ -174,3 +174,90 @@ def test_remote_agent_rejects_tool_outside_request_manifest():
             )
     finally:
         reset_authorized_remote_tools(token)
+
+
+@pytest.mark.parametrize("context", [{}, {"authorized_remote_tools": []}])
+def test_remote_agent_fails_closed_for_missing_or_empty_manifest(context):
+    token = bind_authorized_remote_tools(context)
+    try:
+        with pytest.raises(PermissionError, match="outside the platform-authorized"):
+            asyncio.run(
+                BaseRemoteAgent.call_tool(
+                    object(),
+                    "remote_person_info_tool",
+                    {"keyword": "Alice"},
+                )
+            )
+    finally:
+        reset_authorized_remote_tools(token)
+
+
+def test_remote_agent_rejects_salary_arguments_changed_after_approval():
+    token = bind_authorized_remote_tools(
+        {
+            "authorized_remote_tools": [
+                {
+                    "tool_name": "remote_salary_info_tool",
+                    "arguments": {
+                        "employee_name": "Alice",
+                        "intent": "salary_query",
+                    },
+                }
+            ]
+        }
+    )
+    try:
+        with pytest.raises(PermissionError, match="arguments do not match"):
+            asyncio.run(
+                BaseRemoteAgent.call_tool(
+                    object(),
+                    "remote_salary_info_tool",
+                    {"employee_name": "Bob"},
+                )
+            )
+    finally:
+        reset_authorized_remote_tools(token)
+
+
+def test_remote_agent_accepts_normalized_bound_salary_arguments(monkeypatch):
+    import httpx
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"result": {"status": "success", "employee_name": "Alice"}}
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, *_args, **_kwargs):
+            return FakeResponse()
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **_kwargs: FakeClient())
+    token = bind_authorized_remote_tools(
+        {
+            "authorized_remote_tools": [
+                {
+                    "tool_name": "remote_salary_info_tool",
+                    "arguments": {"employee_name": " Alice ", "intent": "salary_query"},
+                }
+            ]
+        }
+    )
+    try:
+        result = asyncio.run(
+            BaseRemoteAgent.call_tool(
+                object(),
+                "remote_salary_info_tool",
+                {"employee_name": "alice"},
+            )
+        )
+        assert result["status"] == "success"
+    finally:
+        reset_authorized_remote_tools(token)

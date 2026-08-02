@@ -838,10 +838,11 @@ def _make_real_authorize_step(state: dict):
                 }
             )
 
-        if authorized_manifest:
-            exec_ctx.metadata["authorized_remote_tools"] = authorized_manifest
-            if isinstance(context, dict):
-                context["authorized_remote_tools"] = authorized_manifest
+        # Empty is a meaningful deny-all manifest. Always propagate it so an
+        # unmapped or missing intent cannot silently disable the remote gate.
+        exec_ctx.metadata["authorized_remote_tools"] = authorized_manifest
+        if isinstance(context, dict):
+            context["authorized_remote_tools"] = authorized_manifest
         return dispatch_result
 
     return _authorize_step

@@ -53,6 +53,8 @@ from src.service.env import (
     SCHEDULER_RETRY_JITTER_RATIO,
     USE_MCP_TOOLS,
     WORKFLOW_SKILL_ADMIN_API_KEY,
+    GOVERNANCE_ADMIN_API_KEY,
+    GOVERNANCE_ADMIN_ACTOR_ID,
 )
 from src.memory import get_memory_manager
 from src.memory.store import SecretDetectedError
@@ -94,12 +96,10 @@ class WorkflowSkillDistillRequest(BaseModel):
 
 
 class ApprovalDecisionRequest(BaseModel):
-    approver: str = "user"
     comment: str = ""
 
 
 class ReconciliationDecisionRequest(BaseModel):
-    operator: str = "user"
     comment: str = ""
     external_operation_id: str = ""
     outputs: dict[str, Any] = Field(default_factory=dict)
@@ -134,6 +134,32 @@ def _require_governance_reviewer(actor_id: str) -> dict[str, Any]:
             detail="governance reviewer permission required",
         )
     return profile
+
+
+def _authenticate_governance_operator(
+    authorization: Optional[str] = Header(default=None),
+) -> str:
+    """Return the server-owned governance principal for a valid credential."""
+
+    configured = str(GOVERNANCE_ADMIN_API_KEY or "")
+    if not configured:
+        raise HTTPException(
+            status_code=503,
+            detail="governance mutation credential is not configured",
+        )
+    scheme, separator, supplied = (authorization or "").partition(" ")
+    if (
+        not separator
+        or scheme.casefold() != "bearer"
+        or not hmac.compare_digest(supplied, configured)
+    ):
+        raise HTTPException(
+            status_code=401,
+            detail="governance mutation authentication failed",
+        )
+    actor_id = str(GOVERNANCE_ADMIN_ACTOR_ID or "").strip()
+    _require_governance_reviewer(actor_id)
+    return actor_id
 
 
 def _task_record_owner_ids(task_id: str) -> set[str]:
@@ -1421,12 +1447,12 @@ def create_app() -> FastAPI:
     async def approve_security_request(
         approval_id: str,
         body: ApprovalDecisionRequest,
+        operator: str = Depends(_authenticate_governance_operator),
     ):
-        _require_governance_reviewer(body.approver)
         try:
             approval = get_approval_store().approve(
                 approval_id,
-                approver=body.approver,
+                approver=operator,
                 comment=body.comment,
             )
         except FileNotFoundError as exc:
@@ -1438,12 +1464,12 @@ def create_app() -> FastAPI:
             task_id=approval.task_id,
             workflow_id=approval.workflow_id,
             step_id=approval.step_id or None,
-            subject=body.approver,
+            subject=operator,
             agent=approval.node_name,
             decision="APPROVED",
             details={
                 "approval_id": approval.approval_id,
-                "approver": body.approver,
+                "approver": operator,
                 "request_user_id": approval.user_id,
                 "comment": body.comment,
                 "resume_step": approval.resume_step,
@@ -1464,12 +1490,12 @@ def create_app() -> FastAPI:
     async def reject_security_request(
         approval_id: str,
         body: ApprovalDecisionRequest,
+        operator: str = Depends(_authenticate_governance_operator),
     ):
-        _require_governance_reviewer(body.approver)
         try:
             approval = get_approval_store().reject(
                 approval_id,
-                approver=body.approver,
+                approver=operator,
                 comment=body.comment,
             )
         except FileNotFoundError as exc:
@@ -1481,12 +1507,12 @@ def create_app() -> FastAPI:
             task_id=approval.task_id,
             workflow_id=approval.workflow_id,
             step_id=approval.step_id or None,
-            subject=body.approver,
+            subject=operator,
             agent=approval.node_name,
             decision="REJECTED",
             details={
                 "approval_id": approval.approval_id,
-                "approver": body.approver,
+                "approver": operator,
                 "request_user_id": approval.user_id,
                 "comment": body.comment,
             },
@@ -1543,9 +1569,9 @@ def create_app() -> FastAPI:
     async def retry_reconciliation(
         reconciliation_id: str,
         body: ReconciliationDecisionRequest,
+        operator: str = Depends(_authenticate_governance_operator),
     ):
         """Confirm no external effect occurred and release the receipt for retry."""
-        _require_governance_reviewer(body.operator)
         reconciliation = _load_reconciliation(reconciliation_id)
         if reconciliation.status not in {"pending", "frozen"}:
             raise HTTPException(
@@ -1568,7 +1594,7 @@ def create_app() -> FastAPI:
             reconciliation = get_reconciliation_store().resolve(
                 reconciliation_id,
                 status="retry_ready",
-                operator=body.operator,
+                operator=operator,
                 comment=body.comment,
             )
         except (
@@ -1584,12 +1610,12 @@ def create_app() -> FastAPI:
             task_id=reconciliation.task_id,
             workflow_id=reconciliation.workflow_id,
             step_id=reconciliation.step_id or None,
-            subject=body.operator,
+            subject=operator,
             agent=reconciliation.agent_name,
             decision="SAFE_TO_RETRY",
             details={
                 "reconciliation_id": reconciliation.reconciliation_id,
-                "operator": body.operator,
+                "operator": operator,
                 "request_user_id": reconciliation.user_id,
                 "comment": body.comment,
                 "receipt_released": True,
@@ -1602,9 +1628,9 @@ def create_app() -> FastAPI:
     async def confirm_reconciliation_succeeded(
         reconciliation_id: str,
         body: ReconciliationDecisionRequest,
+        operator: str = Depends(_authenticate_governance_operator),
     ):
         """Confirm the external operation succeeded and complete its receipt."""
-        _require_governance_reviewer(body.operator)
         reconciliation = _load_reconciliation(reconciliation_id)
         if reconciliation.status not in {"pending", "frozen"}:
             raise HTTPException(
@@ -1627,12 +1653,12 @@ def create_app() -> FastAPI:
                 claim_id=reconciliation.claim_id or None,
                 external_operation_id=body.external_operation_id.strip(),
                 outputs=body.outputs,
-                operator=body.operator,
+                operator=operator,
             )
             reconciliation = get_reconciliation_store().resolve(
                 reconciliation_id,
                 status="confirmed_succeeded",
-                operator=body.operator,
+                operator=operator,
                 comment=body.comment,
                 external_operation_id=body.external_operation_id.strip(),
                 outputs=body.outputs,
@@ -1650,12 +1676,12 @@ def create_app() -> FastAPI:
             task_id=reconciliation.task_id,
             workflow_id=reconciliation.workflow_id,
             step_id=reconciliation.step_id or None,
-            subject=body.operator,
+            subject=operator,
             agent=reconciliation.agent_name,
             decision="CONFIRMED_SUCCEEDED",
             details={
                 "reconciliation_id": reconciliation.reconciliation_id,
-                "operator": body.operator,
+                "operator": operator,
                 "request_user_id": reconciliation.user_id,
                 "comment": body.comment,
                 "external_operation_id": body.external_operation_id.strip(),
@@ -1668,12 +1694,12 @@ def create_app() -> FastAPI:
     async def freeze_reconciliation(
         reconciliation_id: str,
         body: ReconciliationDecisionRequest,
+        operator: str = Depends(_authenticate_governance_operator),
     ):
-        _require_governance_reviewer(body.operator)
         try:
             reconciliation = get_reconciliation_store().freeze(
                 reconciliation_id,
-                operator=body.operator,
+                operator=operator,
                 comment=body.comment,
             )
         except FileNotFoundError as exc:
@@ -1685,12 +1711,12 @@ def create_app() -> FastAPI:
             task_id=reconciliation.task_id,
             workflow_id=reconciliation.workflow_id,
             step_id=reconciliation.step_id or None,
-            subject=body.operator,
+            subject=operator,
             agent=reconciliation.agent_name,
             decision="FROZEN",
             details={
                 "reconciliation_id": reconciliation.reconciliation_id,
-                "operator": body.operator,
+                "operator": operator,
                 "request_user_id": reconciliation.user_id,
                 "comment": body.comment,
             },
@@ -1701,13 +1727,13 @@ def create_app() -> FastAPI:
     async def terminate_reconciliation(
         reconciliation_id: str,
         body: ReconciliationDecisionRequest,
+        operator: str = Depends(_authenticate_governance_operator),
     ):
-        _require_governance_reviewer(body.operator)
         try:
             reconciliation = get_reconciliation_store().resolve(
                 reconciliation_id,
                 status="terminated",
-                operator=body.operator,
+                operator=operator,
                 comment=body.comment,
             )
         except FileNotFoundError as exc:
@@ -1719,12 +1745,12 @@ def create_app() -> FastAPI:
             task_id=reconciliation.task_id,
             workflow_id=reconciliation.workflow_id,
             step_id=reconciliation.step_id or None,
-            subject=body.operator,
+            subject=operator,
             agent=reconciliation.agent_name,
             decision="TERMINATED",
             details={
                 "reconciliation_id": reconciliation.reconciliation_id,
-                "operator": body.operator,
+                "operator": operator,
                 "request_user_id": reconciliation.user_id,
                 "comment": body.comment,
                 "receipt_preserved": True,
