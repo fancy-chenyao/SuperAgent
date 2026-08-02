@@ -106,7 +106,9 @@ def test_web_routes_reconciliation_to_security_queue():
     security_source = (
         Path(__file__).resolve().parents[1] / "web" / "security.js"
     ).read_text(encoding="utf-8")
-    assert "/api/security/reconciliations?requester_id=" in security_source
+    assert 'secFetch("/api/security/reconciliations"' in security_source
+    assert "headers: governanceAuthHeaders(false)" in security_source
+    assert "requester_id=" not in security_source
     for decision in ("retry", "succeeded", "freeze", "terminate"):
         assert f'data-decision="{decision}"' in security_source
 
@@ -114,8 +116,9 @@ def test_web_routes_reconciliation_to_security_queue():
 def test_clear_conversation_cascades_backend_history_before_local_storage():
     source = _source()
 
-    assert 'fetch(`/api/tasks/${encodeURIComponent(taskId)}?${query}`' in source
+    assert 'fetch(`/api/tasks/${encodeURIComponent(taskId)}`' in source
     assert 'fetch(`/api/conversation-history?${query}`' in source
+    assert "headers: window.getGovernanceAuthHeaders(false)" in source
     fetch_index = source.index('fetch(`/api/conversation-history?${query}`')
     local_delete_index = source.index(
         "localStorage.removeItem(getChatHistoryKey(userId))"

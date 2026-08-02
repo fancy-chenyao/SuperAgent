@@ -1134,6 +1134,7 @@ def create_app() -> FastAPI:
         task_id: str,
         event_type: Optional[str] = None,
         step_id: Optional[str] = None,
+        _operator: str = Depends(_authenticate_governance_operator),
     ):
         """Return the append-only governance timeline for one task."""
         return get_governance_event_store().list(
@@ -1240,12 +1241,14 @@ def create_app() -> FastAPI:
         )
 
     @app.delete("/api/tasks/{task_id}")
-    async def delete_task(task_id: str, user_id: str):
+    async def delete_task(
+        task_id: str,
+        _operator: str = Depends(_authenticate_governance_operator),
+    ):
         """
         Delete a task's operational history and Security queue records.
         """
         try:
-            _authorize_task_cleanup(task_id, user_id)
             deleted = _delete_task_runtime_records(task_id)
             if not any(deleted.values()):
                 raise HTTPException(
@@ -1264,7 +1267,10 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=500, detail=f"Failed to delete task: {str(e)}")
 
     @app.delete("/api/conversation-history")
-    async def delete_conversation_history(workflow_id: str, user_id: str):
+    async def delete_conversation_history(
+        workflow_id: str,
+        _operator: str = Depends(_authenticate_governance_operator),
+    ):
         """Remove orphan Security records for a deleted browser conversation.
 
         A workflow id can be reused by many executions, so task runtime records
@@ -1272,11 +1278,8 @@ def create_app() -> FastAPI:
         """
 
         owner_id, _ = _parse_workflow_id(workflow_id)
-        if owner_id != user_id:
-            raise HTTPException(
-                status_code=403,
-                detail="workflow does not belong to the selected user",
-            )
+        if not owner_id:
+            raise HTTPException(status_code=400, detail="invalid workflow id")
 
         # Older browser history entries did not persist exact task ids. Remove
         # their workflow-scoped queue cards, but do not guess which task logs
@@ -1284,11 +1287,9 @@ def create_app() -> FastAPI:
         totals = {
             "reconciliations": get_reconciliation_store().delete(
                 workflow_id=workflow_id,
-                user_id=user_id,
             ),
             "approvals": get_approval_store().delete(
                 workflow_id=workflow_id,
-                user_id=user_id,
             ),
         }
 
@@ -1422,20 +1423,12 @@ def create_app() -> FastAPI:
 
     @app.get("/api/security/approvals")
     async def list_security_approvals(
-        requester_id: str,
         status: Optional[str] = None,
         workflow_id: Optional[str] = None,
         task_id: Optional[str] = None,
         user_id: Optional[str] = None,
+        _operator: str = Depends(_authenticate_governance_operator),
     ):
-        profile = _governance_actor_profile(requester_id)
-        if not _is_governance_reviewer(profile):
-            if user_id and user_id != requester_id:
-                raise HTTPException(
-                    status_code=403,
-                    detail="cannot list another user's approvals",
-                )
-            user_id = requester_id
         return get_approval_store().list(
             status=status,
             workflow_id=workflow_id,
@@ -1521,20 +1514,12 @@ def create_app() -> FastAPI:
 
     @app.get("/api/security/reconciliations")
     async def list_security_reconciliations(
-        requester_id: str,
         status: Optional[str] = None,
         task_id: Optional[str] = None,
         user_id: Optional[str] = None,
+        _operator: str = Depends(_authenticate_governance_operator),
     ):
         """List uncertain side effects that require an explicit human verdict."""
-        profile = _governance_actor_profile(requester_id)
-        if not _is_governance_reviewer(profile):
-            if user_id and user_id != requester_id:
-                raise HTTPException(
-                    status_code=403,
-                    detail="cannot list another user's reconciliations",
-                )
-            user_id = requester_id
         return get_reconciliation_store().list(
             status=status,
             task_id=task_id,
@@ -1587,13 +1572,10 @@ def create_app() -> FastAPI:
                 detail="missing idempotency key; automatic receipt release is unsafe",
             )
         try:
-            PersistentReceiptStore(reconciliation.task_id).release_for_retry(
-                reconciliation.idempotency_key,
-                reconciliation.claim_id or None,
-            )
-            reconciliation = get_reconciliation_store().resolve(
+            reconciliation = get_reconciliation_store().resolve_with_receipt(
                 reconciliation_id,
-                status="retry_ready",
+                receipt_store=PersistentReceiptStore(reconciliation.task_id),
+                decision="retry",
                 operator=operator,
                 comment=body.comment,
             )
@@ -1648,16 +1630,10 @@ def create_app() -> FastAPI:
                 detail="external_operation_id is required",
             )
         try:
-            PersistentReceiptStore(reconciliation.task_id).confirm_succeeded(
-                reconciliation.idempotency_key,
-                claim_id=reconciliation.claim_id or None,
-                external_operation_id=body.external_operation_id.strip(),
-                outputs=body.outputs,
-                operator=operator,
-            )
-            reconciliation = get_reconciliation_store().resolve(
+            reconciliation = get_reconciliation_store().resolve_with_receipt(
                 reconciliation_id,
-                status="confirmed_succeeded",
+                receipt_store=PersistentReceiptStore(reconciliation.task_id),
+                decision="succeeded",
                 operator=operator,
                 comment=body.comment,
                 external_operation_id=body.external_operation_id.strip(),

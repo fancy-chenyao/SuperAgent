@@ -28,6 +28,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional, Tuple
 
+from src.utils.file_lock import FileLock
+
 logger = logging.getLogger(__name__)
 
 
@@ -408,54 +410,6 @@ def _json_default(obj: Any) -> Any:
     return str(obj)
 
 
-class _FileLock:
-    """Coarse cross-process mutex via ``O_CREAT|O_EXCL`` on a ``.lock`` file.
-
-    Portable (works on Windows + POSIX) without extra dependencies. A stale lock
-    older than ``timeout`` is stolen so a crashed holder cannot deadlock peers.
-    """
-
-    def __init__(self, path: Path, *, timeout: float = 10.0, poll: float = 0.05) -> None:
-        self._path = Path(str(path) + ".lock")
-        self._timeout = timeout
-        self._poll = poll
-        self._fd: Optional[int] = None
-
-    def __enter__(self) -> "_FileLock":
-        start = time.time()
-        while True:
-            try:
-                self._fd = os.open(
-                    str(self._path), os.O_CREAT | os.O_EXCL | os.O_WRONLY
-                )
-                return self
-            except FileExistsError:
-                waited = time.time() - start
-                # Steal a stale lock left by a crashed holder.
-                try:
-                    age = time.time() - self._path.stat().st_mtime
-                    if age > self._timeout:
-                        os.unlink(self._path)
-                        continue
-                except OSError:
-                    pass
-                if waited > self._timeout:
-                    raise TimeoutError(f"could not acquire lock {self._path}")
-                time.sleep(self._poll)
-
-    def __exit__(self, *exc: Any) -> None:
-        try:
-            if self._fd is not None:
-                os.close(self._fd)
-        except OSError:  # pragma: no cover - best effort
-            pass
-        try:
-            if self._path.exists():
-                os.unlink(self._path)
-        except OSError:  # pragma: no cover - best effort
-            pass
-
-
 class PersistentReceiptStore(ReceiptStore):
     """File-backed receipt store that survives process restarts (Plan §9, C4).
 
@@ -553,7 +507,7 @@ class PersistentReceiptStore(ReceiptStore):
         self._path.parent.mkdir(parents=True, exist_ok=True)
         try:
             with self._lock:
-                with _FileLock(self._path):
+                with FileLock(self._path):
                     data = self._read_strict()
                     existing = data.get(key)
                     if isinstance(existing, dict):
@@ -584,7 +538,7 @@ class PersistentReceiptStore(ReceiptStore):
         """
         self._path.parent.mkdir(parents=True, exist_ok=True)
         with self._lock:
-            with _FileLock(self._path):
+            with FileLock(self._path):
                 data = self._read_strict()
                 existing = data.get(key)
                 if isinstance(existing, dict):
@@ -603,7 +557,7 @@ class PersistentReceiptStore(ReceiptStore):
 
     def put(self, key: str, receipt: Dict[str, Any]) -> None:
         with self._lock:
-            with _FileLock(self._path):
+            with FileLock(self._path):
                 # Merge the latest on-disk state so a concurrent writer's
                 # receipts are not clobbered by this write.
                 self._load()
@@ -613,7 +567,7 @@ class PersistentReceiptStore(ReceiptStore):
     def release_for_retry(self, key: str, claim_id: Optional[str] = None) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         with self._lock:
-            with _FileLock(self._path):
+            with FileLock(self._path):
                 data = self._read_strict()
                 existing = data.get(key)
                 if not isinstance(existing, dict):
@@ -644,7 +598,7 @@ class PersistentReceiptStore(ReceiptStore):
             raise ValueError("external_operation_id is required")
         self._path.parent.mkdir(parents=True, exist_ok=True)
         with self._lock:
-            with _FileLock(self._path):
+            with FileLock(self._path):
                 data = self._read_strict()
                 existing = data.get(key)
                 if not isinstance(existing, dict):

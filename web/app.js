@@ -1129,9 +1129,9 @@ const clearChatHistory = async () => {
   )];
   try {
     await Promise.all(taskIds.map(async (taskId) => {
-      const query = new URLSearchParams({ user_id: userId });
-      const response = await fetch(`/api/tasks/${encodeURIComponent(taskId)}?${query}`, {
+      const response = await fetch(`/api/tasks/${encodeURIComponent(taskId)}`, {
         method: "DELETE",
+        headers: window.getGovernanceAuthHeaders(false),
       });
       const data = await response.json().catch(() => ({}));
       if (!response.ok && response.status !== 404) {
@@ -1139,9 +1139,10 @@ const clearChatHistory = async () => {
       }
     }));
     await Promise.all(workflowIds.map(async (workflowId) => {
-      const query = new URLSearchParams({ workflow_id: workflowId, user_id: userId });
+      const query = new URLSearchParams({ workflow_id: workflowId });
       const response = await fetch(`/api/conversation-history?${query}`, {
         method: "DELETE",
+        headers: window.getGovernanceAuthHeaders(false),
       });
       const data = await response.json().catch(() => ({}));
       if (!response.ok) {
@@ -5676,7 +5677,8 @@ const loadTaskGovernance = async (taskId) => {
   governanceTimeline.textContent = "Loading...";
   try {
     const response = await fetch(
-      `/api/tasks/${encodeURIComponent(taskId)}/governance`
+      `/api/tasks/${encodeURIComponent(taskId)}/governance`,
+      { headers: window.getGovernanceAuthHeaders(false) }
     );
     if (!response.ok) throw new Error("request failed");
     const events = await response.json();
@@ -5743,10 +5745,9 @@ refreshTasksBtn.addEventListener("click", fetchTasks);
 
 const deleteTaskById = async (taskId) => {
   try {
-    const actorId = userIdInput.value.trim();
-    const query = new URLSearchParams({ user_id: actorId });
-    const res = await fetch(`/api/tasks/${encodeURIComponent(taskId)}?${query}`, {
+    const res = await fetch(`/api/tasks/${encodeURIComponent(taskId)}`, {
       method: "DELETE",
+      headers: window.getGovernanceAuthHeaders(false),
     });
     if (!res.ok) {
       const err = await res.json();

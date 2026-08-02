@@ -37,8 +37,8 @@ function formatScenarioFitSummary(fitResult) {
 
 // Security API Helpers
 
-async function secFetch(url) {
-    const resp = await fetch(url);
+async function secFetch(url, options = {}) {
+    const resp = await fetch(url, options);
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     return resp.json();
 }
@@ -74,8 +74,9 @@ async function loadSecurityPolicies() {
 async function loadSecurityApprovals() {
     const el = document.getElementById("securityApprovals");
     try {
-        const requester = document.getElementById("userId")?.value || "admin";
-        secApprovals = await secFetch(`/api/security/approvals?requester_id=${encodeURIComponent(requester)}`);
+        secApprovals = await secFetch("/api/security/approvals", {
+            headers: governanceAuthHeaders(false),
+        });
         renderSecurityApprovals();
     } catch (e) {
         if (el) {
@@ -87,8 +88,9 @@ async function loadSecurityApprovals() {
 async function loadSecurityReconciliations() {
     const el = document.getElementById("securityReconciliations");
     try {
-        const requester = document.getElementById("userId")?.value || "admin";
-        secReconciliations = await secFetch(`/api/security/reconciliations?requester_id=${encodeURIComponent(requester)}`);
+        secReconciliations = await secFetch("/api/security/reconciliations", {
+            headers: governanceAuthHeaders(false),
+        });
         renderSecurityReconciliations();
     } catch (e) {
         if (el) {
@@ -97,18 +99,19 @@ async function loadSecurityReconciliations() {
     }
 }
 
-function governanceMutationHeaders() {
+function governanceAuthHeaders(includeJson = true) {
     let token = window.sessionStorage.getItem("governanceAdminApiKey") || "";
     if (!token) {
         token = window.prompt("请输入治理管理员凭据：", "") || "";
         if (!token) throw new Error("未提供治理管理员凭据");
         window.sessionStorage.setItem("governanceAdminApiKey", token);
     }
-    return {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${token}`,
-    };
+    const headers = { "Authorization": `Bearer ${token}` };
+    if (includeJson) headers["Content-Type"] = "application/json";
+    return headers;
 }
+
+window.getGovernanceAuthHeaders = governanceAuthHeaders;
 
 async function decideSecurityReconciliation(reconciliationId, decision) {
     let externalOperationId = "";
@@ -134,7 +137,7 @@ async function decideSecurityReconciliation(reconciliationId, decision) {
         `/api/security/reconciliations/${encodeURIComponent(reconciliationId)}/${decision}`,
         {
             method: "POST",
-            headers: governanceMutationHeaders(),
+            headers: governanceAuthHeaders(),
             body: JSON.stringify({
                 comment,
                 external_operation_id: externalOperationId.trim(),
@@ -248,7 +251,7 @@ async function decideSecurityApproval(approvalId, decision) {
         `/api/security/approvals/${encodeURIComponent(approvalId)}/${decision}`,
         {
             method: "POST",
-            headers: governanceMutationHeaders(),
+            headers: governanceAuthHeaders(),
             body: JSON.stringify({ comment }),
         }
     );

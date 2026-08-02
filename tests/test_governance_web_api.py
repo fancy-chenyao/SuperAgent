@@ -342,20 +342,20 @@ def test_deleting_legacy_conversation_removes_orphan_security_records_only(
     assert get_reconciliation_store().list(task_id="legacy-task") == []
 
 
-def test_deleting_conversation_rejects_cross_user_cleanup(
+def test_deleting_conversation_rejects_unauthenticated_spoofed_admin(
     tmp_path, monkeypatch
 ):
     monkeypatch.setenv(
         "RECONCILIATION_STORE_DIR", str(tmp_path / "reconciliations")
     )
-    client = _client()
+    client = TestClient(create_app())
 
     response = client.delete(
         "/api/conversation-history",
-        params={"workflow_id": "alice:demo", "user_id": "bob"},
+        params={"workflow_id": "alice:demo", "user_id": "admin"},
     )
 
-    assert response.status_code == 403
+    assert response.status_code == 401
 
 
 def test_governance_mutations_require_authenticated_server_identity(tmp_path, monkeypatch):
@@ -385,7 +385,7 @@ def test_governance_mutations_require_authenticated_server_identity(tmp_path, mo
 
     assert denied_approval.status_code == 401
     assert denied_reconciliation.status_code == 401
-    assert unknown_listing.status_code == 403
+    assert unknown_listing.status_code == 401
     assert get_approval_store().get(approval.approval_id).status == "pending"
     assert (
         get_reconciliation_store()
@@ -421,7 +421,7 @@ def test_governance_mutations_ignore_body_actor_and_record_server_actor(
     assert frozen.json()["resolution"]["operator"] == "admin"
 
 
-def test_task_cleanup_requires_owner_or_governance_reviewer(tmp_path, monkeypatch):
+def test_task_cleanup_uses_authenticated_reviewer_not_query_identity(tmp_path, monkeypatch):
     monkeypatch.setenv(
         "RECONCILIATION_STORE_DIR", str(tmp_path / "reconciliations")
     )
@@ -434,21 +434,70 @@ def test_task_cleanup_requires_owner_or_governance_reviewer(tmp_path, monkeypatc
         agent_name="RemoteEmailDispatchAgent",
         error="unknown outcome",
     )
-    client = _client()
+    unauthenticated = TestClient(create_app())
 
-    denied = client.delete(
-        "/api/tasks/task-owned-by-hr",
-        params={"user_id": "engineer"},
-    )
-    assert denied.status_code == 403
-    assert get_reconciliation_store().get(record.reconciliation_id) is not None
-
-    deleted = client.delete(
+    denied = unauthenticated.delete(
         "/api/tasks/task-owned-by-hr",
         params={"user_id": "admin"},
     )
+    assert denied.status_code == 401
+    assert get_reconciliation_store().get(record.reconciliation_id) is not None
+
+    deleted = _client().delete(
+        "/api/tasks/task-owned-by-hr",
+        params={"user_id": "engineer"},
+    )
     assert deleted.status_code == 200
     assert get_reconciliation_store().get(record.reconciliation_id) is None
+
+
+def test_governance_reads_reject_query_parameter_identity_spoofing(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("APPROVAL_STORE_DIR", str(tmp_path / "approvals"))
+    monkeypatch.setenv(
+        "RECONCILIATION_STORE_DIR", str(tmp_path / "reconciliations")
+    )
+    monkeypatch.setenv(
+        "GOVERNANCE_EVENT_STORE_DIR", str(tmp_path / "governance")
+    )
+    _approval()
+    _reconciliation(tmp_path, monkeypatch)
+    record_governance_event("APPROVAL_REQUIRED", task_id="task-1")
+    client = TestClient(create_app())
+
+    assert client.get(
+        "/api/security/approvals", params={"requester_id": "admin"}
+    ).status_code == 401
+    assert client.get(
+        "/api/security/reconciliations", params={"requester_id": "admin"}
+    ).status_code == 401
+    assert client.get(
+        "/api/tasks/task-1/governance", params={"requester_id": "admin"}
+    ).status_code == 401
+
+
+def test_reconciliation_receipt_transaction_rolls_back_on_record_write_failure(
+    tmp_path, monkeypatch
+):
+    reconciliation, key = _reconciliation(tmp_path, monkeypatch)
+    store = get_reconciliation_store()
+    original_save = store._save
+
+    def fail_resolution_save(request):
+        if request.status == "retry_ready":
+            raise OSError("injected reconciliation write failure")
+        return original_save(request)
+
+    monkeypatch.setattr(store, "_save", fail_resolution_save)
+    response = _client().post(
+        f"/api/security/reconciliations/{reconciliation.reconciliation_id}/retry",
+        json={"comment": "confirmed absent"},
+    )
+
+    assert response.status_code == 409
+    assert PersistentReceiptStore(reconciliation.task_id).get(key)["status"] == "STARTED"
+    assert store.get(reconciliation.reconciliation_id).status == "pending"
 
 
 def test_security_precheck_matches_static_policy_constraints(monkeypatch):

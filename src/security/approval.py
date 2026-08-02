@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from src.utils.path_utils import get_project_root
+from src.utils.file_lock import FileLock
 
 
 @dataclass
@@ -70,6 +71,7 @@ class ApprovalStore:
         # Keep every read-decide-write transition atomic within the process so
         # one human approval can never be consumed twice.
         self._lock = threading.RLock()
+        self._file_lock_path = self.base_dir / ".approval-store"
 
     @staticmethod
     def signature(
@@ -108,7 +110,7 @@ class ApprovalStore:
         step_id: str = "",
     ) -> ApprovalRequest:
         signature = self.signature(subject, object, action, scenario)
-        with self._lock:
+        with self._lock, FileLock(self._file_lock_path):
             existing = self.find_active(task_id=task_id, signature=signature)
             if existing is not None:
                 return existing
@@ -169,7 +171,7 @@ class ApprovalStore:
         return ApprovalRequest(**data)
 
     def approve(self, approval_id: str, approver: str = "user", comment: str = "") -> ApprovalRequest:
-        with self._lock:
+        with self._lock, FileLock(self._file_lock_path):
             request = self._require(approval_id)
             if request.status not in {"pending", "approved"}:
                 raise ValueError(f"approval is not approvable in status={request.status}")
@@ -180,7 +182,7 @@ class ApprovalStore:
             return request
 
     def reject(self, approval_id: str, approver: str = "user", comment: str = "") -> ApprovalRequest:
-        with self._lock:
+        with self._lock, FileLock(self._file_lock_path):
             request = self._require(approval_id)
             if request.status not in {"pending", "rejected"}:
                 raise ValueError(f"approval is not rejectable in status={request.status}")
@@ -201,7 +203,7 @@ class ApprovalStore:
 
         if not any((task_id, workflow_id, user_id)):
             raise ValueError("task_id, workflow_id or user_id is required")
-        with self._lock:
+        with self._lock, FileLock(self._file_lock_path):
             removed = 0
             for item in self.list():
                 if task_id and item.get("task_id") != task_id:
@@ -222,7 +224,7 @@ class ApprovalStore:
             return removed
 
     def consume_if_approved(self, *, task_id: str, signature: str) -> Optional[ApprovalRequest]:
-        with self._lock:
+        with self._lock, FileLock(self._file_lock_path):
             approved = [
                 ApprovalRequest(**item)
                 for item in self.list(status="approved", task_id=task_id)

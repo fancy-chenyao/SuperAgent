@@ -26,6 +26,7 @@ _SECURITY_ARGUMENT_ALIASES: Dict[str, tuple[str, ...]] = {
     "employee_id": ("employee_id", "employee_id_list"),
     "recipient": ("recipient", "recipients", "names", "to"),
     "recipients": ("recipients", "recipient", "names", "to"),
+    "resolved_recipient_addresses": ("resolved_recipient_addresses", "to"),
     "document_type": ("document_type", "template_name"),
     "date": ("date",),
     "start_date": ("start_date",),
@@ -37,7 +38,7 @@ _TOOL_SECURITY_ARGUMENTS: Dict[str, frozenset[str]] = {
     "remote_person_info_tool": frozenset({"employee_name", "employee_id"}),
     "remote_salary_info_tool": frozenset({"employee_name", "employee_id"}),
     "remote_contact_query_tool": frozenset({"recipient", "recipients"}),
-    "remote_email_tool": frozenset({"recipient", "recipients"}),
+    "remote_email_tool": frozenset({"resolved_recipient_addresses"}),
     "remote_docx_generator_tool": frozenset({"document_type"}),
     "query_leave_record": frozenset({"employee_name", "employee_id", "start_date", "end_date"}),
     "save_leave_record": frozenset({"employee_name", "employee_id", "start_date", "end_date"}),
@@ -95,7 +96,7 @@ def _arguments_match_authorization(
             return False
         if not expected_found:
             continue
-        plural = key in {"recipient", "recipients"}
+        plural = key in {"recipient", "recipients", "resolved_recipient_addresses"}
         if _normalize_security_value(expected_value, plural=plural) != _normalize_security_value(
             actual_value, plural=plural
         ):
@@ -221,7 +222,6 @@ class BaseRemoteAgent(ABC):
         self,
         tool_name: str,
         arguments: Dict[str, Any],
-        authorization_arguments: Optional[Dict[str, Any]] = None,
         tool_service_url: str = "http://127.0.0.1:8011/tool",
         timeout: int = 10
     ) -> Any:
@@ -248,9 +248,8 @@ class BaseRemoteAgent(ABC):
             raise PermissionError(
                 f"Remote tool '{tool_name}' is outside the platform-authorized manifest"
             )
-        security_arguments = authorization_arguments or arguments
-        if not isinstance(security_arguments, dict) or not any(
-            _arguments_match_authorization(tool_name, expected, security_arguments)
+        if not isinstance(arguments, dict) or not any(
+            _arguments_match_authorization(tool_name, expected, arguments)
             for expected in matching_entries
         ):
             raise PermissionError(

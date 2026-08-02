@@ -11,6 +11,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping
 
+from src.security.trusted_recipients import resolve_trusted_recipient_addresses
+
 
 @dataclass(frozen=True)
 class RemoteToolAuthorization:
@@ -112,10 +114,18 @@ def required_remote_tool_authorizations(
             if tool_name in seen:
                 continue
             seen.add(tool_name)
+            arguments = _stable_arguments(profile, intent)
+            if tool_name == "remote_email_tool":
+                semantic_recipients = (
+                    arguments.get("recipients") or arguments.get("recipient")
+                )
+                arguments["resolved_recipient_addresses"] = (
+                    resolve_trusted_recipient_addresses(semantic_recipients)
+                )
             resolved.append(
                 RemoteToolAuthorization(
                     tool_name=tool_name,
-                    arguments=_stable_arguments(profile, intent),
+                    arguments=arguments,
                 )
             )
     return resolved

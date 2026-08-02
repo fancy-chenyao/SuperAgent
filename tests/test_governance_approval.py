@@ -1,4 +1,5 @@
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
 import pytest
@@ -14,7 +15,7 @@ from src.orchestration.providers import StubRoutingProvider
 from src.orchestration.reconciliation import get_reconciliation_store
 from src.orchestration.runtime import run_scheduler_workflow
 from src.orchestration.scheduler import TaskScheduler
-from src.security.approval import get_approval_store
+from src.security.approval import ApprovalStore, get_approval_store
 from src.security.enforcement import ApprovalRequiredError
 from src.security.policy import Action, Object, Scenario, Subject
 
@@ -287,6 +288,31 @@ def test_approved_request_is_consumed_once(tmp_path, monkeypatch):
         enforcement._enforce(
             subject, object_, scenario, action, context=context
         )
+
+
+def test_approved_request_is_consumed_once_across_store_instances(tmp_path):
+    base_dir = tmp_path / "approvals"
+    creator = ApprovalStore(base_dir)
+    approval = creator.create(
+        user_id="u1", workflow_id="wf-1", task_id="task-concurrent",
+        resume_step=1, node_name="A", subject={"id": "u1"},
+        object={"id": "A"}, scenario={}, action={"verb": "dispatch"},
+        policy_result={"decision": "REVIEW_REQUIRED"},
+    )
+    creator.approve(approval.approval_id, approver="admin")
+    signature = approval.signature
+    stores = [ApprovalStore(base_dir), ApprovalStore(base_dir)]
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(
+            lambda store: store.consume_if_approved(
+                task_id="task-concurrent", signature=signature
+            ),
+            stores,
+        ))
+
+    assert sum(result is not None for result in results) == 1
+    assert creator.get(approval.approval_id).status == "consumed"
 
 
 def test_governance_event_store_filters_events(tmp_path, monkeypatch):

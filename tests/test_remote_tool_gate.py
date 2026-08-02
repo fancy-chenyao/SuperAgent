@@ -155,6 +155,68 @@ def test_communication_step_authorizes_contact_lookup_and_send():
     ]
 
 
+def test_email_authorization_uses_platform_trusted_recipient_resolution():
+    resolved = required_remote_tool_authorizations(
+        agent_name="RemoteEmailDispatchAgent",
+        intents=["message_or_email_send"],
+        task_profile={"entities": {"recipient": "行长秘书"}},
+        operation_mode="send",
+    )
+
+    assert resolved[0].arguments["recipient"] == "行长秘书"
+    assert resolved[0].arguments["resolved_recipient_addresses"] == [
+        "limishu@ccb.com"
+    ]
+
+
+def test_email_dispatch_accepts_trusted_name_to_email_resolution(monkeypatch):
+    import httpx
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"result": {"status": "success", "message_id": "mail-1"}}
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, *_args, **_kwargs):
+            return FakeResponse()
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **_kwargs: FakeClient())
+    authorizations = required_remote_tool_authorizations(
+        agent_name="RemoteEmailDispatchAgent",
+        intents=["message_or_email_send"],
+        task_profile={"entities": {"recipient": "行长秘书"}},
+        operation_mode="send",
+    )
+    token = bind_authorized_remote_tools({
+        "authorized_remote_tools": [
+            {"tool_name": item.tool_name, "arguments": item.arguments}
+            for item in authorizations
+        ]
+    })
+    try:
+        result = asyncio.run(BaseRemoteAgent.call_tool(
+            object(), "remote_email_tool",
+            {"to": "limishu@ccb.com", "subject": "报告", "body": "内容"},
+        ))
+        assert result["message_id"] == "mail-1"
+        with pytest.raises(PermissionError, match="arguments do not match"):
+            asyncio.run(BaseRemoteAgent.call_tool(
+                object(), "remote_email_tool",
+                {"to": "attacker@example.com", "subject": "报告", "body": "内容"},
+            ))
+    finally:
+        reset_authorized_remote_tools(token)
+
+
 def test_remote_agent_rejects_tool_outside_request_manifest():
     token = bind_authorized_remote_tools(
         {
