@@ -5,7 +5,7 @@ import asyncio
 
 import pytest
 
-from src.interface.artifact import StepStatus
+from src.interface.artifact import ArtifactRef, StepStatus
 from src.interface.task_graph import CompletionCondition, TaskGraph, TaskSpec, TaskStep
 from src.manager.executor.base import ExecuteResult, ExecutionStatus
 from src.orchestration.completion import (
@@ -279,6 +279,50 @@ def test_succeeded_receipt_missing_expected_output_is_not_reused_as_success():
     assert calls["n"] == 0
     assert results["email"].status == StepStatus.FAILED
     assert results["email"].metrics["receipt_output_contract_invalid"] is True
+
+
+def test_human_confirmed_outputs_are_published_as_artifact_refs_on_resume():
+    receipts = ReceiptStore()
+    calls = {"n": 0}
+
+    async def exec_step(*, step, selected_agent, inputs, context):
+        calls["n"] += 1
+        return ExecuteResult(status=ExecutionStatus.SUCCESS, result={})
+
+    step = TaskStep(
+        step_id="document",
+        operation_mode="write",
+        preferred_resource_id="DocumentAgent",
+        expected_outputs=["document_id"],
+    )
+    key = idempotency_key("T", "document", {})
+    receipts.put(
+        key,
+        {
+            "idempotency_key": key,
+            "task_id": "T",
+            "step_id": "document",
+            "agent": "DocumentAgent",
+            "status": "SUCCEEDED",
+            "normalized_input": normalize_input({}),
+            "external_op_id": "doc-1",
+            "outputs": {"document_id": "doc-1"},
+            "timestamp": 1.0,
+        },
+    )
+    scheduler = TaskScheduler(
+        execute_step=exec_step,
+        routing_provider=StubRoutingProvider(),
+        receipt_store=receipts,
+    )
+
+    results = asyncio.run(scheduler.run(_graph(step), context={"task_id": "T"}))
+
+    assert calls["n"] == 0
+    assert results["document"].is_success
+    output_ref = results["document"].outputs["document_id"]
+    assert isinstance(output_ref, ArtifactRef)
+    assert scheduler.store.get(output_ref).payload == "doc-1"
 
 
 def test_read_only_step_has_no_idempotency_receipt():

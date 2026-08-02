@@ -12,6 +12,7 @@ from remote_agents.base_agent import (
 from src.security.remote_tool_gate import required_remote_tool_authorizations
 from src.security.trusted_recipients import (
     AmbiguousTrustedRecipientError,
+    UnknownTrustedRecipientError,
     resolve_trusted_recipient_addresses,
 )
 
@@ -149,7 +150,7 @@ def test_communication_step_authorizes_contact_lookup_and_send():
     resolved = required_remote_tool_authorizations(
         agent_name="RemoteCommunicationAgent",
         intents=["message_or_email_send"],
-        task_profile={"entities": {"recipient": "王经理"}},
+        task_profile={"entities": {"recipient": "行长秘书"}},
         operation_mode="send",
     )
 
@@ -290,6 +291,11 @@ def test_trusted_recipient_accepts_exact_directory_email():
 def test_trusted_recipient_rejects_ambiguous_position():
     with pytest.raises(AmbiguousTrustedRecipientError, match="ambiguous"):
         resolve_trusted_recipient_addresses("综合处处长")
+
+
+def test_trusted_recipient_rejects_entire_request_when_any_recipient_is_unknown():
+    with pytest.raises(UnknownTrustedRecipientError, match="not found"):
+        resolve_trusted_recipient_addresses(["行长秘书", "不存在"])
 
 
 def test_remote_agent_rejects_tool_outside_request_manifest():

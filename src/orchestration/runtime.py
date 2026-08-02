@@ -1552,6 +1552,25 @@ async def run_scheduler_workflow(
                     ),
                     receipt=receipt,
                     expected_outputs=list(step.expected_outputs),
+                    expected_schema_refs={
+                        name: (
+                            step.expected_schema_refs.get(name)
+                            or (
+                                step.expected_schema_ref
+                                if len(step.expected_outputs) == 1
+                                else None
+                            )
+                        )
+                        for name in step.expected_outputs
+                        if (
+                            step.expected_schema_refs.get(name)
+                            or (
+                                step.expected_schema_ref
+                                if len(step.expected_outputs) == 1
+                                else None
+                            )
+                        )
+                    },
                 )
                 reconciliation_data = {
                     "reconciliation_id": reconciliation.reconciliation_id,

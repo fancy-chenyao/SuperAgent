@@ -189,7 +189,12 @@ def _authorize_runtime_cleanup(
 
 
 def _bind_runtime_cleanup_capability(
-    *, token: str, user_id: str, workflow_id: str, task_id: str = ""
+    *,
+    token: str,
+    user_id: str,
+    workflow_id: str,
+    task_id: str = "",
+    trusted_new_task_id: str = "",
 ) -> None:
     if not token or not workflow_id:
         return
@@ -199,9 +204,34 @@ def _bind_runtime_cleanup_capability(
             user_id=user_id,
             workflow_id=workflow_id,
             task_id=task_id,
+            allow_new_workflow=not _workflow_has_persisted_records(
+                workflow_id,
+                excluding_task_id=trusted_new_task_id,
+            ),
         )
     except CleanupCapabilityError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+
+def _workflow_has_persisted_records(
+    workflow_id: str, *, excluding_task_id: str = ""
+) -> bool:
+    """Whether a workflow predates the requesting cleanup capability."""
+
+    excluded = str(excluding_task_id or "")
+    for task in TaskLogger.list_tasks(workflow_id=workflow_id):
+        if str(task.get("task_id") or "") != excluded:
+            return True
+    for approval in get_approval_store().list(workflow_id=workflow_id):
+        if str(approval.get("task_id") or "") != excluded:
+            return True
+    for reconciliation in get_reconciliation_store().list():
+        if (
+            str(reconciliation.get("workflow_id") or "") == workflow_id
+            and str(reconciliation.get("task_id") or "") != excluded
+        ):
+            return True
+    return False
 
 
 def _task_record_owner_ids(task_id: str) -> set[str]:
@@ -738,12 +768,18 @@ def create_app() -> FastAPI:
                         event_data.get("workflow_id") or body.workflow_id or ""
                     )
                     binding = (active_workflow_id, str(active_task_id or ""))
-                    if cleanup_token and active_workflow_id and binding not in bound_records:
+                    if (
+                        cleanup_token
+                        and active_workflow_id
+                        and (body.workflow_id or active_task_id)
+                        and binding not in bound_records
+                    ):
                         _bind_runtime_cleanup_capability(
                             token=cleanup_token,
                             user_id=body.user_id,
                             workflow_id=active_workflow_id,
                             task_id=str(active_task_id or ""),
+                            trusted_new_task_id=str(active_task_id or ""),
                         )
                         bound_records.add(binding)
                     if await request.is_disconnected():

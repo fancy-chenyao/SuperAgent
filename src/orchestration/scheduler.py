@@ -24,13 +24,13 @@ import time
 from collections.abc import Mapping
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
-from src.interface.artifact import StepResult, StepStatus
+from src.interface.artifact import ArtifactRef, StepResult, StepStatus
 from src.interface.task_graph import TaskGraph, TaskStep, WorkflowStatus
 from src.manager.executor.agent_result_adapter import (
     AgentResultNormalizationError,
     normalize_agent_result,
 )
-from src.manager.executor.artifact_adapter import to_artifacts
+from src.manager.executor.artifact_adapter import to_artifact, to_artifacts
 from src.manager.executor.base import ExecutionStatus
 from src.orchestration.completion import (
     ClaimStatus,
@@ -1348,6 +1348,25 @@ class TaskScheduler:
                     "status": "STARTED",
                     "normalized_input": normalize_input(inputs),
                     "expected_outputs": list(step.expected_outputs),
+                    "expected_schema_refs": {
+                        name: (
+                            step.expected_schema_refs.get(name)
+                            or (
+                                step.expected_schema_ref
+                                if len(step.expected_outputs) == 1
+                                else None
+                            )
+                        )
+                        for name in step.expected_outputs
+                        if (
+                            step.expected_schema_refs.get(name)
+                            or (
+                                step.expected_schema_ref
+                                if len(step.expected_outputs) == 1
+                                else None
+                            )
+                        )
+                    },
                     "external_op_id": None,
                     "timestamp": time.time(),
                 },
@@ -1374,10 +1393,21 @@ class TaskScheduler:
                             "receipt_output_contract_invalid": True,
                         },
                     )
+                prior_outputs = prior.get("outputs") or {}
+                artifact_refs = self._coerce_receipt_artifact_refs(prior_outputs)
+                if artifact_refs is None:
+                    return self._publish_confirmed_receipt_outputs(
+                        step=step,
+                        payloads=prior_outputs,
+                        context=step_ctx,
+                        selected_agent=selected_agent,
+                        idempotency_key_value=idem_key,
+                        receipt=prior,
+                    )
                 return StepResult(
                     step_id=step.step_id,
                     status=StepStatus.SUCCEEDED,
-                    outputs=prior.get("outputs") or {},
+                    outputs=artifact_refs,
                     metrics={"idempotent_reuse": True,
                              "selected_agent": selected_agent,
                              "idempotency_key": idem_key,
@@ -1644,8 +1674,28 @@ class TaskScheduler:
                         "status": "SUCCEEDED",
                         "normalized_input": normalize_input(inputs),
                         "expected_outputs": list(step.expected_outputs),
+                        "expected_schema_refs": {
+                            name: (
+                                step.expected_schema_refs.get(name)
+                                or (
+                                    step.expected_schema_ref
+                                    if len(step.expected_outputs) == 1
+                                    else None
+                                )
+                            )
+                            for name in step.expected_outputs
+                            if (
+                                step.expected_schema_refs.get(name)
+                                or (
+                                    step.expected_schema_ref
+                                    if len(step.expected_outputs) == 1
+                                    else None
+                                )
+                            )
+                        },
                         "external_op_id": (result.metrics or {}).get("external_op_id"),
                         "outputs": result.outputs,
+                        "outputs_kind": "artifact_refs",
                         "timestamp": time.time(),
                     },
                 )
@@ -1754,6 +1804,133 @@ class TaskScheduler:
             if str(getattr(agent, "agent_name", "") or "") == str(agent_name):
                 return getattr(agent, "agent_contract", None)
         return None
+
+    @staticmethod
+    def _coerce_receipt_artifact_refs(
+        outputs: Any,
+    ) -> Optional[Dict[str, ArtifactRef]]:
+        """Return typed refs for an ordinary receipt, else mark raw confirmation."""
+
+        if not isinstance(outputs, Mapping):
+            return None
+        refs: Dict[str, ArtifactRef] = {}
+        try:
+            for logical_name, value in outputs.items():
+                refs[str(logical_name)] = ArtifactRef.model_validate(value)
+        except Exception:  # raw human-confirmed payloads are not ArtifactRefs
+            return None
+        return refs
+
+    def _publish_confirmed_receipt_outputs(
+        self,
+        *,
+        step: TaskStep,
+        payloads: Mapping[str, Any],
+        context: dict,
+        selected_agent: Optional[str],
+        idempotency_key_value: str,
+        receipt: Mapping[str, Any],
+    ) -> StepResult:
+        """Publish human-confirmed payloads through the normal Artifact adapter."""
+
+        planned_agent = (
+            getattr(step, "agent_name", None)
+            or getattr(step, "preferred_resource_id", None)
+        )
+        producer_agent = selected_agent or planned_agent
+        contract = getattr(step, "agent_contract", None)
+        if selected_agent and planned_agent and selected_agent != planned_agent:
+            contract = self._trusted_agent_contract(selected_agent, context)
+            if contract is None and getattr(step, "agent_contract", None) is not None:
+                return StepResult(
+                    step_id=step.step_id,
+                    status=StepStatus.FAILED,
+                    error=(
+                        f"no trusted contract for rerouted agent {selected_agent!r}: "
+                        "refusing to publish human-confirmed outputs"
+                    ),
+                    metrics={
+                        "receipt_output_contract_invalid": True,
+                        "idempotency_key": idempotency_key_value,
+                    },
+                )
+
+        schema_refs = dict(getattr(step, "expected_schema_refs", None) or {})
+        if contract is not None:
+            schema_refs.update(dict(getattr(contract, "output_schema_refs", None) or {}))
+        if len(step.expected_outputs) == 1 and getattr(
+            step, "expected_schema_ref", None
+        ):
+            schema_refs.setdefault(step.expected_outputs[0], step.expected_schema_ref)
+
+        artifacts: Dict[str, Any] = {}
+        for logical_name in step.expected_outputs:
+            output_result = type(
+                "_HumanConfirmedExecuteResult",
+                (),
+                {
+                    "is_success": True,
+                    "result": payloads[logical_name],
+                    "error": None,
+                    "metadata": {
+                        "producer_agent": producer_agent,
+                        "human_confirmed": True,
+                        "external_op_id": receipt.get("external_op_id"),
+                    },
+                },
+            )()
+            artifact = to_artifact(
+                output_result,
+                step=step,
+                context=context.get("execution_context"),
+                logical_name=logical_name,
+                schema_ref=schema_refs.get(logical_name),
+                upstream_sensitivities=context.get("upstream_sensitivities"),
+            )
+            upstream_refs = list(context.get("upstream_artifact_refs") or [])
+            if upstream_refs:
+                lineage = list(artifact.derived_from or [])
+                seen = {
+                    (ref.artifact_id, ref.version, ref.selector)
+                    for ref in lineage
+                }
+                for ref in upstream_refs:
+                    key = (ref.artifact_id, ref.version, ref.selector)
+                    if key not in seen:
+                        lineage.append(ref)
+                        seen.add(key)
+                artifact = artifact.model_copy(update={"derived_from": lineage})
+            if schema_refs.get(logical_name) and artifact.schema_valid is not True:
+                return StepResult(
+                    step_id=step.step_id,
+                    status=StepStatus.FAILED,
+                    error=f"confirmed output {logical_name!r} failed schema validation",
+                    metrics={
+                        "receipt_output_contract_invalid": True,
+                        "logical_name": logical_name,
+                        "schema_ref": schema_refs.get(logical_name),
+                        "idempotency_key": idempotency_key_value,
+                    },
+                )
+            artifacts[logical_name] = artifact
+
+        outputs = {
+            logical_name: self.store.put(artifact)
+            for logical_name, artifact in artifacts.items()
+        }
+        return StepResult(
+            step_id=step.step_id,
+            status=StepStatus.SUCCEEDED,
+            outputs=outputs,
+            metrics={
+                "idempotent_reuse": True,
+                "human_confirmed_outputs": True,
+                "selected_agent": selected_agent,
+                "idempotency_key": idempotency_key_value,
+                "receipt_status": "SUCCEEDED",
+                "external_op_id": receipt.get("external_op_id"),
+            },
+        )
 
     def _record_success(
         self,

@@ -15,6 +15,7 @@ from typing import Any, Optional
 from src.utils.path_utils import get_project_root
 from src.utils.file_lock import FileLock
 from src.orchestration.completion import ReceiptClaimMismatch, missing_receipt_outputs
+from src.orchestration.schema_registry import get_schema_registry
 
 
 @dataclass
@@ -35,6 +36,7 @@ class ReconciliationRequest:
     external_operation_id: str = ""
     receipt: dict[str, Any] = field(default_factory=dict)
     expected_outputs: list[str] = field(default_factory=list)
+    expected_schema_refs: dict[str, str] = field(default_factory=dict)
     resolution: dict[str, Any] = field(default_factory=dict)
 
 
@@ -62,6 +64,7 @@ class ReconciliationStore:
         external_operation_id: str = "",
         receipt: Optional[dict[str, Any]] = None,
         expected_outputs: Optional[list[str]] = None,
+        expected_schema_refs: Optional[dict[str, str]] = None,
     ) -> ReconciliationRequest:
         with self._lock, FileLock(self._file_lock_path):
             self._recover_transaction_unlocked()
@@ -80,6 +83,7 @@ class ReconciliationStore:
                 external_operation_id=external_operation_id,
                 receipt=dict(receipt or {}),
                 expected_outputs=list(expected_outputs or []),
+                expected_schema_refs=dict(expected_schema_refs or {}),
             )
             self._save(request)
             return request
@@ -222,11 +226,33 @@ class ReconciliationStore:
                             "confirmed outputs violate the trusted output contract; "
                             f"missing: {', '.join(missing)}"
                         )
+                    trusted_schema_refs = existing.get("expected_schema_refs")
+                    if trusted_schema_refs is None:
+                        trusted_schema_refs = request.expected_schema_refs
+                    elif request.expected_schema_refs and trusted_schema_refs != (
+                        request.expected_schema_refs
+                    ):
+                        raise ValueError(
+                            "receipt output schemas do not match reconciliation request"
+                        )
+                    registry = get_schema_registry()
+                    for logical_name, schema_ref in dict(
+                        trusted_schema_refs or {}
+                    ).items():
+                        if logical_name not in (outputs or {}):
+                            continue
+                        valid, errors = registry.validate(outputs[logical_name], schema_ref)
+                        if not valid:
+                            raise ValueError(
+                                f"confirmed output {logical_name!r} failed schema "
+                                f"{schema_ref!r}: {'; '.join(errors)}"
+                            )
                     receipt_data[key] = {
                         **existing,
                         "status": "SUCCEEDED",
                         "external_op_id": str(external_operation_id).strip(),
                         "outputs": dict(outputs or {}),
+                        "outputs_kind": "confirmed_payloads",
                         "confirmed_by": operator,
                         "timestamp": time.time(),
                     }

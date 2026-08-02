@@ -42,6 +42,7 @@ class CleanupCapabilityStore:
         user_id: str,
         workflow_id: str,
         task_id: str = "",
+        allow_new_workflow: bool = True,
     ) -> None:
         """Bind a capability to a workflow and optionally one concrete task."""
 
@@ -52,6 +53,13 @@ class CleanupCapabilityStore:
             raise ValueError("workflow_id is required")
         with self._lock, FileLock(self._file_lock_path):
             data = self._read()
+            if (
+                workflow not in data["workflows"]
+                and not allow_new_workflow
+            ):
+                raise CleanupCapabilityError(
+                    "unbound historical workflow cannot be claimed by a new client"
+                )
             self._bind_key(data["workflows"], workflow, token_hash, user_id)
             if task:
                 self._bind_key(data["tasks"], task, token_hash, user_id, workflow)

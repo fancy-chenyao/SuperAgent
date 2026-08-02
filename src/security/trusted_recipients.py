@@ -17,6 +17,10 @@ class AmbiguousTrustedRecipientError(TrustedRecipientResolutionError):
     """A recipient label maps to more than one trusted mailbox."""
 
 
+class UnknownTrustedRecipientError(TrustedRecipientResolutionError):
+    """A requested recipient is absent from the trusted directory."""
+
+
 def _normalized(value: Any) -> str:
     return unicodedata.normalize("NFKC", str(value or "")).strip().casefold()
 
@@ -87,6 +91,10 @@ def resolve_trusted_recipient_addresses(recipients: Any) -> list[str]:
             raise AmbiguousTrustedRecipientError(
                 f"trusted recipient is ambiguous: {raw_recipient!r} matches "
                 f"{len(matches)} mailboxes"
+            )
+        if not matches:
+            raise UnknownTrustedRecipientError(
+                f"trusted recipient not found: {raw_recipient!r}"
             )
         resolved.update(matches)
     return sorted(resolved, key=str.casefold)

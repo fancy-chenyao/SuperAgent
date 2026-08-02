@@ -109,7 +109,13 @@ def test_approval_api_rejects_request(tmp_path, monkeypatch):
     assert again.status_code == 409
 
 
-def _reconciliation(tmp_path, monkeypatch, *, task_id="task-recon"):
+def _reconciliation(
+    tmp_path,
+    monkeypatch,
+    *,
+    task_id="task-recon",
+    expected_schema_refs=None,
+):
     monkeypatch.setenv(
         "RECONCILIATION_STORE_DIR", str(tmp_path / "reconciliations")
     )
@@ -131,6 +137,7 @@ def _reconciliation(tmp_path, monkeypatch, *, task_id="task-recon"):
             "normalized_input": normalize_input(inputs),
             "external_op_id": None,
             "expected_outputs": ["document_id"],
+            "expected_schema_refs": dict(expected_schema_refs or {}),
             "timestamp": 1.0,
         },
     )
@@ -146,6 +153,7 @@ def _reconciliation(tmp_path, monkeypatch, *, task_id="task-recon"):
         claim_id=claim.claim_id or "",
         receipt=claim.receipt,
         expected_outputs=["document_id"],
+        expected_schema_refs=dict(expected_schema_refs or {}),
     )
     return reconciliation, key
 
@@ -231,6 +239,31 @@ def test_reconciliation_api_rejects_success_without_contract_outputs(
 
     assert response.status_code == 409
     assert "document_id" in response.json()["detail"]
+    assert PersistentReceiptStore("task-recon").get(key)["status"] == "STARTED"
+
+
+def test_reconciliation_api_validates_confirmed_output_schema(
+    tmp_path, monkeypatch
+):
+    reconciliation, key = _reconciliation(
+        tmp_path,
+        monkeypatch,
+        expected_schema_refs={"document_id": "markdown_text_result@v1"},
+    )
+
+    response = _client().post(
+        (
+            "/api/security/reconciliations/"
+            f"{reconciliation.reconciliation_id}/succeeded"
+        ),
+        json={
+            "external_operation_id": "doc-1",
+            "outputs": {"document_id": {"not": "a string"}},
+        },
+    )
+
+    assert response.status_code == 409
+    assert "failed schema" in response.json()["detail"]
     assert PersistentReceiptStore("task-recon").get(key)["status"] == "STARTED"
 
 
@@ -445,6 +478,93 @@ def test_workflow_run_binds_browser_cleanup_capability(tmp_path, monkeypatch):
     capabilities = get_cleanup_capability_store()
     assert capabilities.authorize_workflow("u1:wf", token)
     assert capabilities.authorize_task("task-created", token)
+
+
+def test_unbound_historical_workflow_cannot_be_claimed_by_new_client(
+    tmp_path, monkeypatch
+):
+    import src.robust.task_logger as task_logger_module
+
+    checkpoint_root = tmp_path / "checkpoints"
+    monkeypatch.setattr(task_logger_module, "checkpoints_dir", checkpoint_root)
+    monkeypatch.setenv(
+        "CLEANUP_CAPABILITY_STORE_PATH", str(tmp_path / "cleanup-capabilities.json")
+    )
+    TaskLogger("historical-task", "victim:history", "private").log_workflow_start(
+        "private"
+    )
+    calls = {"n": 0}
+
+    class FakeServer:
+        async def _run_agent_workflow(self, _body):
+            calls["n"] += 1
+            yield {"event": "done", "data": {}}
+
+    monkeypatch.setattr(web_app, "Server", FakeServer)
+    attacker_token = "attacker-capability-token-with-at-least-32-chars"
+
+    response = TestClient(create_app()).post(
+        "/api/workflows/run",
+        headers={"X-Task-Owner-Token": attacker_token},
+        json={
+            "user_id": "victim",
+            "lang": "zh",
+            "messages": [{"role": "user", "content": "claim history"}],
+            "debug": False,
+            "deep_thinking_mode": False,
+            "search_before_planning": False,
+            "coor_agents": None,
+            "workmode": "production",
+            "workflow_id": "victim:history",
+        },
+    )
+
+    assert response.status_code == 403
+    assert calls["n"] == 0
+    assert not get_cleanup_capability_store().authorize_workflow(
+        "victim:history", attacker_token
+    )
+
+
+def test_unbound_workflow_with_only_governance_records_cannot_be_claimed(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv(
+        "RECONCILIATION_STORE_DIR", str(tmp_path / "reconciliations")
+    )
+    monkeypatch.setenv(
+        "CLEANUP_CAPABILITY_STORE_PATH", str(tmp_path / "cleanup-capabilities.json")
+    )
+    workflow_id = "victim:governance-only"
+    get_reconciliation_store().create(
+        user_id="victim",
+        workflow_id=workflow_id,
+        task_id="historical-task",
+        step_id="send",
+        resume_step=1,
+        agent_name="RemoteEmailDispatchAgent",
+        error="unknown",
+    )
+
+    response = TestClient(create_app()).post(
+        "/api/workflows/run",
+        headers={
+            "X-Task-Owner-Token": "attacker-capability-token-with-at-least-32-chars"
+        },
+        json={
+            "user_id": "victim",
+            "lang": "zh",
+            "messages": [{"role": "user", "content": "claim governance"}],
+            "debug": False,
+            "deep_thinking_mode": False,
+            "search_before_planning": False,
+            "coor_agents": None,
+            "workmode": "production",
+            "workflow_id": workflow_id,
+        },
+    )
+
+    assert response.status_code == 403
 
 
 def test_workflow_owner_capability_cleans_orphan_records_without_admin_key(
