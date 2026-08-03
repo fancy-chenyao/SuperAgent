@@ -1,0 +1,368 @@
+{
+  "schema_version": 1,
+  "name": "SuperAgent 权限治理评测集",
+  "updated_at": "2026-08-01",
+  "base_url": "http://127.0.0.1:8001",
+  "notes": [
+    "先使用 start-superagent-governance.ps1 启动治理模式。",
+    "ALLOW 表示可直接执行；REVIEW_REQUIRED 表示必须由治理审核人批准；DENY 表示禁止。",
+    "admin/system_orchestrator 为本地演示治理管理员，可跳过强制审批，但不能绕过策略拒绝或场景不匹配。",
+    "本评测集不包含任何模型不可用降级。"
+  ],
+  "cases": [
+    {
+      "id": "PG-API-001",
+      "category": "agent_dispatch",
+      "title": "管理员查询风险 Agent",
+      "automated": true,
+      "request": {
+        "method": "GET",
+        "path": "/api/security/check",
+        "params": {
+          "user_id": "admin",
+          "agent_name": "RemoteBusinessRiskAgent",
+          "action": "query"
+        }
+      },
+      "expected": {
+        "http_status": 200,
+        "json": {
+          "decision": "ALLOW",
+          "allowed": true,
+          "available_to_user": true
+        }
+      }
+    },
+    {
+      "id": "PG-API-002",
+      "category": "mandatory_review",
+      "title": "HR 经理查询工资需要审批",
+      "automated": true,
+      "request": {
+        "method": "GET",
+        "path": "/api/security/tool-check",
+        "params": {
+          "user_id": "hr_manager",
+          "tool_name": "remote_salary_info_tool"
+        }
+      },
+      "expected": {
+        "http_status": 200,
+        "json": {
+          "decision": "REVIEW_REQUIRED",
+          "allowed": false,
+          "eligible": true,
+          "review_required": true
+        }
+      }
+    },
+    {
+      "id": "PG-API-003",
+      "category": "grant_denial",
+      "title": "工程师禁止读取工资",
+      "automated": true,
+      "request": {
+        "method": "GET",
+        "path": "/api/security/tool-check",
+        "params": {
+          "user_id": "engineer",
+          "tool_name": "remote_salary_info_tool"
+        }
+      },
+      "expected": {
+        "http_status": 200,
+        "json": {
+          "decision": "DENY",
+          "allowed": false,
+          "grants_match": false
+        }
+      }
+    },
+    {
+      "id": "PG-API-004",
+      "category": "direct_allow",
+      "title": "HR 经理允许生成文档",
+      "automated": true,
+      "request": {
+        "method": "GET",
+        "path": "/api/security/tool-check",
+        "params": {
+          "user_id": "hr_manager",
+          "tool_name": "remote_docx_generator_tool"
+        }
+      },
+      "expected": {
+        "http_status": 200,
+        "json": {
+          "decision": "ALLOW",
+          "allowed": true
+        }
+      }
+    },
+    {
+      "id": "PG-API-005",
+      "category": "mandatory_review",
+      "title": "通信专员外发邮件需要审批",
+      "automated": true,
+      "request": {
+        "method": "GET",
+        "path": "/api/security/tool-check",
+        "params": {
+          "user_id": "communication_officer",
+          "tool_name": "remote_email_tool"
+        }
+      },
+      "expected": {
+        "http_status": 200,
+        "json": {
+          "decision": "REVIEW_REQUIRED",
+          "allowed": false,
+          "review_required": true
+        }
+      }
+    },
+    {
+      "id": "PG-API-006",
+      "category": "unknown_resource",
+      "title": "未知工具默认拒绝",
+      "automated": true,
+      "request": {
+        "method": "GET",
+        "path": "/api/security/tool-check",
+        "params": {
+          "user_id": "admin",
+          "tool_name": "not_registered_tool"
+        }
+      },
+      "expected": {
+        "http_status": 200,
+        "json": {
+          "decision": "DENY",
+          "allowed": false,
+          "resource_registered": false
+        }
+      }
+    },
+    {
+      "id": "PG-API-007",
+      "category": "agent_roster",
+      "title": "HR 经理不能调度邮件 Agent",
+      "automated": true,
+      "request": {
+        "method": "GET",
+        "path": "/api/security/check",
+        "params": {
+          "user_id": "hr_manager",
+          "agent_name": "RemoteEmailDispatchAgent",
+          "action": "send"
+        }
+      },
+      "expected": {
+        "http_status": 200,
+        "json": {
+          "decision": "DENY",
+          "allowed": false,
+          "available_to_user": false
+        }
+      }
+    },
+    {
+      "id": "PG-API-008",
+      "category": "agent_dispatch",
+      "title": "管理员允许查询天气 Agent",
+      "automated": true,
+      "request": {
+        "method": "GET",
+        "path": "/api/security/check",
+        "params": {
+          "user_id": "admin",
+          "agent_name": "RemoteWeatherAgent",
+          "action": "query"
+        }
+      },
+      "expected": {
+        "http_status": 200,
+        "json": {
+          "decision": "ALLOW",
+          "allowed": true
+        }
+      }
+    },
+    {
+      "id": "PG-API-009",
+      "category": "job_role_denial",
+      "title": "Guest 即使列表中可见研究 Agent 仍受岗位约束",
+      "automated": true,
+      "request": {
+        "method": "GET",
+        "path": "/api/security/check",
+        "params": {
+          "user_id": "guest",
+          "agent_name": "researcher",
+          "action": "query"
+        }
+      },
+      "expected": {
+        "http_status": 200,
+        "json": {
+          "decision": "DENY",
+          "allowed": false,
+          "available_to_user": true,
+          "job_role_match": false
+        }
+      }
+    },
+    {
+      "id": "PG-API-010",
+      "category": "research_allow",
+      "title": "研究员允许使用公开检索工具",
+      "automated": true,
+      "request": {
+        "method": "GET",
+        "path": "/api/security/tool-check",
+        "params": {
+          "user_id": "researcher_user",
+          "tool_name": "tavily_search_results_json"
+        }
+      },
+      "expected": {
+        "http_status": 200,
+        "json": {
+          "decision": "ALLOW",
+          "allowed": true
+        }
+      }
+    },
+    {
+      "id": "PG-API-011",
+      "category": "remote_resource_coverage",
+      "title": "管理员允许查询差旅记录工具",
+      "automated": true,
+      "request": {
+        "method": "GET",
+        "path": "/api/security/tool-check",
+        "params": {
+          "user_id": "admin",
+          "tool_name": "query_travel_record"
+        }
+      },
+      "expected": {
+        "http_status": 200,
+        "json": {
+          "decision": "ALLOW",
+          "allowed": true,
+          "resource_registered": true
+        }
+      }
+    },
+    {
+      "id": "PG-API-012",
+      "category": "mandatory_review",
+      "title": "通信专员创建会议需要审批",
+      "automated": true,
+      "request": {
+        "method": "GET",
+        "path": "/api/security/tool-check",
+        "params": {
+          "user_id": "communication_officer",
+          "tool_name": "remote_meeting_scheduling_tool"
+        }
+      },
+      "expected": {
+        "http_status": 200,
+        "json": {
+          "decision": "REVIEW_REQUIRED",
+          "allowed": false,
+          "resource_registered": true,
+          "review_required": true
+        }
+      }
+    },
+    {
+      "id": "PG-WF-001",
+      "category": "workflow_allow",
+      "title": "管理员执行 HR 查询、文档、邮件闭环",
+      "automated": false,
+      "actor": "admin",
+      "instruction": "查询员工李娜的基本信息和薪资数据，生成收入证明，然后发给王经理",
+      "expected": {
+        "workflow_status": "SUCCEEDED",
+        "step_modes": ["read", "write", "send"],
+        "pending_approvals": 0,
+        "pending_reconciliations": 0
+      }
+    },
+    {
+      "id": "PG-WF-002",
+      "category": "workflow_review",
+      "title": "HR 经理工资查询触发一次性审批",
+      "automated": false,
+      "actor": "hr_manager",
+      "instruction": "查询员工李娜的工资信息",
+      "expected": {
+        "workflow_status": "APPROVAL_REQUIRED",
+        "approval_status": "pending",
+        "approval_can_be_consumed_once": true
+      }
+    },
+    {
+      "id": "PG-WF-003",
+      "category": "workflow_deny",
+      "title": "工程师读取工资被拒绝",
+      "automated": false,
+      "actor": "engineer",
+      "instruction": "查询员工李娜的工资信息",
+      "expected": {
+        "workflow_status": "DENIED_OR_NO_AUTHORIZED_AGENT",
+        "business_side_effect": false
+      }
+    },
+    {
+      "id": "PG-WF-004",
+      "category": "workflow_review",
+      "title": "通信专员外发邮件触发审批",
+      "automated": false,
+      "actor": "communication_officer",
+      "instruction": "给外部联系人发送一封项目通知邮件",
+      "expected": {
+        "workflow_status": "APPROVAL_REQUIRED",
+        "business_side_effect_before_approval": false
+      }
+    },
+    {
+      "id": "PG-DATA-001",
+      "category": "artifact_cross_user",
+      "title": "跨用户读取工资 Artifact 被拒绝",
+      "automated": "pytest",
+      "command": ".\\.venv\\Scripts\\python.exe -m pytest -q -o addopts= tests/test_artifact_guard.py"
+    },
+    {
+      "id": "PG-DATA-002",
+      "category": "artifact_untrusted_grant",
+      "title": "Planner 自报 allowed_reader_ids 不生效",
+      "automated": "pytest",
+      "command": ".\\.venv\\Scripts\\python.exe -m pytest -q -o addopts= tests/test_artifact_adapter.py"
+    },
+    {
+      "id": "PG-APPROVAL-001",
+      "category": "approval_concurrency",
+      "title": "并发恢复只能消费一次审批",
+      "automated": "pytest",
+      "command": ".\\.venv\\Scripts\\python.exe -m pytest -q -o addopts= tests/test_s_abac.py -k approval"
+    },
+    {
+      "id": "PG-CLEANUP-001",
+      "category": "cleanup_ownership",
+      "title": "非所有者不能删除任务治理证据",
+      "automated": "pytest",
+      "command": ".\\.venv\\Scripts\\python.exe -m pytest -q -o addopts= tests/test_governance_web_api.py -k cleanup"
+    },
+    {
+      "id": "PG-REMOTE-001",
+      "category": "remote_tool_bypass",
+      "title": "远程 Agent 内部工具不能绕过治理清单",
+      "automated": "pytest",
+      "command": ".\\.venv\\Scripts\\python.exe -m pytest -q -o addopts= tests/test_remote_tool_gate.py tests/test_remote_invocation_contract.py"
+    }
+  ]
+}

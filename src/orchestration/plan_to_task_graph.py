@@ -24,6 +24,10 @@ from src.interface.task_graph import (
     TaskSpec,
     TaskStep,
 )
+from src.orchestration.output_contracts import (
+    get_agent_output_logical_names,
+    get_agent_output_schema_ref,
+)
 
 # Effective operation modes (ignoring the ubiquitous "delegate") that imply a
 # side effect. An agent whose config declares any of these is NOT read-only.
@@ -164,6 +168,7 @@ def _derive_operation_mode(
     agent_name: str,
     explicit_mode: Optional[str],
     write_agents: set[str],
+    trusted_task_mode: Optional[str] = None,
 ) -> tuple[str, str, str]:
     """Derive a step's ``(operation_mode, source, reason)`` (read/write/send/unknown).
 
@@ -185,6 +190,23 @@ def _derive_operation_mode(
         base_mode = _classify_modes(config_modes)
         base_source = "agent_config"
         base_reason = f"agent_config modes={sorted({str(m).lower() for m in config_modes})}"
+        # Some Agents deliberately expose both query and mutation tools.  The
+        # server-derived TaskProfile subtask action selects the concrete mode
+        # for this invocation; unlike Planner text, it cannot invent a mode the
+        # Agent config does not allow.  This keeps calendar/leave queries read-
+        # only while create/update operations remain writes.
+        configured_mode_classes = {
+            _classify_single(mode)
+            for mode in config_modes
+            if str(mode).lower() != "delegate"
+        }
+        if trusted_task_mode in configured_mode_classes:
+            base_mode = str(trusted_task_mode)
+            base_source = "task_profile_action"
+            base_reason = (
+                f"server task-profile action selected {trusted_task_mode} "
+                f"from configured modes={sorted(configured_mode_classes)}"
+            )
         # A caller "write" hint may raise a read baseline to write.
         if agent_name in write_agents and _MODE_RANK["write"] > _MODE_RANK[base_mode]:
             base_mode = "write"
@@ -254,6 +276,16 @@ def _list_field(raw: Dict[str, Any], plural: str, singular: str) -> List[Any]:
         value = raw.get(singular)
         return [value] if value else []
     return values if isinstance(values, list) else [values]
+
+
+def _as_list(value: Any) -> List[Any]:
+    if not value:
+        return []
+    if isinstance(value, list):
+        return value
+    if isinstance(value, (tuple, set)):
+        return list(value)
+    return [value]
 
 
 def derive_step_dependencies(
@@ -359,6 +391,12 @@ def plan_to_task_graph(
     if subtasks:
         planning_steps = derive_step_dependencies(planning_steps, subtasks)
 
+    subtask_by_id = {
+        str(item.get("id")): item
+        for item in (subtasks or [])
+        if isinstance(item, dict) and item.get("id")
+    }
+
     raw_steps = [
         (idx, raw)
         for idx, raw in enumerate(planning_steps or [])
@@ -393,7 +431,7 @@ def plan_to_task_graph(
         agent_name = raw.get("agent_name") or raw.get("agent") or ""
         step_id = _step_id_for(idx, raw)
 
-        inputs = raw.get("inputs") or []
+        inputs = list(raw.get("inputs") or [])
         depends_on: List[str] = []
         for dependency_ref in _reference_list(raw.get("depends_on")):
             resolved = resolve_reference(dependency_ref)
@@ -454,10 +492,34 @@ def plan_to_task_graph(
             expected_outputs = contract_outputs
         else:
             expected_outputs = (
-                declared_outputs or agent_produces.get(agent_name, [])
+                declared_outputs
+                or agent_produces.get(agent_name, [])
+                or get_agent_output_logical_names(agent_name)
             )
         if isinstance(expected_outputs, str):
             expected_outputs = [expected_outputs]
+
+        # ``depends_on`` is an execution-order edge.  For a governed Agent
+        # chain it must also carry the producer Artifact into the consumer.
+        # Planner-generated autonomous steps commonly omit ``inputs``; when a
+        # dependency has a trusted primary output, materialize one unambiguous
+        # binding.  Explicit Planner bindings are always preserved unchanged.
+        if not inputs and depends_on:
+            prior_steps = {item.step_id: item for item in steps}
+            for dependency_id in depends_on:
+                producer = prior_steps.get(dependency_id)
+                producer_outputs = list(
+                    getattr(producer, "expected_outputs", []) or []
+                )
+                if not producer_outputs:
+                    continue
+                inputs.append(
+                    {
+                        "parameter_name": f"upstream_{dependency_id}",
+                        "source_step": dependency_id,
+                        "source_output": producer_outputs[0],
+                    }
+                )
 
         completion_conditions = []
         for condition in raw.get("completion_conditions") or []:
@@ -468,8 +530,21 @@ def plan_to_task_graph(
             elif isinstance(condition, dict) and condition.get("expression"):
                 completion_conditions.append(CompletionCondition(**condition))
 
+        trusted_modes = [
+            _classify_single(str(subtask_by_id[subtask_id].get("action") or ""))
+            for subtask_id in _subtask_ids_for(raw)
+            if subtask_id in subtask_by_id
+        ]
+        trusted_task_mode = (
+            max(trusted_modes, key=lambda value: _MODE_RANK[value])
+            if trusted_modes
+            else None
+        )
         operation_mode, operation_mode_source, operation_mode_reason = _derive_operation_mode(
-            agent_name, raw.get("operation_mode"), write_agents
+            agent_name,
+            raw.get("operation_mode"),
+            write_agents,
+            trusted_task_mode,
         )
         _validate_planner_security_constraints(agent_name, raw)
 
@@ -494,7 +569,17 @@ def plan_to_task_graph(
             scenario_tags=raw.get("scenario_tags", []) or [],
             data_scope=raw.get("data_scope", ""),
             expected_schema_ref=(
-                raw.get("expected_schema_ref") or raw.get("output_schema_ref")
+                raw.get("expected_schema_ref")
+                or raw.get("output_schema_ref")
+                # A caller-supplied output vocabulary may describe a legacy or
+                # custom contract.  Do not attach the built-in schema to that
+                # payload; the trusted schema is selected only together with
+                # the server-owned logical-output contract.
+                or (
+                    get_agent_output_schema_ref(agent_name)
+                    if not declared_outputs
+                    else None
+                )
             ),
             expected_schema_refs=(
                 dict(contract.output_schema_refs) if contract else {}

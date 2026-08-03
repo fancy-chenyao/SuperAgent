@@ -490,6 +490,24 @@ def _validate_plan_against_task_profile(steps: list, state: State) -> list[str]:
             if subtask_id not in step_by_subtask_id:
                 errors.append(f"缺少对子任务 {subtask_id} 的执行覆盖")
 
+        # Planner 输出中的 depends_on 偶尔使用执行步骤 id 或上游 Agent 名，
+        # 而 TaskProfile 使用逻辑子任务 id。它们表达的是同一条边，校验前
+        # 统一换算为子任务 id，避免把可执行计划误判为结构错误。
+        dependency_aliases: dict[str, set[str]] = {}
+        for step in steps:
+            if not isinstance(step, dict):
+                continue
+            covered = {
+                subtask_id
+                for subtask_id in _step_subtask_ids(step)
+                if subtask_id in subtask_by_id
+            }
+            if not covered:
+                continue
+            for alias in (step.get("step_id"), step.get("agent_name")):
+                if alias:
+                    dependency_aliases.setdefault(str(alias), set()).update(covered)
+
         # 按执行步骤校验它覆盖的意图集合，以及跨执行步骤的依赖关系。
         # 同一步内部的逻辑依赖由该 Agent 在一次调用中完成，不应再形成图上的自依赖。
         for index, step in enumerate(steps):
@@ -522,8 +540,11 @@ def _validate_plan_against_task_profile(steps: list, state: State) -> list[str]:
                 )
             # 同一步内的前后关系由 Agent 内部完成，只保留跨步骤依赖。
             expected_dependencies.difference_update(covered_set)
-            planned_dependencies = set(
-                _string_list(step.get("depends_on")))
+            planned_dependencies: set[str] = set()
+            for dependency in _string_list(step.get("depends_on")):
+                planned_dependencies.update(
+                    dependency_aliases.get(dependency, {dependency})
+                )
             if planned_dependencies != expected_dependencies:
                 errors.append(
                     f"执行步骤 {step.get('step_id') or index + 1} 的 depends_on 应为 "
@@ -589,8 +610,11 @@ async def _validate_plan_data_flow(steps: list, user_id: str) -> tuple[bool, lis
                 "produces": getattr(agent, "produces", []),
             }
 
-    # Track what data is available at each step
+    # Track what data is available at each step and where it came from. This
+    # lets us materialize an omitted but unambiguous input binding instead of
+    # rejecting a plan whose upstream Agent already produces the exact field.
     available_outputs = set()
+    available_output_sources: dict[str, str] = {}
 
     for step_idx, step in enumerate(steps):
         agent_name = step.get("agent_name")
@@ -607,18 +631,24 @@ async def _validate_plan_data_flow(steps: list, user_id: str) -> tuple[bool, lis
             )
             continue
 
-        required_params = metadata["requires"]
-        produced_outputs = metadata["produces"]
+        required_params = _string_list(metadata["requires"])
+        produced_outputs = _string_list(metadata["produces"])
 
         # If agent has no requirements, it's autonomous
         if not required_params:
             # Add this agent's outputs to available data
             for output in produced_outputs:
                 available_outputs.add(output)
+                available_output_sources[output] = str(
+                    step.get("step_id") or agent_name
+                )
             continue
 
         # Check if all required parameters are mapped
         inputs = step.get("inputs", [])
+        if not isinstance(inputs, list):
+            inputs = []
+            step["inputs"] = inputs
         mapped_params = set()
 
         for input_mapping in inputs:
@@ -690,6 +720,25 @@ async def _validate_plan_data_flow(steps: list, user_id: str) -> tuple[bool, lis
                         f"source_step '{source_step}' which does not exist in previous steps"
                     )
 
+        # If the Planner omitted an input mapping but an earlier Agent declares
+        # the exact required output, the dependency is deterministic. Persist
+        # the inferred binding into the plan so the TaskGraph resolver receives
+        # the upstream artifact during execution.
+        for param_name in required_params:
+            if param_name in mapped_params:
+                continue
+            source_step = available_output_sources.get(param_name)
+            if not source_step:
+                continue
+            inputs.append(
+                {
+                    "parameter_name": param_name,
+                    "source_step": source_step,
+                    "source_output": param_name,
+                }
+            )
+            mapped_params.add(param_name)
+
         # Check if all required parameters are mapped
         unmapped_params = set(required_params) - mapped_params
         if unmapped_params:
@@ -701,6 +750,9 @@ async def _validate_plan_data_flow(steps: list, user_id: str) -> tuple[bool, lis
         # Add this agent's outputs to available data
         for output in produced_outputs:
             available_outputs.add(output)
+            available_output_sources[output] = str(
+                step.get("step_id") or agent_name
+            )
 
     is_valid = len(errors) == 0
     return is_valid, errors
@@ -938,7 +990,13 @@ async def agent_proxy_node(state: State) -> Command[Literal["publisher", "__end_
     # Artifact. Gated OFF by default and wrapped so capture never breaks the legacy
     # flow; the messages/return below are unchanged.
     captured_artifact = None
-    step_key = f"{state.get('current_step')}:{_agent.agent_name}"
+    legacy_step_key = f"{state.get('current_step')}:{_agent.agent_name}"
+    # Legacy execution invokes one Agent once even when the Planner assigned
+    # several logical steps to that Agent.  Keep the old runtime key for
+    # Artifact/step-result compatibility, but bind execution evidence to the
+    # Planner's real step ids so workflow coverage compares the same identity
+    # space (step_1/step_2/...) instead of current graph counters (2:Agent).
+    step_key = legacy_step_key
     if artifact_capture_enabled:
         try:
             from src.manager.executor.artifact_adapter import to_artifact
@@ -988,16 +1046,53 @@ async def agent_proxy_node(state: State) -> Command[Literal["publisher", "__end_
     try:
         from src.skills.execution_evidence import build_step_evidence
 
-        evidence = build_step_evidence(
-            step_id=step_key,
-            agent_name=_agent.agent_name,
-            operation_mode=step_operation_mode,
-            risk_level=step_risk_level,
-            verification_contract=verification_contract,
-            execute_result=execute_result,
-            artifact=captured_artifact,
-        )
-        skill_step_evidence[step_key] = evidence.model_dump(mode="json")
+        evidence_steps: list[dict[str, Any] | None] = []
+        seen_step_ids: set[str] = set()
+        for assigned_step in assigned_steps:
+            planned_step_id = str(assigned_step.get("step_id") or "").strip()
+            if not planned_step_id or planned_step_id in seen_step_ids:
+                continue
+            seen_step_ids.add(planned_step_id)
+            evidence_steps.append(assigned_step)
+        if not evidence_steps:
+            evidence_steps = [None]
+
+        for assigned_step in evidence_steps:
+            evidence_step_id = (
+                str(assigned_step.get("step_id"))
+                if isinstance(assigned_step, dict)
+                else legacy_step_key
+            )
+            evidence_mode = (
+                _normalize_legacy_operation_mode(assigned_step.get("operation_mode"))
+                if isinstance(assigned_step, dict)
+                else ""
+            ) or step_operation_mode
+            evidence_risk = str(
+                (assigned_step or {}).get("risk_level")
+                or step_risk_level
+                or "LOW"
+            )
+            raw_contract = (
+                assigned_step.get("verification_contract")
+                if isinstance(assigned_step, dict)
+                else None
+            )
+            evidence_contract = (
+                dict(raw_contract)
+                if isinstance(raw_contract, dict)
+                else verification_contract
+            )
+            evidence = build_step_evidence(
+                step_id=evidence_step_id,
+                agent_name=_agent.agent_name,
+                operation_mode=evidence_mode,
+                risk_level=evidence_risk,
+                verification_contract=evidence_contract,
+                execute_result=execute_result,
+                artifact=captured_artifact,
+            )
+            skill_step_evidence[evidence_step_id] = evidence.model_dump(mode="json")
     except Exception as exc:  # pragma: no cover - evidence must not break execution
         logger.warning("skill execution evidence capture skipped: %s", exc)
 

@@ -668,6 +668,67 @@ def test_rerouted_agent_result_validated_against_actual_agent_contract():
     assert artifact.schema_valid is True
 
 
+def test_rerouted_side_effect_uses_actual_contract_for_receipt_and_resume():
+    planned_contract = _contract("result", "policy.info@v1")
+    actual_contract = _contract("result", "employee.info@v1")
+    step = TaskStep(
+        step_id="send",
+        operation_mode="write",
+        agent_name="PlannedAgent",
+        preferred_resource_id="PlannedAgent",
+        expected_outputs=["result"],
+        expected_schema_refs={"result": "policy.info@v1"},
+        agent_contract=planned_contract,
+    )
+    calls = {"n": 0}
+
+    async def execute(*, step, selected_agent, inputs, context):
+        calls["n"] += 1
+        return ExecuteResult(
+            status=ExecutionStatus.SUCCESS,
+            result=_envelope(
+                selected_agent,
+                {
+                    "result": {
+                        "records": [{"employee_id": "E001", "name": "Alice"}],
+                        "matched_count": 1,
+                    }
+                },
+            ),
+            metadata={"external_op_id": "send-1"},
+        )
+
+    receipts = ReceiptStore()
+    scheduler = TaskScheduler(
+        execute_step=execute,
+        routing_provider=_FixedRoutingProvider("ActualAgent"),
+        receipt_store=receipts,
+    )
+    graph = TaskGraph(spec=TaskSpec(task_id="rerouted-write"), steps=[step])
+    context = {
+        "task_id": "rerouted-write",
+        "agents": [
+            SimpleNamespace(
+                agent_name="ActualAgent",
+                agent_contract=actual_contract,
+            )
+        ],
+    }
+
+    first = asyncio.run(scheduler.run(graph, context=context))
+    second = asyncio.run(scheduler.run(graph, context=context))
+
+    assert first["send"].is_success
+    assert second["send"].is_success
+    assert second["send"].metrics["idempotent_reuse"] is True
+    assert calls["n"] == 1
+    receipt = receipts.get(first["send"].metrics["idempotency_key"])
+    assert receipt["agent"] == "ActualAgent"
+    assert receipt["expected_schema_refs"] == {"result": "employee.info@v1"}
+    artifact = scheduler.store.get(second["send"].outputs["result"])
+    assert artifact.schema_ref == "employee.info@v1"
+
+
 def test_rerouted_agent_without_trusted_contract_fails_closed():
     """A contracted plan step rerouted to an Agent with no trusted contract
     must refuse publication instead of validating against the wrong contract

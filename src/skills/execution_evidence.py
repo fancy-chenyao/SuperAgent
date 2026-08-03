@@ -559,6 +559,26 @@ def aggregate_evidence(
         if len(expected_ids) == len(normalized_plan):
             actual_ids = {item.step_id for item in normalized_steps}
             covered_steps = sum(step_id in actual_ids for step_id in expected_ids)
+            # Records created by the legacy publisher/agent_proxy loop before
+            # Planner-id binding used runtime keys such as ``2:SomeAgent``.
+            # That loop executes one Agent for all plan steps assigned to it, so
+            # agent identity is the only durable join key available in those
+            # historical records.  Restrict this compatibility path to legacy
+            # mode; Scheduler evidence must continue matching exact step ids.
+            if (
+                covered_steps < len(normalized_plan)
+                and str(execution_mode).lower() == "legacy"
+            ):
+                actual_agents = {
+                    item.agent_name
+                    for item in normalized_steps
+                    if item.agent_name
+                }
+                legacy_covered_steps = sum(
+                    str(item.get("agent_name") or "") in actual_agents
+                    for item in normalized_plan
+                )
+                covered_steps = max(covered_steps, legacy_covered_steps)
         else:
             expected_agents = Counter(
                 str(item.get("agent_name"))

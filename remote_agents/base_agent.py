@@ -3,7 +3,9 @@
 
 from typing import Any, Dict, List, Optional
 from abc import ABC, abstractmethod
+from contextvars import ContextVar, Token
 import logging
+import unicodedata
 
 from src.contracts.agent_contract import AgentContract
 from src.contracts.agent_result import (
@@ -14,6 +16,163 @@ from src.contracts.agent_result import (
 )
 
 logger = logging.getLogger(__name__)
+
+_authorized_remote_tools: ContextVar[tuple[tuple[str, Dict[str, Any]], ...]] = ContextVar(
+    "authorized_remote_tools", default=()
+)
+
+_SECURITY_ARGUMENT_ALIASES: Dict[str, tuple[str, ...]] = {
+    "employee_name": ("employee_name", "keyword"),
+    "employee_id": ("employee_id", "employee_id_list"),
+    "recipient": ("recipient", "recipients", "names", "to"),
+    "recipients": ("recipients", "recipient", "names", "to"),
+    "resolved_recipient_addresses": ("resolved_recipient_addresses", "to"),
+    "document_type": ("document_type", "template_name"),
+    "date": ("date",),
+    "start_date": ("start_date",),
+    "end_date": ("end_date",),
+    "location": ("location", "destination"),
+}
+
+_TOOL_SECURITY_ARGUMENTS: Dict[str, frozenset[str]] = {
+    "remote_person_info_tool": frozenset({"employee_name", "employee_id"}),
+    "remote_salary_info_tool": frozenset({"employee_name", "employee_id"}),
+    "remote_contact_query_tool": frozenset({"recipient", "recipients"}),
+    "remote_email_tool": frozenset({"resolved_recipient_addresses"}),
+    "remote_docx_generator_tool": frozenset({"document_type"}),
+    "query_leave_record": frozenset({"employee_name", "employee_id", "start_date", "end_date"}),
+    "save_leave_record": frozenset({"employee_name", "employee_id", "start_date", "end_date"}),
+    "query_travel_record": frozenset({"employee_name", "employee_id", "start_date", "end_date", "location"}),
+    "save_travel_record": frozenset({"employee_name", "employee_id", "start_date", "end_date", "location"}),
+    "get_calendar_events_tool": frozenset({"date", "start_date", "end_date"}),
+    "create_calendar_event_tool": frozenset({"date", "start_date", "end_date", "location"}),
+    "remote_meeting_scheduling_tool": frozenset({"date", "start_date", "end_date", "location", "recipient", "recipients"}),
+}
+
+
+def _normalize_security_value(value: Any, *, plural: bool = False) -> Any:
+    if isinstance(value, str):
+        normalized = unicodedata.normalize("NFKC", value).strip().casefold()
+        if plural:
+            parts = [part.strip() for part in normalized.replace(";", ",").split(",")]
+            return tuple(sorted(part for part in parts if part))
+        return normalized
+    if isinstance(value, (list, tuple, set, frozenset)):
+        items = [_normalize_security_value(item) for item in value]
+        return tuple(sorted(items, key=repr))
+    if isinstance(value, dict):
+        return tuple(
+            sorted(
+                (str(key), _normalize_security_value(item))
+                for key, item in value.items()
+            )
+        )
+    return value
+
+
+def _find_argument(arguments: Dict[str, Any], aliases: tuple[str, ...]) -> tuple[bool, Any]:
+    for key in aliases:
+        if key in arguments:
+            return True, arguments[key]
+    for value in arguments.values():
+        if isinstance(value, dict):
+            found, nested = _find_argument(value, aliases)
+            if found:
+                return True, nested
+    return False, None
+
+
+def _find_all_arguments(
+    arguments: Dict[str, Any], aliases: tuple[str, ...]
+) -> list[Any]:
+    """Return every alias value, including nested values, for conflict checks."""
+
+    values = [arguments[key] for key in aliases if key in arguments]
+    for value in arguments.values():
+        if isinstance(value, dict):
+            values.extend(_find_all_arguments(value, aliases))
+    return values
+
+
+def _arguments_match_authorization(
+    tool_name: str,
+    expected: Dict[str, Any],
+    actual: Dict[str, Any],
+) -> bool:
+    keys = _TOOL_SECURITY_ARGUMENTS.get(tool_name, frozenset())
+    for key in keys:
+        aliases = _SECURITY_ARGUMENT_ALIASES[key]
+        expected_found, expected_value = _find_argument(expected, aliases)
+        actual_values = _find_all_arguments(actual, aliases)
+        if expected_found != bool(actual_values):
+            return False
+        if not expected_found:
+            continue
+        plural = key in {"recipient", "recipients", "resolved_recipient_addresses"}
+        normalized_expected = _normalize_security_value(expected_value, plural=plural)
+        for actual_value in actual_values:
+            if normalized_expected != _normalize_security_value(
+                actual_value, plural=plural
+            ):
+                return False
+    return True
+
+
+def _canonical_authorized_arguments(
+    tool_name: str,
+    expected: Dict[str, Any],
+    actual: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Build the outbound arguments from the validated trusted boundary."""
+
+    outbound = dict(actual)
+    if tool_name == "remote_email_tool":
+        found, addresses = _find_argument(
+            expected, _SECURITY_ARGUMENT_ALIASES["resolved_recipient_addresses"]
+        )
+        normalized = _normalize_security_value(addresses, plural=True) if found else ()
+        if not normalized:
+            raise PermissionError(
+                "Remote email has no uniquely resolved platform-authorized recipient"
+            )
+        # The downstream tool consumes ``to``.  Never forward a model-supplied
+        # alias after validation; write the platform-resolved value instead.
+        outbound["to"] = ",".join(normalized)
+        outbound.pop("resolved_recipient_addresses", None)
+    return outbound
+
+
+def bind_authorized_remote_tools(context: Dict[str, Any]) -> Token:
+    """Bind a request-scoped platform authorization manifest."""
+
+    raw = context.get("authorized_remote_tools")
+    manifest: list[tuple[str, Dict[str, Any]]] = []
+    if isinstance(raw, list):
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            tool_name = str(item.get("tool_name") or "").strip()
+            arguments = item.get("arguments")
+            if tool_name and isinstance(arguments, dict):
+                manifest.append((tool_name, dict(arguments)))
+    # Missing, malformed and explicitly empty manifests all bind to an empty
+    # tuple. call_tool therefore fails closed instead of treating None as an
+    # instruction to disable the gate.
+    return _authorized_remote_tools.set(tuple(manifest))
+
+
+def reset_authorized_remote_tools(token: Token) -> None:
+    _authorized_remote_tools.reset(token)
+
+
+class RemoteToolExecutionError(RuntimeError):
+    """Tool failure carrying machine-readable side-effect phase metadata."""
+
+    def __init__(self, tool_name: str, result: Dict[str, Any]):
+        detail = result.get("error") or result.get("message") or "unknown tool error"
+        super().__init__(f"Tool {tool_name} failed: {detail}")
+        self.tool_name = tool_name
+        self.tool_result = dict(result)
 
 
 class BaseRemoteAgent(ABC):
@@ -118,11 +277,38 @@ class BaseRemoteAgent(ABC):
         """
         import httpx
 
+        manifest = _authorized_remote_tools.get()
+        matching_entries = [
+            expected for authorized_tool, expected in manifest
+            if authorized_tool == tool_name
+        ]
+        if not matching_entries:
+            raise PermissionError(
+                f"Remote tool '{tool_name}' is outside the platform-authorized manifest"
+            )
+        matching_expected = None
+        if isinstance(arguments, dict):
+            matching_expected = next(
+                (
+                    expected
+                    for expected in matching_entries
+                    if _arguments_match_authorization(tool_name, expected, arguments)
+                ),
+                None,
+            )
+        if matching_expected is None:
+            raise PermissionError(
+                f"Remote tool '{tool_name}' arguments do not match the platform-authorized manifest"
+            )
+        outbound_arguments = _canonical_authorized_arguments(
+            tool_name, matching_expected, arguments
+        )
+
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(timeout, read=timeout)) as client:
                 resp = await client.post(
                     tool_service_url,
-                    json={"tool": tool_name, "arguments": arguments},
+                    json={"tool": tool_name, "arguments": outbound_arguments},
                     headers={"Content-Type": "application/json"},
                 )
                 resp.raise_for_status()
@@ -133,8 +319,7 @@ class BaseRemoteAgent(ABC):
                         f"Tool {tool_name} returned an invalid result payload"
                     )
                 if str(result.get("status") or "").lower() in {"error", "failed"}:
-                    detail = result.get("error") or result.get("message") or "unknown tool error"
-                    raise RuntimeError(f"Tool {tool_name} failed: {detail}")
+                    raise RemoteToolExecutionError(tool_name, result)
                 logger.info(f"Tool {tool_name} executed successfully")
                 return result
         except httpx.TimeoutException as exc:

@@ -303,6 +303,42 @@ def test_partial_legacy_step_evidence_cannot_distill_the_full_plan():
     assert "incomplete_step_execution_evidence" in decision.reasons
 
 
+def test_legacy_runtime_step_keys_match_planner_steps_by_agent_identity():
+    evidence = aggregate_evidence(
+        task_id="task-legacy-ids",
+        execution_mode="legacy",
+        workflow_status="COMPLETED",
+        steps=[
+            build_step_evidence(
+                step_id="2:RiskAgent",
+                agent_name="RiskAgent",
+                operation_mode="read",
+                execute_result=_success({"records": []}),
+            ),
+            build_step_evidence(
+                step_id="4:ReportAgent",
+                agent_name="ReportAgent",
+                operation_mode="read",
+                execute_result=_success({"markdown": "# report"}),
+            ),
+            build_step_evidence(
+                step_id="6:EmailAgent",
+                agent_name="EmailAgent",
+                operation_mode="read",
+                execute_result=_success({"sent": True}),
+            ),
+        ],
+        planning_steps=[
+            {"step_id": "step_1", "agent_name": "RiskAgent"},
+            {"step_id": "step_2", "agent_name": "ReportAgent"},
+            {"step_id": "step_3", "agent_name": "EmailAgent"},
+        ],
+    )
+
+    assert evidence.step_coverage == 1.0
+    assert evidence.technical_success is True
+
+
 def test_scheduler_persists_execution_evidence_in_state_and_terminal_event():
     async def execute_step(**_kwargs):
         return _success({"records": []})

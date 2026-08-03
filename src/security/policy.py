@@ -212,6 +212,33 @@ class PolicyEngine:
                     constraints = rule.get("constraints", {})
                     if constraints:
                         self._apply_constraints(result, constraints, subject, object, scenario, action)
+                    # Resource-level environment restrictions are intrinsic to
+                    # the target and must still apply when a policy rule
+                    # matches.  Previously a matching ALLOW rule returned
+                    # before ``_check_default_rules`` and silently skipped
+                    # constraints such as ``require_internal_network``.
+                    self._apply_resource_environment_constraints(
+                        result, subject, object, scenario
+                    )
+                    # An explicit ALLOW policy narrows who may use a resource;
+                    # it must never bypass the resource's intrinsic roles,
+                    # grants, clearance, scenario-fit or mandatory-review
+                    # attributes. Evaluate the same fail-closed baseline used
+                    # when no named policy matches and let any stricter outcome
+                    # override the policy ALLOW.
+                    if result.get("allowed"):
+                        intrinsic = self._check_default_rules(
+                            subject, object, scenario, action
+                        )
+                        if not intrinsic.get("allowed"):
+                            for key in (
+                                "allowed",
+                                "reason",
+                                "human_review_required",
+                                "approval_level",
+                                "decision",
+                            ):
+                                result[key] = intrinsic.get(key)
                     self._finalize_result(result)
                     self._log_audit(subject, object, scenario, action, result, matched_policy, matched_rule)
                     return result
@@ -324,13 +351,71 @@ class PolicyEngine:
             result["reason"] = f"Amount exceeds threshold: {max_amount}"
             self._mark_for_review(result, level="HIGH")
 
-        if constraints.get("require_working_hours") and not scenario.is_working_hours():
+        bypass_environment = self._bypasses_environment_constraints(subject)
+        if (
+            constraints.get("require_working_hours")
+            and not bypass_environment
+            and not scenario.is_working_hours()
+        ):
             result["allowed"] = False
             result["reason"] = "Operation not allowed outside working hours"
 
-        if constraints.get("require_internal_network") and not scenario.is_internal_network():
+        if (
+            constraints.get("require_internal_network")
+            and not bypass_environment
+            and not scenario.is_internal_network()
+        ):
             result["allowed"] = False
             result["reason"] = "Operation not allowed from external network"
+
+    @staticmethod
+    def _bypasses_environment_constraints(subject: Subject) -> bool:
+        """Allow the system administrator to operate the demo at any time.
+
+        The bypass is deliberately narrow: ordinary communication and HR
+        roles are still subject to working-hour and network-zone controls.
+        """
+
+        grants = {str(item).lower() for item in subject.get_grants()}
+        job_roles = {str(item).lower() for item in subject.get_job_roles()}
+        return "all" in grants or "system_orchestrator" in job_roles
+
+    @staticmethod
+    def _bypasses_mandatory_review(subject: Subject) -> bool:
+        """Governance administrators may run the local demo without pausing.
+
+        This bypass is deliberately limited to mandatory human review. It does
+        not turn a policy DENY, scenario mismatch or unsupported operation mode
+        into an ALLOW.
+        """
+
+        grants = {str(item).lower() for item in subject.get_grants()}
+        job_roles = {str(item).lower() for item in subject.get_job_roles()}
+        return "all" in grants or "system_orchestrator" in job_roles
+
+    def _apply_resource_environment_constraints(
+        self,
+        result: Dict[str, Any],
+        subject: Subject,
+        object: Object,
+        scenario: Scenario,
+    ) -> None:
+        if self._bypasses_environment_constraints(subject):
+            return
+        if (
+            object.attributes.get("require_working_hours")
+            and not scenario.is_working_hours()
+        ):
+            result["allowed"] = False
+            result["reason"] = "Operation not allowed outside working hours"
+            result["decision"] = "DENY"
+        if (
+            object.attributes.get("require_internal_network")
+            and not scenario.is_internal_network()
+        ):
+            result["allowed"] = False
+            result["reason"] = "Operation not allowed from external network"
+            result["decision"] = "DENY"
 
     def _check_default_rules(
         self,
@@ -389,11 +474,20 @@ class PolicyEngine:
                 result["decision"] = "REVIEW_REQUIRED"
             return result
 
-        if object.attributes.get("require_working_hours") and not scenario.is_working_hours():
+        bypass_environment = self._bypasses_environment_constraints(subject)
+        if (
+            object.attributes.get("require_working_hours")
+            and not bypass_environment
+            and not scenario.is_working_hours()
+        ):
             result["reason"] = "Operation not allowed outside working hours"
             return result
 
-        if object.attributes.get("require_internal_network") and not scenario.is_internal_network():
+        if (
+            object.attributes.get("require_internal_network")
+            and not bypass_environment
+            and not scenario.is_internal_network()
+        ):
             result["reason"] = "Operation not allowed from external network"
             return result
 
@@ -404,13 +498,18 @@ class PolicyEngine:
             result["decision"] = "REVIEW_REQUIRED"
             return result
 
-        if action.is_irreversible() and self._is_high_sensitivity_or_irreversible(object, action):
+        bypass_review = self._bypasses_mandatory_review(subject)
+        if (
+            action.is_irreversible()
+            and self._is_high_sensitivity_or_irreversible(object, action)
+            and not bypass_review
+        ):
             result["reason"] = "Irreversible high-risk operation requires review"
             self._mark_for_review(result, level="HIGH")
             result["decision"] = "REVIEW_REQUIRED"
             return result
 
-        if object.requires_human_approval():
+        if object.requires_human_approval() and not bypass_review:
             result["reason"] = "Operation requires human approval"
             self._mark_for_review(result, level="MEDIUM")
             result["decision"] = "REVIEW_REQUIRED"

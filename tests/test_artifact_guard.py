@@ -132,13 +132,45 @@ def test_guard_allows_only_listed_reader_cross_user(monkeypatch):
     monkeypatch.setattr(guard, "_evaluate", lambda *a, **k: True)
     # engineer is explicitly authorized to read hr_manager's artifact.
     listed = _artifact(Sensitivity.CONFIDENTIAL, name="salary",
-                       owner_user_id="hr_manager", allowed_reader_ids=["engineer"])
+                       owner_user_id="hr_manager", allowed_reader_ids=["engineer"],
+                       reader_grants_source="trusted_server")
     assert guard.can_read(subject="engineer", artifact=listed) is True
     # A user NOT on the list is denied at the ownership gate (policy stub allow
     # is irrelevant).
     other = _artifact(Sensitivity.CONFIDENTIAL, name="salary",
                       owner_user_id="hr_manager", allowed_reader_ids=["someone_else"])
     assert guard.can_read(subject="engineer", artifact=other) is False
+
+
+def test_guard_ignores_untrusted_cross_user_reader_roster(monkeypatch):
+    monkeypatch.setattr(env, "S_ABAC_ENABLED", True)
+    guard = PolicyEngineArtifactGuard()
+    monkeypatch.setattr(guard, "_evaluate", lambda *a, **k: True)
+    artifact = _artifact(
+        Sensitivity.CONFIDENTIAL,
+        name="salary",
+        owner_user_id="hr_manager",
+        allowed_reader_ids=["engineer"],
+    )
+
+    assert guard.can_read(subject="engineer", artifact=artifact) is False
+
+
+def test_guard_denies_consumer_agent_not_available_to_user(monkeypatch):
+    monkeypatch.setattr(env, "S_ABAC_ENABLED", True)
+    guard = PolicyEngineArtifactGuard()
+    monkeypatch.setattr(guard, "_evaluate", lambda *a, **k: True)
+    artifact = _artifact(
+        Sensitivity.INTERNAL,
+        name="research",
+        owner_user_id="guest",
+    )
+
+    assert guard.can_read(
+        subject="guest",
+        artifact=artifact,
+        scenario={"consumer_agent_id": "RemoteEmailDispatchAgent"},
+    ) is False
 
 
 def test_guard_denies_on_policy_exception_for_owner(monkeypatch):

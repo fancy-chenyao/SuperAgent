@@ -428,6 +428,14 @@
                   </div>
                   <div id="checkpointsList" class="checkpoints-list"></div>
                 </div>
+                <!-- Governance timeline -->
+                <div class="detail-card" id="governancePanel" style="display:none">
+                  <div class="tasks-detail-header">
+                    <h3>Governance Timeline</h3>
+                    <span id="governanceTaskId" class="task-id-badge"></span>
+                  </div>
+                  <div id="governanceTimeline" class="governance-timeline"></div>
+                </div>
                 <!-- Log panel -->
                 <div class="detail-card" id="logPanel" style="display:none">
                   <div class="tasks-detail-header">
@@ -507,6 +515,27 @@
                     </div>
                   </div>
                   <div class="detail-card">
+                    <div class="summary-header">
+                      <h3>人工审批队列</h3>
+                      <button id="refreshApprovalsBtn" class="ghost" type="button">刷新</button>
+                    </div>
+                    <div id="securityApprovals" class="sec-approvals">
+                      <div class="sec-empty">暂无待审批任务</div>
+                    </div>
+                  </div>
+                  <div class="detail-card">
+                    <div class="summary-header">
+                      <h3>人工核对队列</h3>
+                      <button id="refreshReconciliationsBtn" class="ghost" type="button">刷新</button>
+                    </div>
+                    <p class="sec-reconciliation-help">
+                      用于处理外部副作用结果不确定的任务。核对外部系统后，再选择安全重试、确认成功、冻结或终止。
+                    </p>
+                    <div id="securityReconciliations" class="sec-approvals">
+                      <div class="sec-empty">暂无待核对任务</div>
+                    </div>
+                  </div>
+                  <div class="detail-card">
                     <h3>工具权限矩阵</h3>
                     <div id="toolAccessGrid" class="sec-tool-grid"></div>
                   </div>
@@ -522,7 +551,7 @@
       </main>
     </div>
 
-    <script src="/static/app.js?v=20260722-chat-1"></script>
-    <script src="/static/security.js"></script>
+    <script src="/static/app.js?v=20260729-conversation-cleanup-1"></script>
+    <script src="/static/security.js?v=20260729-reconciliation-1"></script>
   </body>
 </html>

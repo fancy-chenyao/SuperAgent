@@ -192,20 +192,9 @@ class RemoteHRAssistantAgent(BaseRemoteAgent):
                 )
                 logger.info(f"[{self.name}] Salary params: {json.dumps(salary_params, ensure_ascii=False)}")
 
-                # If we have person results, use employee IDs from them
-                if "person_info" in results and isinstance(results["person_info"], list):
-                    # Try multiple possible field names for employee_id
-                    employee_ids = []
-                    for p in results["person_info"]:
-                        if not isinstance(p, dict):
-                            continue
-                        emp_id = p.get("employee_id") or p.get("idvId") or p.get("empeInfBtlmprBtnc")
-                        if emp_id:
-                            employee_ids.append(str(emp_id))
-
-                    if employee_ids:
-                        salary_params["employee_id_list"] = employee_ids
-                        logger.info(f"[{self.name}] Using employee IDs from person query: {employee_ids}")
+                # Keep the salary lookup on the scheduler-approved employee
+                # binding. IDs learned inside the remote Agent must not replace
+                # the employee_name/employee_id that was reviewed upstream.
 
                 logger.info(f"[{self.name}] Calling salary info tool")
                 salary_result = await self.call_tool(

@@ -174,6 +174,54 @@ def test_verify_compares_goal_from_trusted_execution_state(tmp_path):
     assert rejected is None and "task_graph mismatch" in rejected_reason
 
 
+def test_verify_rebuilds_with_same_trusted_task_profile_subtasks(tmp_path):
+    steps = [
+        {
+            "agent_name": "RemoteHRCalendarAgent",
+            "subtask_ids": ["calendar-query"],
+        }
+    ]
+    subtasks = [
+        {
+            "id": "calendar-query",
+            "intent": "schedule_management",
+            "action": "read",
+            "depends_on": [],
+        }
+    ]
+    task_graph = plan_to_task_graph(
+        steps,
+        task_id="wf-1",
+        subject="u1",
+        subtasks=subtasks,
+    ).model_dump()
+    snap = save_plan_snapshot(
+        workflow_id="wf-1",
+        user_id="u1",
+        planning_steps=steps,
+        task_graph=task_graph,
+        base_dir=tmp_path,
+    )
+
+    accepted, accepted_reason = verify_snapshot_for_execution(
+        snap,
+        workflow_id="wf-1",
+        user_id="u1",
+        planning_steps=steps,
+        subtasks=subtasks,
+    )
+    rejected, rejected_reason = verify_snapshot_for_execution(
+        snap,
+        workflow_id="wf-1",
+        user_id="u1",
+        planning_steps=steps,
+    )
+
+    assert accepted is not None and accepted_reason == "ok"
+    assert accepted["steps"][0]["operation_mode"] == "read"
+    assert rejected is None and "task_graph mismatch" in rejected_reason
+
+
 def test_verify_rejects_modified_operation_mode(tmp_path):
     snap = _saved_snapshot(tmp_path)
     snap["task_graph"]["steps"][0]["operation_mode"] = "send"

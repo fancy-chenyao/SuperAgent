@@ -28,6 +28,7 @@ class WorkflowStatus(str, Enum):
     FAILED = "FAILED"
     PARTIAL_FAILED = "PARTIAL_FAILED"
     CLARIFY_REQUIRED = "CLARIFY_REQUIRED"
+    APPROVAL_REQUIRED = "APPROVAL_REQUIRED"
     REJECTED = "REJECTED"
     NEEDS_RECONCILIATION = "NEEDS_RECONCILIATION"
 
@@ -78,6 +79,9 @@ class TaskStep(BaseModel):
     timeout: Optional[float] = None  # seconds
     retry: int = 0  # max retries
     resource_locks: List[str] = Field(default_factory=list)
+    # Optional business compensation contract. Recovery planning surfaces this
+    # for a human/operator; it is never executed blindly as an ordinary retry.
+    compensation_action: Optional[Dict[str, Any]] = None
     preferred_resource_id: Optional[str] = None
 
     model_config = ConfigDict(extra="allow")

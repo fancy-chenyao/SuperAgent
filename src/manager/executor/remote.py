@@ -358,6 +358,9 @@ class RemoteExecutor(AgentExecutor):
                 })
 
         idempotency_key = (context.metadata or {}).get("idempotency_key")
+        authorized_remote_tools = (context.metadata or {}).get(
+            "authorized_remote_tools", []
+        )
 
         request = {
             "agent_name": agent.agent_name,
@@ -371,6 +374,9 @@ class RemoteExecutor(AgentExecutor):
                 # Surfaced so an idempotency-aware remote agent/tool can dedupe
                 # a side effect (e.g. reuse a message id) instead of re-sending.
                 "idempotency_key": idempotency_key,
+                # Platform-authorized internal resources.  The remote service
+                # uses this as a deny-by-default manifest when it is present.
+                "authorized_remote_tools": authorized_remote_tools,
             },
         }
 
@@ -396,6 +402,7 @@ class RemoteExecutor(AgentExecutor):
             "task_id": (context.metadata or {}).get("task_id"),
             "current_step": (context.metadata or {}).get("current_step"),
             "idempotency_key": idempotency_key,
+            "authorized_remote_tools": authorized_remote_tools,
         }
 
         return request

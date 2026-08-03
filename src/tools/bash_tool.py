@@ -51,6 +51,22 @@ class BashTool(BaseTool):
                 return f"{separator} {mapped}".lstrip() if not separator else f"{separator} {mapped}"
 
             cmd = command_pattern.sub(replace_command, cmd)
+
+            # ``BashTool`` accepts Bash-style commands, but Windows ``cmd.exe``
+            # treats single quotes as ordinary output characters.  Translate
+            # simple Bash single-quoted arguments to the equivalent cmd.exe
+            # double-quoted form so commands such as ``echo 'hello'`` behave
+            # consistently across platforms.
+            cmd = re.sub(
+                r"(?i)(\becho\s+)'([^'&|<>]*)'",
+                lambda match: match.group(1) + match.group(2),
+                cmd,
+            )
+            cmd = re.sub(
+                r"'([^']*)'",
+                lambda match: '"' + match.group(1).replace('"', '\\"') + '"',
+                cmd,
+            )
                 
             # Handle here-document syntax (<<) which is not supported in Windows CMD/PowerShell
             if "<<" in cmd:

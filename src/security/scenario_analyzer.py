@@ -56,6 +56,20 @@ def _ordered_union(*values: Any) -> list[str]:
     return merged
 
 
+def _merge_lists(primary: Any, fallback: Any) -> list[str]:
+    """Keep model detail without dropping canonical security domains."""
+
+    merged: list[str] = []
+    seen: set[str] = set()
+    for item in [*_normalize_list(fallback), *_normalize_list(primary)]:
+        normalized = _normalize_token(item)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        merged.append(item)
+    return merged
+
+
 def _merge_task_profile(fallback: Dict[str, Any], llm_result: Dict[str, Any]) -> Dict[str, Any]:
     merged = fallback.copy()
     merged.update(llm_result or {})

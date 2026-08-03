@@ -14,7 +14,13 @@ from src.contracts.agent_contract import AgentContract, DataContractRef
 from src.interface.artifact import ArtifactRef, StepResult, StepStatus
 from src.interface.task_graph import TaskGraph, TaskSpec, TaskStep
 from src.manager.executor.base import ExecuteResult, ExecutionStatus
+from src.orchestration.completion import (
+    PersistentReceiptStore,
+    idempotency_key,
+    normalize_input,
+)
 from src.orchestration.providers import RoutingResult, StubRoutingProvider
+from src.orchestration.reconciliation import get_reconciliation_store
 from src.orchestration.runtime import (
     TrustedSubtaskBindingError,
     _build_execution_context,
@@ -32,6 +38,9 @@ def _isolate_stores(tmp_path, monkeypatch):
     monkeypatch.setenv("ARTIFACT_PAYLOAD_STORE_DIR",
                        str(tmp_path / "artifacts"))
     monkeypatch.setenv("RECEIPT_STORE_DIR", str(tmp_path / "receipts"))
+    monkeypatch.setenv(
+        "RECONCILIATION_STORE_DIR", str(tmp_path / "reconciliations")
+    )
     # Unit tests use synthetic user ``u1``; keep the runtime result-event
     # contract deterministic regardless of a developer's local S-ABAC .env.
     monkeypatch.setattr(
@@ -41,6 +50,56 @@ def _isolate_stores(tmp_path, monkeypatch):
 
 async def _fake_execute(*, step, selected_agent, inputs, context):
     return ExecuteResult(status=ExecutionStatus.SUCCESS, result={"ok": step.step_id})
+
+
+def test_missing_artifact_for_succeeded_receipt_creates_reconciliation_record():
+    step = TaskStep(
+        step_id="send",
+        operation_mode="write",
+        preferred_resource_id="EmailAgent",
+        agent_name="EmailAgent",
+        expected_outputs=["message_id"],
+    )
+    state = {
+        "workflow_id": "wf-receipt-gap",
+        "user_id": "u1",
+        "task_graph": TaskGraph(
+            spec=TaskSpec(task_id="task-1"),
+            steps=[step],
+        ),
+        "messages": [],
+    }
+    key = idempotency_key("task-1", "send", {})
+    PersistentReceiptStore("task-1").put(
+        key,
+        {
+            "idempotency_key": key,
+            "task_id": "task-1",
+            "step_id": "send",
+            "agent": "EmailAgent",
+            "status": "SUCCEEDED",
+            "normalized_input": normalize_input({}),
+            "external_op_id": "mail-1",
+            "expected_outputs": ["message_id"],
+            "expected_schema_refs": {},
+            "outputs_kind": "artifact_refs",
+            "outputs": {
+                "message_id": {"artifact_id": "not-checkpointed", "version": 1}
+            },
+            "timestamp": 1.0,
+        },
+    )
+
+    events = _collect(state)
+
+    reconciliation_event = next(
+        event for event in events if event["event"] == "reconciliation_required"
+    )
+    assert reconciliation_event["data"]["idempotency_key"] == key
+    queued = get_reconciliation_store().list(task_id="task-1")
+    assert len(queued) == 1
+    assert queued[0]["receipt"]["status"] == "SUCCEEDED"
+    assert queued[0]["external_operation_id"] == "mail-1"
 
 
 def test_execution_context_scopes_security_profile_to_current_step():

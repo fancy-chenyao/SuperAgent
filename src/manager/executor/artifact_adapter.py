@@ -188,19 +188,18 @@ def to_artifact(
         if acting_user:
             metadata["owner_user_id"] = acting_user
             metadata["producer_subject"] = acting_user
-        # Governed collaboration: a producing step may declare the users allowed
-        # to read its output across ownership. The artifact guard honors this
-        # ``allowed_reader_ids`` roster so cross-user sharing is *governed* rather
-        # than impossible. Sourced from the step first, then context metadata.
-        # NOTE (production hardening): in production this roster must come from a
-        # TRUSTED authority, not raw (untrusted) planner output.
+        # Cross-user reader grants are accepted only from server-trusted graph
+        # or context metadata. Planner output must never grant Artifact access.
         allowed_readers = None
-        if step is not None:
+        if step is not None and getattr(
+            step, "allowed_reader_ids_trusted", False
+        ) is True:
             allowed_readers = getattr(step, "allowed_reader_ids", None)
         if not allowed_readers:
-            allowed_readers = ctx_meta.get("allowed_reader_ids")
+            allowed_readers = ctx_meta.get("trusted_allowed_reader_ids")
         if allowed_readers:
             metadata["allowed_reader_ids"] = [str(r) for r in allowed_readers]
+            metadata["reader_grants_source"] = "trusted_server"
         producer_agent_id = ctx_meta.get(
             "producer_agent_id") or ctx_meta.get("selected_agent")
         if producer_agent_id:

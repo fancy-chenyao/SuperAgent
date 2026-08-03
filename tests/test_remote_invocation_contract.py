@@ -155,6 +155,33 @@ def test_remote_agent_request_carries_idempotency_key():
     assert request["security_context"]["idempotency_key"] == "idem-abc"
 
 
+def test_remote_agent_request_carries_platform_authorized_tool_manifest():
+    executor = RemoteExecutor()
+    agent = SimpleNamespace(
+        agent_name="RemoteHRAssistantAgent", prompt="", selected_tools=[]
+    )
+    manifest = [
+        {
+            "tool_name": "remote_salary_info_tool",
+            "arguments": {"employee_name": "李娜", "intent": "salary_query"},
+            "decision": "ALLOW_APPROVED",
+        }
+    ]
+    context = ExecutionContext(
+        user_id="hr_manager",
+        workflow_id="wf-1",
+        workflow_mode="production",
+        metadata={"authorized_remote_tools": manifest},
+    )
+
+    request = executor._build_request(
+        agent, [{"role": "user", "content": "查询李娜工资"}], context
+    )
+
+    assert request["context"]["authorized_remote_tools"] == manifest
+    assert request["security_context"]["authorized_remote_tools"] == manifest
+
+
 def test_remote_agent_side_effect_disables_internal_retries():
     async def scenario():
         captured = {}

@@ -102,6 +102,18 @@ DEBUG = _parse_bool("DEBUG", False)
 BROWSER_BACKEND = os.getenv("BROWSER_BACKEND")
 MAX_STEPS = _parse_int("MAX_STEPS", 25)
 AUTO_RECOVERY_ENABLED = _parse_bool("AUTO_RECOVERY_ENABLED", False)
+SCHEDULER_AUTO_RECOVERY_MAX_ATTEMPTS = _parse_int(
+    "SCHEDULER_AUTO_RECOVERY_MAX_ATTEMPTS", 1
+)
+SCHEDULER_RETRY_BASE_SECONDS = _parse_float(
+    "SCHEDULER_RETRY_BASE_SECONDS", 0.25
+)
+SCHEDULER_RETRY_MAX_SECONDS = _parse_float(
+    "SCHEDULER_RETRY_MAX_SECONDS", 4.0
+)
+SCHEDULER_RETRY_JITTER_RATIO = _parse_float(
+    "SCHEDULER_RETRY_JITTER_RATIO", 0.2
+)
 S_ABAC_ENABLED = _parse_bool("S_ABAC_ENABLED", False)
 
 # Execution-engine feature flags.
@@ -202,6 +214,12 @@ WORKFLOW_SKILL_PROMOTION_THRESHOLD = _parse_int("WORKFLOW_SKILL_PROMOTION_THRESH
 WORKFLOW_SKILL_FAILURE_THRESHOLD = _parse_int("WORKFLOW_SKILL_FAILURE_THRESHOLD", 2)
 WORKFLOW_SKILL_DB_PATH = os.getenv("WORKFLOW_SKILL_DB_PATH")
 WORKFLOW_SKILL_ADMIN_API_KEY = os.getenv("WORKFLOW_SKILL_ADMIN_API_KEY")
+
+# Governance mutations are privileged operations. The bearer credential
+# authenticates one server-configured principal; request bodies never choose
+# the approver/operator identity.
+GOVERNANCE_ADMIN_API_KEY = os.getenv("GOVERNANCE_ADMIN_API_KEY")
+GOVERNANCE_ADMIN_ACTOR_ID = os.getenv("GOVERNANCE_ADMIN_ACTOR_ID", "admin")
 
 if not DEBUG:
     logging.basicConfig(
