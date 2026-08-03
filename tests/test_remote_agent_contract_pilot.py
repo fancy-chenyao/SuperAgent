@@ -138,6 +138,44 @@ def test_knowledge_preserves_sources_and_not_found_metadata() -> None:
     _validate(result, agent)
 
 
+def test_knowledge_rejects_string_not_found_instead_of_coercing_it() -> None:
+    agent = RemoteKnowledgeAgent()
+
+    async def success(**_kwargs):
+        return {
+            "query": "报销",
+            "answer": "请提交报销单和发票",
+            "knowledge_items_count": 1,
+            "policy_scope": "company",
+            "sources": [
+                {
+                    "id": "reimbursement_001",
+                    "category": "公司制度-费用报销",
+                    "source": "演示公司财务报销制度（模拟）",
+                    "policy_scope": "company",
+                }
+            ],
+            "matched_items": ["reimbursement_001"],
+            "not_found": "false",
+        }
+
+    agent.call_tool = success
+    result = asyncio.run(
+        agent.execute(
+            [{"name": "knowledge_search_tool"}],
+            [],
+            {},
+            Extractor({"query": "报销"}),
+        )
+    )
+
+    assert result["status"] == "error"
+    assert result["outputs"] == {}
+    assert result["error"]["code"] == "REMOTE_TOOL_ERROR"
+    assert "expected bool, got str" in result["error"]["message"]
+    _validate(result, agent)
+
+
 def test_report_returns_generic_markdown_output() -> None:
     agent = RemoteReportAgent()
 
