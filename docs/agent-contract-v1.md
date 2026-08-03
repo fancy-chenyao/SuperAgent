@@ -109,13 +109,20 @@ Contract v1 registers these schemas in the existing `SchemaRegistry`:
 - `employee.info@v1`: employee record collection, optional query and match count.
 - `employee.salary@v1`: salary record collection and match count.
 - `policy.info@v1`: query, answer, knowledge item count, and policy scope. The
-  prototype may also include `sources`, `matched_items`, and `not_found` metadata
-  so a caller can show provenance and handle an empty match without guessing.
+  provenance group (`sources`, `matched_items`, and `not_found`) is optional as
+  a whole for compatibility with v1 callers. If any provenance field is present,
+  all three must be present; partial provenance metadata is contract-invalid.
 - `report.sources@v1`: generic report sources, instruction, and title.
 - `report.markdown@v1`: title, Markdown body, and source count.
 
 `policy_scope` is one of `company`, `statutory`, `mixed`, or `unknown`.
 Statutory material must not be presented as a current internal company policy.
+For a matched result, `knowledge_items_count` must equal the lengths of `sources`
+and `matched_items`, source IDs must match item IDs, and IDs and source names
+must be non-empty. The top-level `policy_scope` must be derived from source
+scopes. One distinct source scope is preserved; multiple distinct source scopes
+produce `mixed`. For an unmatched result, the count and both arrays must be
+empty and `policy_scope` must be `unknown`.
 
 ## Pilot contracts
 

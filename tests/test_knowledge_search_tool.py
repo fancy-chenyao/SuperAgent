@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 import mock_remote_tool_skill as tool_skill
+import pytest
 
 
 class _FakeResponse:
@@ -72,9 +73,29 @@ def test_ambiguous_query_can_keep_multiple_relevant_matches() -> None:
     ]
 
 
-def test_knowledge_search_limits_llm_context_and_returns_sources(monkeypatch) -> None:
+def test_knowledge_sources_reject_invalid_traceability_metadata() -> None:
+    item = dict(_knowledge_items()[0])
+    item["is_demo"] = False
+    assert tool_skill._knowledge_sources([(item, [])])[0]["is_demo"] is False
+
+    item["is_demo"] = "false"
+
+    with pytest.raises(TypeError, match="expected bool, got str"):
+        tool_skill._knowledge_sources([(item, [])])
+
+    item["is_demo"] = True
+    item["id"] = ""
+    with pytest.raises(ValueError, match="id must be a non-empty string"):
+        tool_skill._knowledge_sources([(item, [])])
+
+
+def test_knowledge_search_limits_context_and_returns_sources(monkeypatch) -> None:
     fake_llm = _FakeLLM()
-    monkeypatch.setattr(tool_skill, "_KNOWLEDGE_CACHE", {"knowledge_items": _knowledge_items()})
+    monkeypatch.setattr(
+        tool_skill,
+        "_KNOWLEDGE_CACHE",
+        {"knowledge_items": _knowledge_items()},
+    )
     monkeypatch.setattr(tool_skill, "get_llm_by_type", lambda _name: fake_llm)
 
     response = asyncio.run(
@@ -99,8 +120,12 @@ def test_knowledge_search_limits_llm_context_and_returns_sources(monkeypatch) ->
     assert "annual_leave_001" not in fake_llm.prompts[0]
 
 
-def test_knowledge_search_returns_structured_not_found_without_llm(monkeypatch) -> None:
-    monkeypatch.setattr(tool_skill, "_KNOWLEDGE_CACHE", {"knowledge_items": _knowledge_items()})
+def test_knowledge_search_returns_not_found_without_llm(monkeypatch) -> None:
+    monkeypatch.setattr(
+        tool_skill,
+        "_KNOWLEDGE_CACHE",
+        {"knowledge_items": _knowledge_items()},
+    )
 
     def fail_if_called(_name):
         raise AssertionError("LLM must not be called for an unmatched query")

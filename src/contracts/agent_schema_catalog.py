@@ -5,6 +5,24 @@ from typing import Any
 from src.orchestration.schema_registry import SchemaRegistry, get_schema_registry
 
 
+_POLICY_SCOPES = {"company", "statutory", "mixed", "unknown"}
+
+
+def _policy_scope_from_sources(sources: list[dict[str, Any]]) -> str | None:
+    source_scopes = [source.get("policy_scope") for source in sources]
+    if not all(
+        isinstance(scope, str) and scope in _POLICY_SCOPES
+        for scope in source_scopes
+    ):
+        return None
+    scopes = set(source_scopes)
+    if not scopes:
+        return "unknown"
+    if len(scopes) == 1:
+        return next(iter(scopes))
+    return "mixed"
+
+
 def _validate_policy_info_provenance(value: Any, path: str) -> list[str]:
     if not isinstance(value, dict):
         return []
@@ -51,6 +69,11 @@ def _validate_policy_info_provenance(value: Any, path: str) -> list[str]:
             errors.append(
                 f"{path}.matched_items: expected an empty array when not_found is true"
             )
+        if value.get("policy_scope") != "unknown":
+            errors.append(
+                f"{path}.policy_scope: expected 'unknown' when not_found is true, "
+                f"got {value.get('policy_scope')!r}"
+            )
         return errors
 
     if count <= 0:
@@ -72,6 +95,10 @@ def _validate_policy_info_provenance(value: Any, path: str) -> list[str]:
     ):
         source_ids = [source.get("id") for source in sources]
         if all(isinstance(source_id, str) for source_id in source_ids):
+            if any(not source_id.strip() for source_id in source_ids):
+                errors.append(f"{path}.sources: source ids must be non-empty")
+            if any(not item.strip() for item in matched_items):
+                errors.append(f"{path}.matched_items: item ids must be non-empty")
             if len(set(source_ids)) != len(source_ids):
                 errors.append(f"{path}.sources: source ids must be unique")
             if len(set(matched_items)) != len(matched_items):
@@ -80,6 +107,20 @@ def _validate_policy_info_provenance(value: Any, path: str) -> list[str]:
                 errors.append(
                     f"{path}: source ids must match matched_items exactly"
                 )
+
+        source_names = [source.get("source") for source in sources]
+        if all(isinstance(source_name, str) for source_name in source_names) and any(
+            not source_name.strip() for source_name in source_names
+        ):
+            errors.append(f"{path}.sources: source names must be non-empty")
+
+        expected_scope = _policy_scope_from_sources(sources)
+        actual_scope = value.get("policy_scope")
+        if expected_scope is not None and actual_scope != expected_scope:
+            errors.append(
+                f"{path}.policy_scope: expected {expected_scope!r} derived from "
+                f"sources, got {actual_scope!r}"
+            )
     return errors
 
 

@@ -508,12 +508,21 @@ def _knowledge_sources(
     """Build compact, UI/report-friendly provenance records."""
     sources: List[Dict[str, Any]] = []
     for item, _ in ranked_items:
+        source_id = str(item.get("id") or "").strip()
+        if not source_id:
+            raise ValueError("Knowledge item id must be a non-empty string")
+        is_demo = item.get("is_demo", True)
+        if not isinstance(is_demo, bool):
+            raise TypeError(
+                f"Knowledge item {source_id!r} has contract-invalid is_demo: "
+                f"expected bool, got {type(is_demo).__name__}"
+            )
         source: Dict[str, Any] = {
-            "id": str(item.get("id") or ""),
+            "id": source_id,
             "category": str(item.get("category") or ""),
             "source": str(item.get("source") or "演示知识库"),
             "policy_scope": str(item.get("policy_scope") or "unknown"),
-            "is_demo": bool(item.get("is_demo", True)),
+            "is_demo": is_demo,
         }
         if item.get("effective_date"):
             source["effective_date"] = str(item["effective_date"])
@@ -535,7 +544,8 @@ def _knowledge_policy_scope(
         return "unknown"
     if len(scopes) == 1:
         scope = next(iter(scopes))
-        return scope if scope in {"company", "statutory", "mixed", "unknown"} else "unknown"
+        allowed_scopes = {"company", "statutory", "mixed", "unknown"}
+        return scope if scope in allowed_scopes else "unknown"
     return "mixed"
 
 
@@ -1753,7 +1763,10 @@ async def tool(req: ToolRequest, authorization: Optional[str] = Header(default=N
                     "matched_items": [],
                     "not_found": True,
                 }
-                logger.info("Knowledge search found no matching item for query: %s", query)
+                logger.info(
+                    "Knowledge search found no matching item for query: %s",
+                    query,
+                )
             else:
                 # 使用LLM基于已命中的条目组织答案，而不是把整库内容放入提示词。
                 matched_items = []
@@ -1762,7 +1775,8 @@ async def tool(req: ToolRequest, authorization: Optional[str] = Header(default=N
                     matched_items.append(f"编号: {item.get('id', '')}")
                     matched_items.append(f"类别: {item.get('category', '')}")
                     matched_items.append(f"问题: {item.get('question', '')}")
-                    matched_items.append(f"关键词命中: {', '.join(matched_keywords) or '元数据匹配'}")
+                    keyword_summary = ", ".join(matched_keywords) or "元数据匹配"
+                    matched_items.append(f"关键词命中: {keyword_summary}")
                     matched_items.append(f"来源: {item.get('source', '演示知识库')}")
                     if item.get("effective_date"):
                         matched_items.append(f"生效日期: {item['effective_date']}")
@@ -1802,7 +1816,10 @@ async def tool(req: ToolRequest, authorization: Optional[str] = Header(default=N
                     answer = str(response) if response is not None else "无法生成回答"
 
                 logger.info("Knowledge search completed for query: %s", query)
-                logger.info("Knowledge matches: %s", [source["id"] for source in sources])
+                logger.info(
+                    "Knowledge matches: %s",
+                    [source["id"] for source in sources],
+                )
                 logger.info("Full answer:\n%s", answer)
 
                 result = {
