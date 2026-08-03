@@ -553,6 +553,19 @@ def test_side_effect_success_without_provider_id_requires_immediate_reconciliati
     assert calls["n"] == 1
 
 
+def test_nested_provider_id_is_available_without_normalized_artifact():
+    from src.orchestration.scheduler import _external_operation_id
+
+    exec_result = ExecuteResult(
+        status=ExecutionStatus.SUCCESS,
+        result={"status": "sent", "sent": {"id": "mail-after-error"}},
+    )
+
+    # Result normalization can fail after the external operation returned. In
+    # that path reconciliation has no Artifact and must use the raw result.
+    assert _external_operation_id(exec_result, None) == "mail-after-error"
+
+
 def test_dispatch_permission_denial_is_not_retried_or_misclassified():
     from src.security.enforcement import PermissionDeniedError
 

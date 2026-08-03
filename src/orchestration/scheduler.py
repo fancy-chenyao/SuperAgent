@@ -118,31 +118,38 @@ def _external_operation_id(exec_result: Any, artifact: Any) -> Optional[str]:
                 ("business_outcome", "resource", "id"),
             )
         )
+    provider_paths = (
+        ("external_op_id",),
+        ("external_operation_id",),
+        ("operation_id",),
+        ("message_id",),
+        ("request_id",),
+        ("submission_id",),
+        # Provider-specific result envelopes used by remote write tools.
+        ("sent", "id"),
+        ("sent", "message_id"),
+        ("message", "id"),
+        ("event", "id"),
+        ("meeting", "id"),
+        ("submission", "id"),
+        ("resource", "id"),
+        ("business_outcome", "external_op_id"),
+        ("business_outcome", "external_operation_id"),
+        ("business_outcome", "resource_id"),
+        ("business_outcome", "resource", "id"),
+    )
+    # Read the raw result first.  A trusted output contract may split it into
+    # several Artifacts, in which case the first Artifact need not contain the
+    # provider receipt id.  The normalized payload remains a compatibility
+    # fallback for adapters that expose their identifier there.
+    raw_result = getattr(exec_result, "result", None)
     payload = getattr(artifact, "payload", None)
-    if isinstance(payload, Mapping):
-        candidates.extend(
-            _mapping_path(payload, *path)
-            for path in (
-                ("external_op_id",),
-                ("external_operation_id",),
-                ("operation_id",),
-                ("message_id",),
-                ("request_id",),
-                ("submission_id",),
-                # Provider-specific result envelopes used by remote write tools.
-                ("sent", "id"),
-                ("sent", "message_id"),
-                ("message", "id"),
-                ("event", "id"),
-                ("meeting", "id"),
-                ("submission", "id"),
-                ("resource", "id"),
-                ("business_outcome", "external_op_id"),
-                ("business_outcome", "external_operation_id"),
-                ("business_outcome", "resource_id"),
-                ("business_outcome", "resource", "id"),
+    for source in (raw_result, payload):
+        if isinstance(source, Mapping):
+            candidates.extend(
+                _mapping_path(source, *path)
+                for path in provider_paths
             )
-        )
     for value in candidates:
         if value is not None and str(value).strip():
             return str(value).strip()
