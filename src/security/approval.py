@@ -5,6 +5,7 @@ import json
 import os
 import tempfile
 import threading
+import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -116,7 +117,14 @@ class ApprovalStore:
                 return existing
 
             now = datetime.now().isoformat()
-            approval_id = f"approval_{int(datetime.now().timestamp() * 1000)}_{signature[:10]}"
+            # Approval ids are global filenames, so neither a millisecond
+            # timestamp nor a policy-signature prefix is a safe discriminator
+            # across tasks.  Generation happens under the cross-process store
+            # lock and retries even the vanishingly unlikely UUID collision.
+            while True:
+                approval_id = f"approval_{uuid.uuid4().hex}"
+                if not self._path(approval_id).exists():
+                    break
             request = ApprovalRequest(
                 approval_id=approval_id,
                 status="pending",

@@ -315,6 +315,49 @@ def test_approved_request_is_consumed_once_across_store_instances(tmp_path):
     assert creator.get(approval.approval_id).status == "consumed"
 
 
+def test_concurrent_approval_creation_never_overwrites_another_task(
+    tmp_path, monkeypatch
+):
+    import src.security.approval as approval_module
+
+    class FixedDatetime:
+        @classmethod
+        def now(cls):
+            return SimpleNamespace(
+                isoformat=lambda: "2026-08-03T12:00:00",
+                timestamp=lambda: 1785729600.0,
+            )
+
+    # Reproduce the old collision condition: identical policy signature and
+    # exactly the same clock millisecond, but two different tasks/stores.
+    monkeypatch.setattr(approval_module, "datetime", FixedDatetime)
+    base_dir = tmp_path / "approvals"
+    stores = [ApprovalStore(base_dir), ApprovalStore(base_dir)]
+
+    def create(item):
+        index, store = item
+        return store.create(
+            user_id="u1",
+            workflow_id=f"wf-{index}",
+            task_id=f"task-{index}",
+            resume_step=1,
+            node_name="A",
+            subject={"id": "u1"},
+            object={"id": "A"},
+            scenario={},
+            action={"verb": "dispatch"},
+            policy_result={"decision": "REVIEW_REQUIRED"},
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        requests = list(executor.map(create, enumerate(stores, start=1)))
+
+    assert requests[0].approval_id != requests[1].approval_id
+    persisted = ApprovalStore(base_dir).list()
+    assert {request["task_id"] for request in persisted} == {"task-1", "task-2"}
+    assert len(list(base_dir.glob("approval_*.json"))) == 2
+
+
 def test_governance_event_store_filters_events(tmp_path, monkeypatch):
     monkeypatch.setenv(
         "GOVERNANCE_EVENT_STORE_DIR", str(tmp_path / "governance")

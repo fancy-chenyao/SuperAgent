@@ -7,6 +7,8 @@ pytest-asyncio dependency. Concurrency is asserted via a peak-in-flight counter.
 
 import asyncio
 
+import pytest
+
 from src.interface.artifact import StepStatus
 from src.interface.task_graph import TaskGraph, TaskSpec, TaskStep
 from src.manager.executor.base import ExecuteResult, ExecutionStatus
@@ -482,6 +484,73 @@ def test_side_effect_receipt_extracts_provider_id_from_structured_result():
     assert result.metrics["external_op_id"] == "msg-42"
     assert receipt["external_op_id"] == "msg-42"
     assert validate_receipt(receipt, key=result.metrics["idempotency_key"])
+
+
+@pytest.mark.parametrize(
+    ("provider_result", "expected_id"),
+    [
+        ({"status": "sent", "sent": {"id": "mail-42"}}, "mail-42"),
+        ({"status": "created", "event": {"id": "event-42"}}, "event-42"),
+    ],
+)
+def test_side_effect_receipt_extracts_id_from_explicit_provider_envelope(
+    provider_result, expected_id
+):
+    from src.orchestration.completion import ReceiptStore, validate_receipt
+
+    async def exec_step(*, step, selected_agent, inputs, context):
+        return ExecuteResult(
+            status=ExecutionStatus.SUCCESS,
+            result=provider_result,
+        )
+
+    receipts = ReceiptStore()
+    step = _step("remote-write", mode="send", preferred_resource_id="RemoteAgent")
+    scheduler = TaskScheduler(
+        execute_step=exec_step,
+        routing_provider=StubRoutingProvider(),
+        receipt_store=receipts,
+    )
+    result = asyncio.run(
+        scheduler.run(_graph(step), context={"task_id": f"task-{expected_id}"})
+    )["remote-write"]
+    receipt = receipts.get(result.metrics["idempotency_key"])
+
+    assert result.is_success
+    assert result.metrics["external_op_id"] == expected_id
+    assert receipt["external_op_id"] == expected_id
+    assert validate_receipt(receipt, key=result.metrics["idempotency_key"])
+
+
+def test_side_effect_success_without_provider_id_requires_immediate_reconciliation():
+    from src.orchestration.completion import ReceiptStore
+
+    calls = {"n": 0}
+
+    async def exec_step(*, step, selected_agent, inputs, context):
+        calls["n"] += 1
+        return ExecuteResult(
+            status=ExecutionStatus.SUCCESS,
+            result={"status": "sent", "sent": {"accepted": True}},
+        )
+
+    receipts = ReceiptStore()
+    step = _step("email", mode="send", preferred_resource_id="EmailAgent")
+    scheduler = TaskScheduler(
+        execute_step=exec_step,
+        routing_provider=StubRoutingProvider(),
+        receipt_store=receipts,
+    )
+    result = asyncio.run(
+        scheduler.run(_graph(step), context={"task_id": "missing-provider-id"})
+    )["email"]
+    receipt = receipts.get(result.metrics["idempotency_key"])
+
+    assert result.status == StepStatus.FAILED
+    assert result.metrics["needs_reconciliation"] is True
+    assert "external operation id" in result.error
+    assert receipt["status"] == "STARTED"
+    assert calls["n"] == 1
 
 
 def test_dispatch_permission_denial_is_not_retried_or_misclassified():

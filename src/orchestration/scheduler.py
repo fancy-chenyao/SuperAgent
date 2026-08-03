@@ -84,44 +84,63 @@ StepHook = Callable[..., Awaitable[None]]
 _DEFAULT_WRITE_LOCK = "__write__"
 
 
+def _mapping_path(mapping: Mapping[str, Any], *path: str) -> Any:
+    """Read an explicitly trusted provider-id path from a mapping."""
+
+    value: Any = mapping
+    for key in path:
+        if not isinstance(value, Mapping):
+            return None
+        value = value.get(key)
+    return value
+
+
 def _external_operation_id(exec_result: Any, artifact: Any) -> Optional[str]:
-    """Extract a durable provider/business id from normalized executor output."""
+    """Extract a durable provider/business id from normalized executor output.
+
+    Remote tools do not all return the identifier at the top level.  Keep the
+    accepted protocol explicit so an unrelated nested ``id`` (for example a
+    recipient or attachment id) can never accidentally confirm a side effect.
+    """
 
     metadata = getattr(exec_result, "metadata", None) or {}
     candidates: list[Any] = []
     if isinstance(metadata, Mapping):
         candidates.extend(
-            metadata.get(key)
-            for key in (
-                "external_op_id",
-                "external_operation_id",
-                "provider_operation_id",
+            _mapping_path(metadata, *path)
+            for path in (
+                ("external_op_id",),
+                ("external_operation_id",),
+                ("provider_operation_id",),
+                ("business_outcome", "external_op_id"),
+                ("business_outcome", "external_operation_id"),
+                ("business_outcome", "resource_id"),
+                ("business_outcome", "resource", "id"),
             )
         )
     payload = getattr(artifact, "payload", None)
     if isinstance(payload, Mapping):
-        outcome = payload.get("business_outcome")
-        if isinstance(outcome, Mapping):
-            resource = outcome.get("resource")
-            candidates.extend(
-                outcome.get(key)
-                for key in (
-                    "external_op_id",
-                    "external_operation_id",
-                    "resource_id",
-                )
-            )
-            if isinstance(resource, Mapping):
-                candidates.append(resource.get("id"))
         candidates.extend(
-            payload.get(key)
-            for key in (
-                "external_op_id",
-                "external_operation_id",
-                "operation_id",
-                "message_id",
-                "request_id",
-                "submission_id",
+            _mapping_path(payload, *path)
+            for path in (
+                ("external_op_id",),
+                ("external_operation_id",),
+                ("operation_id",),
+                ("message_id",),
+                ("request_id",),
+                ("submission_id",),
+                # Provider-specific result envelopes used by remote write tools.
+                ("sent", "id"),
+                ("sent", "message_id"),
+                ("message", "id"),
+                ("event", "id"),
+                ("meeting", "id"),
+                ("submission", "id"),
+                ("resource", "id"),
+                ("business_outcome", "external_op_id"),
+                ("business_outcome", "external_operation_id"),
+                ("business_outcome", "resource_id"),
+                ("business_outcome", "resource", "id"),
             )
         )
     for value in candidates:
@@ -1761,6 +1780,16 @@ class TaskScheduler:
         # recorded -> do NOT mark success; require reconciliation (never risk a
         # re-send on resume).
         if idem_key is not None:
+            external_op_id = (result.metrics or {}).get("external_op_id")
+            if not isinstance(external_op_id, str) or not external_op_id.strip():
+                return self._needs_reconciliation(
+                    step,
+                    selected_agent,
+                    "side effect succeeded but no durable external operation id was returned",
+                    idempotency_key=idem_key,
+                    receipt={"claim_id": claim_id},
+                    expected_schema_refs=actual_schema_refs,
+                )
             try:
                 self.receipt_store.complete(
                     idem_key,
@@ -1774,7 +1803,7 @@ class TaskScheduler:
                         "normalized_input": normalize_input(inputs),
                         "expected_outputs": list(step.expected_outputs),
                         "expected_schema_refs": dict(actual_schema_refs),
-                        "external_op_id": (result.metrics or {}).get("external_op_id"),
+                        "external_op_id": external_op_id.strip(),
                         "outputs": result.outputs,
                         "outputs_kind": "artifact_refs",
                         "timestamp": time.time(),
