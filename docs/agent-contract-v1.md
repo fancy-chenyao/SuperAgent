@@ -108,12 +108,21 @@ Contract v1 registers these schemas in the existing `SchemaRegistry`:
 
 - `employee.info@v1`: employee record collection, optional query and match count.
 - `employee.salary@v1`: salary record collection and match count.
-- `policy.info@v1`: query, answer, knowledge item count, and policy scope.
+- `policy.info@v1`: query, answer, knowledge item count, and policy scope. The
+  provenance group (`sources`, `matched_items`, and `not_found`) is optional as
+  a whole for compatibility with v1 callers. If any provenance field is present,
+  all three must be present; partial provenance metadata is contract-invalid.
 - `report.sources@v1`: generic report sources, instruction, and title.
 - `report.markdown@v1`: title, Markdown body, and source count.
 
 `policy_scope` is one of `company`, `statutory`, `mixed`, or `unknown`.
 Statutory material must not be presented as a current internal company policy.
+For a matched result, `knowledge_items_count` must equal the lengths of `sources`
+and `matched_items`, source IDs must match item IDs, and IDs and source names
+must be non-empty. The top-level `policy_scope` must be derived from source
+scopes. One distinct source scope is preserved; multiple distinct source scopes
+produce `mixed`. For an unmatched result, the count and both arrays must be
+empty and `policy_scope` must be `unknown`.
 
 ## Pilot contracts
 
@@ -121,8 +130,14 @@ Statutory material must not be presented as a current internal company policy.
 salary request, `employee.salary`.
 
 `RemoteKnowledgeAgent` produces `policy.info`. The current demonstration
-knowledge base contains statutory material, so results default to
-`policy_scope=statutory` unless the tool supplies explicit provenance.
+knowledge base is stored in `assets/knowledge_base.json`; the tool performs a
+small keyword match, removes candidates scoring below half of the best match,
+and sends at most three entries to the LLM. Results default to
+`policy_scope=statutory` unless the tool supplies explicit provenance. Demo
+fixtures use `is_demo=true`; `effective_date` is reserved for an actual policy
+effective date, while `source_updated_at` records the date of a demonstration
+source snapshot. When no item matches, the tool returns `not_found=true`, an
+empty `sources` list, and does not call the LLM.
 
 `RemoteReportAgent` requires the generic `report.sources` input and produces
 `report.markdown`. Its contract is not tied to HR-specific source names.

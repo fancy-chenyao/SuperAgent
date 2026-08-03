@@ -14,6 +14,7 @@ Schema format (minimal subset)::
             "age": {"type": "integer"},
         },
         "additional_properties": True,  # optional, default True
+        "semantic_validator": callable,  # optional, returns a list of errors
     }
 """
 
@@ -89,6 +90,13 @@ def _validate_value(
         item_spec = spec["items"] or {}
         for index, item in enumerate(value):
             _validate_value(item, item_spec, f"{path}[{index}]", errors)
+
+    semantic_validator = spec.get("semantic_validator")
+    if semantic_validator is not None:
+        if not callable(semantic_validator):
+            errors.append(f"{path}: semantic_validator must be callable")
+        else:
+            errors.extend(semantic_validator(value, path))
 
 
 class SchemaRegistry:

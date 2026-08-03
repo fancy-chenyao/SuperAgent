@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from src.contracts.agent_schema_catalog import register_agent_schemas
 from src.orchestration.schema_registry import SchemaRegistry
 
@@ -39,6 +41,312 @@ def test_policy_scope_enum_fails_closed() -> None:
 
     assert not valid
     assert "expected one of" in errors[0]
+
+
+def test_policy_sources_and_not_found_metadata_are_consistent() -> None:
+    registry = register_agent_schemas(SchemaRegistry())
+    valid, errors = registry.validate(
+        {
+            "query": "报销",
+            "answer": "请提交报销单",
+            "knowledge_items_count": 1,
+            "policy_scope": "company",
+            "sources": [
+                {
+                    "id": "reimbursement_001",
+                    "category": "公司制度-费用报销",
+                    "source": "演示公司财务报销制度（模拟）",
+                    "effective_date": "2026-01-01",
+                    "policy_scope": "company",
+                }
+            ],
+            "matched_items": ["reimbursement_001"],
+            "not_found": False,
+        },
+        "policy.info@v1",
+    )
+
+    assert valid, errors
+
+
+def test_policy_not_found_metadata_requires_empty_provenance() -> None:
+    registry = register_agent_schemas(SchemaRegistry())
+    valid, errors = registry.validate(
+        {
+            "query": "不存在的制度",
+            "answer": "未找到相关制度",
+            "knowledge_items_count": 0,
+            "policy_scope": "unknown",
+            "sources": [],
+            "matched_items": [],
+            "not_found": True,
+        },
+        "policy.info@v1",
+    )
+
+    assert valid, errors
+
+
+@pytest.mark.parametrize(
+    "partial_metadata",
+    [
+        {"sources": []},
+        {"matched_items": []},
+        {"not_found": True},
+    ],
+)
+def test_policy_provenance_fields_are_an_atomic_optional_group(
+    partial_metadata: dict[str, object],
+) -> None:
+    registry = register_agent_schemas(SchemaRegistry())
+    payload = {
+        "query": "报销",
+        "answer": "请提交报销单",
+        "knowledge_items_count": 1,
+        "policy_scope": "company",
+    }
+    payload.update(partial_metadata)
+
+    valid, errors = registry.validate(payload, "policy.info@v1")
+
+    assert not valid
+    assert any("provenance field" in error for error in errors)
+
+
+@pytest.mark.parametrize(
+    "source_scopes, expected_scope",
+    [
+        (["company"], "company"),
+        (["statutory"], "statutory"),
+        (["mixed"], "mixed"),
+        (["unknown"], "unknown"),
+        (["company", "statutory"], "mixed"),
+        (["company", "unknown"], "mixed"),
+    ],
+)
+def test_policy_scope_is_derived_from_source_scopes(
+    source_scopes: list[str],
+    expected_scope: str,
+) -> None:
+    registry = register_agent_schemas(SchemaRegistry())
+    source_ids = [f"source_{index}" for index in range(len(source_scopes))]
+    valid, errors = registry.validate(
+        {
+            "query": "制度查询",
+            "answer": "查询结果",
+            "knowledge_items_count": len(source_scopes),
+            "policy_scope": expected_scope,
+            "sources": [
+                {
+                    "id": source_id,
+                    "category": "制度",
+                    "source": "知识库",
+                    "policy_scope": scope,
+                }
+                for source_id, scope in zip(source_ids, source_scopes)
+            ],
+            "matched_items": source_ids,
+            "not_found": False,
+        },
+        "policy.info@v1",
+    )
+
+    assert valid, errors
+
+
+def test_policy_scope_rejects_value_inconsistent_with_sources() -> None:
+    registry = register_agent_schemas(SchemaRegistry())
+    valid, errors = registry.validate(
+        {
+            "query": "报销",
+            "answer": "公司报销流程",
+            "knowledge_items_count": 1,
+            "policy_scope": "statutory",
+            "sources": [
+                {
+                    "id": "reimbursement_001",
+                    "category": "公司制度-费用报销",
+                    "source": "演示公司财务报销制度（模拟）",
+                    "policy_scope": "company",
+                }
+            ],
+            "matched_items": ["reimbursement_001"],
+            "not_found": False,
+        },
+        "policy.info@v1",
+    )
+
+    assert not valid
+    assert any(
+        "expected 'company' derived from sources" in error for error in errors
+    )
+
+
+def test_policy_scope_type_error_does_not_crash_semantic_validation() -> None:
+    registry = register_agent_schemas(SchemaRegistry())
+    valid, errors = registry.validate(
+        {
+            "query": "报销",
+            "answer": "公司报销流程",
+            "knowledge_items_count": 1,
+            "policy_scope": "company",
+            "sources": [
+                {
+                    "id": "reimbursement_001",
+                    "category": "公司制度-费用报销",
+                    "source": "演示公司财务报销制度（模拟）",
+                    "policy_scope": ["company"],
+                }
+            ],
+            "matched_items": ["reimbursement_001"],
+            "not_found": False,
+        },
+        "policy.info@v1",
+    )
+
+    assert not valid
+    assert any("expected string, got list" in error for error in errors)
+
+
+@pytest.mark.parametrize(
+    "source_id, matched_id, source_name, expected_error",
+    [
+        ("", "", "知识库", "source ids must be non-empty"),
+        ("source_0", "", "知识库", "item ids must be non-empty"),
+        ("source_0", "source_0", " ", "source names must be non-empty"),
+    ],
+)
+def test_policy_provenance_requires_non_empty_traceability_fields(
+    source_id: str,
+    matched_id: str,
+    source_name: str,
+    expected_error: str,
+) -> None:
+    registry = register_agent_schemas(SchemaRegistry())
+    valid, errors = registry.validate(
+        {
+            "query": "报销",
+            "answer": "公司报销流程",
+            "knowledge_items_count": 1,
+            "policy_scope": "company",
+            "sources": [
+                {
+                    "id": source_id,
+                    "category": "公司制度-费用报销",
+                    "source": source_name,
+                    "policy_scope": "company",
+                }
+            ],
+            "matched_items": [matched_id],
+            "not_found": False,
+        },
+        "policy.info@v1",
+    )
+
+    assert not valid
+    assert any(expected_error in error for error in errors)
+
+
+def test_policy_not_found_rejects_non_unknown_scope() -> None:
+    registry = register_agent_schemas(SchemaRegistry())
+    valid, errors = registry.validate(
+        {
+            "query": "不存在的制度",
+            "answer": "未找到相关制度",
+            "knowledge_items_count": 0,
+            "policy_scope": "statutory",
+            "sources": [],
+            "matched_items": [],
+            "not_found": True,
+        },
+        "policy.info@v1",
+    )
+
+    assert not valid
+    assert any("expected 'unknown' when not_found is true" in error for error in errors)
+
+
+@pytest.mark.parametrize(
+    "overrides, expected_error",
+    [
+        (
+            {"sources": [], "matched_items": []},
+            "expected 1 entries",
+        ),
+        (
+            {
+                "sources": [
+                    {
+                        "id": "reimbursement_001",
+                        "category": "公司制度-费用报销",
+                        "source": "演示公司财务报销制度（模拟）",
+                        "policy_scope": "company",
+                    }
+                ],
+                "matched_items": ["leave_001"],
+            },
+            "source ids must match matched_items exactly",
+        ),
+        (
+            {"not_found": True},
+            "expected 0 when not_found is true",
+        ),
+    ],
+)
+def test_policy_provenance_rejects_internally_inconsistent_results(
+    overrides: dict[str, object],
+    expected_error: str,
+) -> None:
+    registry = register_agent_schemas(SchemaRegistry())
+    payload = {
+        "query": "报销",
+        "answer": "请提交报销单",
+        "knowledge_items_count": 1,
+        "policy_scope": "company",
+        "sources": [
+            {
+                "id": "reimbursement_001",
+                "category": "公司制度-费用报销",
+                "source": "演示公司财务报销制度（模拟）",
+                "policy_scope": "company",
+            }
+        ],
+        "matched_items": ["reimbursement_001"],
+        "not_found": False,
+    }
+    payload.update(overrides)
+
+    valid, errors = registry.validate(payload, "policy.info@v1")
+
+    assert not valid
+    assert any(expected_error in error for error in errors)
+
+
+def test_policy_source_snapshot_date_does_not_require_effective_date() -> None:
+    registry = register_agent_schemas(SchemaRegistry())
+    valid, errors = registry.validate(
+        {
+            "query": "养老金",
+            "answer": "演示答案",
+            "knowledge_items_count": 1,
+            "policy_scope": "statutory",
+            "sources": [
+                {
+                    "id": "pension_001",
+                    "category": "社保-养老金",
+                    "source": "公开办事说明（演示摘录）",
+                    "source_updated_at": "2026-01-01",
+                    "policy_scope": "statutory",
+                    "is_demo": True,
+                }
+            ],
+            "matched_items": ["pension_001"],
+            "not_found": False,
+        },
+        "policy.info@v1",
+    )
+
+    assert valid, errors
 
 
 def test_report_source_items_require_logical_name_schema_and_payload() -> None:

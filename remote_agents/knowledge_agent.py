@@ -76,6 +76,24 @@ class RemoteKnowledgeAgent(BaseRemoteAgent):
                 ),
                 "policy_scope": policy_scope,
             }
+            sources = result.get("sources")
+            if isinstance(sources, list):
+                payload["sources"] = [
+                    source for source in sources if isinstance(source, dict)
+                ]
+            matched_items = result.get("matched_items")
+            if isinstance(matched_items, list):
+                payload["matched_items"] = [
+                    str(item) for item in matched_items if item is not None
+                ]
+            if "not_found" in result:
+                not_found = result.get("not_found")
+                if not isinstance(not_found, bool):
+                    raise TypeError(
+                        "knowledge_search_tool returned contract-invalid "
+                        f"not_found: expected bool, got {type(not_found).__name__}"
+                    )
+                payload["not_found"] = not_found
             return self.result_envelope(outputs={"policy.info": payload})
         except Exception as exc:
             return self.result_envelope(
