@@ -1348,25 +1348,7 @@ class TaskScheduler:
                     "status": "STARTED",
                     "normalized_input": normalize_input(inputs),
                     "expected_outputs": list(step.expected_outputs),
-                    "expected_schema_refs": {
-                        name: (
-                            step.expected_schema_refs.get(name)
-                            or (
-                                step.expected_schema_ref
-                                if len(step.expected_outputs) == 1
-                                else None
-                            )
-                        )
-                        for name in step.expected_outputs
-                        if (
-                            step.expected_schema_refs.get(name)
-                            or (
-                                step.expected_schema_ref
-                                if len(step.expected_outputs) == 1
-                                else None
-                            )
-                        )
-                    },
+                    "expected_schema_refs": self._expected_schema_refs(step),
                     "external_op_id": None,
                     "timestamp": time.time(),
                 },
@@ -1394,8 +1376,57 @@ class TaskScheduler:
                         },
                     )
                 prior_outputs = prior.get("outputs") or {}
-                artifact_refs = self._coerce_receipt_artifact_refs(prior_outputs)
-                if artifact_refs is None:
+                outputs_kind = prior.get("outputs_kind")
+                if outputs_kind not in {"confirmed_payloads", "artifact_refs"}:
+                    return self._invalid_succeeded_receipt(
+                        step=step,
+                        selected_agent=selected_agent,
+                        idempotency_key_value=idem_key,
+                        error=(
+                            "succeeded receipt has no supported outputs_kind; "
+                            "legacy receipts require explicit reconciliation"
+                        ),
+                        validation_error="OUTPUTS_KIND_MISSING_OR_INVALID",
+                    )
+                expected_schema_refs = self._expected_schema_refs(step)
+                receipt_schema_refs = prior.get("expected_schema_refs")
+                if not isinstance(receipt_schema_refs, Mapping) or any(
+                    not isinstance(name, str)
+                    or not isinstance(schema_ref, str)
+                    or not schema_ref
+                    for name, schema_ref in receipt_schema_refs.items()
+                ):
+                    return self._invalid_succeeded_receipt(
+                        step=step,
+                        selected_agent=selected_agent,
+                        idempotency_key_value=idem_key,
+                        error=(
+                            "succeeded receipt has invalid expected_schema_refs; "
+                            "refusing output reuse"
+                        ),
+                        validation_error="RECEIPT_SCHEMA_REFS_INVALID",
+                    )
+                normalized_receipt_schema_refs = dict(receipt_schema_refs)
+                if normalized_receipt_schema_refs != expected_schema_refs:
+                    return self._invalid_succeeded_receipt(
+                        step=step,
+                        selected_agent=selected_agent,
+                        idempotency_key_value=idem_key,
+                        error=(
+                            "succeeded receipt output schemas do not match the "
+                            "current trusted step contract"
+                        ),
+                        validation_error="RECEIPT_SCHEMA_REFS_MISMATCH",
+                    )
+                if outputs_kind == "confirmed_payloads":
+                    if not isinstance(prior_outputs, Mapping):
+                        return self._invalid_succeeded_receipt(
+                            step=step,
+                            selected_agent=selected_agent,
+                            idempotency_key_value=idem_key,
+                            error="confirmed_payloads receipt outputs must be an object",
+                            validation_error="CONFIRMED_PAYLOADS_INVALID",
+                        )
                     return self._publish_confirmed_receipt_outputs(
                         step=step,
                         payloads=prior_outputs,
@@ -1404,6 +1435,17 @@ class TaskScheduler:
                         idempotency_key_value=idem_key,
                         receipt=prior,
                     )
+                artifact_refs, validation_failure = (
+                    self._validate_receipt_artifact_refs(
+                        step=step,
+                        outputs=prior_outputs,
+                        expected_schema_refs=expected_schema_refs,
+                        selected_agent=selected_agent,
+                        idempotency_key_value=idem_key,
+                    )
+                )
+                if validation_failure is not None:
+                    return validation_failure
                 return StepResult(
                     step_id=step.step_id,
                     status=StepStatus.SUCCEEDED,
@@ -1674,25 +1716,7 @@ class TaskScheduler:
                         "status": "SUCCEEDED",
                         "normalized_input": normalize_input(inputs),
                         "expected_outputs": list(step.expected_outputs),
-                        "expected_schema_refs": {
-                            name: (
-                                step.expected_schema_refs.get(name)
-                                or (
-                                    step.expected_schema_ref
-                                    if len(step.expected_outputs) == 1
-                                    else None
-                                )
-                            )
-                            for name in step.expected_outputs
-                            if (
-                                step.expected_schema_refs.get(name)
-                                or (
-                                    step.expected_schema_ref
-                                    if len(step.expected_outputs) == 1
-                                    else None
-                                )
-                            )
-                        },
+                        "expected_schema_refs": self._expected_schema_refs(step),
                         "external_op_id": (result.metrics or {}).get("external_op_id"),
                         "outputs": result.outputs,
                         "outputs_kind": "artifact_refs",
@@ -1806,20 +1830,180 @@ class TaskScheduler:
         return None
 
     @staticmethod
-    def _coerce_receipt_artifact_refs(
+    def _expected_schema_refs(step: TaskStep) -> Dict[str, str]:
+        """Return the current trusted per-output schemas for receipt binding."""
+
+        schema_refs = {
+            str(name): str(schema_ref)
+            for name, schema_ref in dict(step.expected_schema_refs or {}).items()
+            if schema_ref
+        }
+        if len(step.expected_outputs) == 1 and step.expected_schema_ref:
+            schema_refs.setdefault(
+                str(step.expected_outputs[0]), str(step.expected_schema_ref)
+            )
+        return schema_refs
+
+    @staticmethod
+    def _invalid_succeeded_receipt(
+        *,
+        step: TaskStep,
+        selected_agent: Optional[str],
+        idempotency_key_value: str,
+        error: str,
+        validation_error: str,
+        **metrics: Any,
+    ) -> StepResult:
+        """Fail closed when a SUCCEEDED receipt cannot prove usable output."""
+
+        return StepResult(
+            step_id=step.step_id,
+            status=StepStatus.FAILED,
+            error=error,
+            metrics={
+                "idempotent_reuse": False,
+                "selected_agent": selected_agent,
+                "idempotency_key": idempotency_key_value,
+                "receipt_status": "SUCCEEDED",
+                "receipt_output_contract_invalid": True,
+                "receipt_validation_error": validation_error,
+                **metrics,
+            },
+        )
+
+    def _validate_receipt_artifact_refs(
+        self,
+        *,
+        step: TaskStep,
         outputs: Any,
-    ) -> Optional[Dict[str, ArtifactRef]]:
-        """Return typed refs for an ordinary receipt, else mark raw confirmation."""
+        expected_schema_refs: Mapping[str, str],
+        selected_agent: Optional[str],
+        idempotency_key_value: str,
+    ) -> tuple[Dict[str, ArtifactRef], Optional[StepResult]]:
+        """Resolve and revalidate every Artifact referenced by a success receipt."""
 
         if not isinstance(outputs, Mapping):
-            return None
+            return {}, self._invalid_succeeded_receipt(
+                step=step,
+                selected_agent=selected_agent,
+                idempotency_key_value=idempotency_key_value,
+                error="artifact_refs receipt outputs must be an object",
+                validation_error="ARTIFACT_REFS_INVALID",
+            )
+
         refs: Dict[str, ArtifactRef] = {}
-        try:
-            for logical_name, value in outputs.items():
-                refs[str(logical_name)] = ArtifactRef.model_validate(value)
-        except Exception:  # raw human-confirmed payloads are not ArtifactRefs
-            return None
-        return refs
+        registry = get_schema_registry()
+        for raw_logical_name, value in outputs.items():
+            logical_name = str(raw_logical_name)
+            try:
+                ref = ArtifactRef.model_validate(value)
+            except Exception as exc:
+                return {}, self._invalid_succeeded_receipt(
+                    step=step,
+                    selected_agent=selected_agent,
+                    idempotency_key_value=idempotency_key_value,
+                    error=(
+                        f"receipt output {logical_name!r} is not a valid "
+                        f"ArtifactRef: {exc}"
+                    ),
+                    validation_error="ARTIFACT_REF_INVALID",
+                    logical_name=logical_name,
+                )
+
+            if ref.version is None or ref.selector is not None:
+                return {}, self._invalid_succeeded_receipt(
+                    step=step,
+                    selected_agent=selected_agent,
+                    idempotency_key_value=idempotency_key_value,
+                    error=(
+                        f"receipt output {logical_name!r} must reference one "
+                        "immutable root Artifact version"
+                    ),
+                    validation_error="ARTIFACT_REF_NOT_IMMUTABLE_ROOT",
+                    logical_name=logical_name,
+                )
+
+            if not self.store.exists(ref):
+                return {}, self._invalid_succeeded_receipt(
+                    step=step,
+                    selected_agent=selected_agent,
+                    idempotency_key_value=idempotency_key_value,
+                    error=(
+                        f"receipt output {logical_name!r} references a missing "
+                        "Artifact"
+                    ),
+                    validation_error="ARTIFACT_NOT_FOUND",
+                    logical_name=logical_name,
+                    artifact_id=ref.artifact_id,
+                    artifact_version=ref.version,
+                )
+
+            try:
+                artifact = self.store.get(ref)
+            except ArtifactNotFoundError:
+                return {}, self._invalid_succeeded_receipt(
+                    step=step,
+                    selected_agent=selected_agent,
+                    idempotency_key_value=idempotency_key_value,
+                    error=(
+                        f"receipt output {logical_name!r} references a missing "
+                        "Artifact"
+                    ),
+                    validation_error="ARTIFACT_NOT_FOUND",
+                    logical_name=logical_name,
+                    artifact_id=ref.artifact_id,
+                    artifact_version=ref.version,
+                )
+
+            if artifact.logical_name != logical_name:
+                return {}, self._invalid_succeeded_receipt(
+                    step=step,
+                    selected_agent=selected_agent,
+                    idempotency_key_value=idempotency_key_value,
+                    error=(
+                        f"receipt output {logical_name!r} points to Artifact "
+                        f"logical output {artifact.logical_name!r}"
+                    ),
+                    validation_error="ARTIFACT_LOGICAL_NAME_MISMATCH",
+                    logical_name=logical_name,
+                )
+
+            expected_schema_ref = expected_schema_refs.get(logical_name)
+            if expected_schema_ref:
+                if artifact.schema_ref != expected_schema_ref:
+                    return {}, self._invalid_succeeded_receipt(
+                        step=step,
+                        selected_agent=selected_agent,
+                        idempotency_key_value=idempotency_key_value,
+                        error=(
+                            f"receipt output {logical_name!r} expected schema "
+                            f"{expected_schema_ref!r}, but stored Artifact has "
+                            f"{artifact.schema_ref!r}"
+                        ),
+                        validation_error="ARTIFACT_SCHEMA_MISMATCH",
+                        logical_name=logical_name,
+                        schema_ref=expected_schema_ref,
+                    )
+                valid, errors = registry.validate(
+                    artifact.payload, expected_schema_ref
+                )
+                if artifact.schema_valid is not True or not valid:
+                    return {}, self._invalid_succeeded_receipt(
+                        step=step,
+                        selected_agent=selected_agent,
+                        idempotency_key_value=idempotency_key_value,
+                        error=(
+                            f"receipt output {logical_name!r} failed stored "
+                            "Artifact schema validation"
+                        ),
+                        validation_error="ARTIFACT_SCHEMA_INVALID",
+                        logical_name=logical_name,
+                        schema_ref=expected_schema_ref,
+                        schema_errors=errors,
+                    )
+            refs[logical_name] = ref
+
+        return refs, None
 
     def _publish_confirmed_receipt_outputs(
         self,

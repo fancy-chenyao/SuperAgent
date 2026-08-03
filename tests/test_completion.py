@@ -5,7 +5,7 @@ import asyncio
 
 import pytest
 
-from src.interface.artifact import ArtifactRef, StepStatus
+from src.interface.artifact import Artifact, ArtifactRef, StepStatus
 from src.interface.task_graph import CompletionCondition, TaskGraph, TaskSpec, TaskStep
 from src.manager.executor.base import ExecuteResult, ExecutionStatus
 from src.orchestration.completion import (
@@ -216,21 +216,19 @@ def test_side_effect_step_not_re_executed_across_resume():
     )
     ctx = {"task_id": "T"}
 
-    # First run: email is sent, receipt recorded.
-    r1 = asyncio.run(
-        TaskScheduler(
-            execute_step=exec_step,
-            routing_provider=StubRoutingProvider(),
-            receipt_store=receipts,
-        ).run(_graph(email), context=ctx)
+    scheduler = TaskScheduler(
+        execute_step=exec_step,
+        routing_provider=StubRoutingProvider(),
+        receipt_store=receipts,
     )
-    # Simulated retry/resume with the SAME receipt store.
+
+    # First run: email is sent, receipt and Artifact are recorded.
+    r1 = asyncio.run(
+        scheduler.run(_graph(email), context=ctx)
+    )
+    # Simulated retry/resume with the SAME receipt and Artifact stores.
     r2 = asyncio.run(
-        TaskScheduler(
-            execute_step=exec_step,
-            routing_provider=StubRoutingProvider(),
-            receipt_store=receipts,
-        ).run(_graph(email), context=ctx)
+        scheduler.run(_graph(email), context=ctx)
     )
 
     assert r1["email"].is_success and r2["email"].is_success
@@ -307,6 +305,8 @@ def test_human_confirmed_outputs_are_published_as_artifact_refs_on_resume():
             "normalized_input": normalize_input({}),
             "external_op_id": "doc-1",
             "outputs": {"document_id": "doc-1"},
+            "outputs_kind": "confirmed_payloads",
+            "expected_schema_refs": {},
             "timestamp": 1.0,
         },
     )
@@ -323,6 +323,238 @@ def test_human_confirmed_outputs_are_published_as_artifact_refs_on_resume():
     output_ref = results["document"].outputs["document_id"]
     assert isinstance(output_ref, ArtifactRef)
     assert scheduler.store.get(output_ref).payload == "doc-1"
+
+
+def test_ref_shaped_human_confirmation_is_always_materialized_as_payload():
+    receipts = ReceiptStore()
+    calls = {"n": 0}
+
+    async def exec_step(*, step, selected_agent, inputs, context):
+        calls["n"] += 1
+        return ExecuteResult(status=ExecutionStatus.SUCCESS, result={})
+
+    step = TaskStep(
+        step_id="document",
+        operation_mode="write",
+        preferred_resource_id="DocumentAgent",
+        expected_outputs=["document_id"],
+    )
+    key = idempotency_key("T", "document", {})
+    ref_shaped_payload = {"artifact_id": "business-id", "version": 7}
+    receipts.put(
+        key,
+        {
+            "idempotency_key": key,
+            "task_id": "T",
+            "step_id": "document",
+            "agent": "DocumentAgent",
+            "status": "SUCCEEDED",
+            "normalized_input": normalize_input({}),
+            "external_op_id": "doc-1",
+            "outputs": {"document_id": ref_shaped_payload},
+            "outputs_kind": "confirmed_payloads",
+            "expected_schema_refs": {},
+            "timestamp": 1.0,
+        },
+    )
+    scheduler = TaskScheduler(
+        execute_step=exec_step,
+        routing_provider=StubRoutingProvider(),
+        receipt_store=receipts,
+    )
+
+    results = asyncio.run(scheduler.run(_graph(step), context={"task_id": "T"}))
+
+    assert calls["n"] == 0
+    assert results["document"].is_success
+    output_ref = results["document"].outputs["document_id"]
+    assert output_ref.artifact_id != "business-id"
+    assert scheduler.store.get(output_ref).payload == ref_shaped_payload
+
+
+def test_receipt_artifact_ref_must_exist_before_successful_reuse():
+    receipts = ReceiptStore()
+    calls = {"n": 0}
+
+    async def exec_step(*, step, selected_agent, inputs, context):
+        calls["n"] += 1
+        return ExecuteResult(status=ExecutionStatus.SUCCESS, result={})
+
+    step = TaskStep(
+        step_id="document",
+        operation_mode="write",
+        preferred_resource_id="DocumentAgent",
+        expected_outputs=["document_id"],
+    )
+    key = idempotency_key("T", "document", {})
+    receipts.put(
+        key,
+        {
+            "idempotency_key": key,
+            "task_id": "T",
+            "step_id": "document",
+            "agent": "DocumentAgent",
+            "status": "SUCCEEDED",
+            "normalized_input": normalize_input({}),
+            "external_op_id": "doc-1",
+            "outputs": {
+                "document_id": {"artifact_id": "missing", "version": 1}
+            },
+            "outputs_kind": "artifact_refs",
+            "expected_schema_refs": {},
+            "timestamp": 1.0,
+        },
+    )
+    scheduler = TaskScheduler(
+        execute_step=exec_step,
+        routing_provider=StubRoutingProvider(),
+        receipt_store=receipts,
+    )
+
+    results = asyncio.run(scheduler.run(_graph(step), context={"task_id": "T"}))
+
+    assert calls["n"] == 0
+    assert results["document"].status == StepStatus.FAILED
+    assert results["document"].metrics["receipt_validation_error"] == (
+        "ARTIFACT_NOT_FOUND"
+    )
+
+
+@pytest.mark.parametrize(
+    ("artifact_schema_ref", "artifact_payload", "validation_error"),
+    [
+        (
+            "document_generation_result@v1",
+            {"status": "ok"},
+            "ARTIFACT_SCHEMA_MISMATCH",
+        ),
+        (
+            "markdown_text_result@v1",
+            {"not": "markdown text"},
+            "ARTIFACT_SCHEMA_INVALID",
+        ),
+    ],
+)
+def test_receipt_artifact_must_match_and_pass_current_output_schema(
+    artifact_schema_ref, artifact_payload, validation_error
+):
+    receipts = ReceiptStore()
+    calls = {"n": 0}
+
+    async def exec_step(*, step, selected_agent, inputs, context):
+        calls["n"] += 1
+        return ExecuteResult(status=ExecutionStatus.SUCCESS, result={})
+
+    step = TaskStep(
+        step_id="document",
+        operation_mode="write",
+        preferred_resource_id="DocumentAgent",
+        expected_outputs=["document_id"],
+        expected_schema_refs={"document_id": "markdown_text_result@v1"},
+    )
+    scheduler = TaskScheduler(
+        execute_step=exec_step,
+        routing_provider=StubRoutingProvider(),
+        receipt_store=receipts,
+    )
+    artifact_ref = scheduler.store.put(
+        Artifact(
+            logical_name="document_id",
+            schema_ref=artifact_schema_ref,
+            payload=artifact_payload,
+            schema_valid=True,
+        )
+    )
+    key = idempotency_key("T", "document", {})
+    receipts.put(
+        key,
+        {
+            "idempotency_key": key,
+            "task_id": "T",
+            "step_id": "document",
+            "agent": "DocumentAgent",
+            "status": "SUCCEEDED",
+            "normalized_input": normalize_input({}),
+            "external_op_id": "doc-1",
+            "outputs": {"document_id": artifact_ref.model_dump()},
+            "outputs_kind": "artifact_refs",
+            "expected_schema_refs": {
+                "document_id": "markdown_text_result@v1"
+            },
+            "timestamp": 1.0,
+        },
+    )
+
+    results = asyncio.run(scheduler.run(_graph(step), context={"task_id": "T"}))
+
+    assert calls["n"] == 0
+    assert results["document"].status == StepStatus.FAILED
+    assert results["document"].metrics["receipt_validation_error"] == validation_error
+
+
+@pytest.mark.parametrize(
+    ("receipt_overrides", "validation_error"),
+    [
+        ({}, "OUTPUTS_KIND_MISSING_OR_INVALID"),
+        (
+            {
+                "outputs_kind": "artifact_refs",
+                "expected_schema_refs": {
+                    "document_id": "document_generation_result@v1"
+                },
+            },
+            "RECEIPT_SCHEMA_REFS_MISMATCH",
+        ),
+    ],
+)
+def test_legacy_or_schema_rebound_receipt_fails_closed(
+    receipt_overrides, validation_error
+):
+    receipts = ReceiptStore()
+
+    async def exec_step(*, step, selected_agent, inputs, context):
+        pytest.fail("a completed side effect must never be executed again")
+
+    step = TaskStep(
+        step_id="document",
+        operation_mode="write",
+        preferred_resource_id="DocumentAgent",
+        expected_outputs=["document_id"],
+        expected_schema_refs={"document_id": "markdown_text_result@v1"},
+    )
+    scheduler = TaskScheduler(
+        execute_step=exec_step,
+        routing_provider=StubRoutingProvider(),
+        receipt_store=receipts,
+    )
+    artifact_ref = scheduler.store.put(
+        Artifact(
+            logical_name="document_id",
+            schema_ref="markdown_text_result@v1",
+            payload="valid markdown",
+            schema_valid=True,
+        )
+    )
+    key = idempotency_key("T", "document", {})
+    receipt = {
+        "idempotency_key": key,
+        "task_id": "T",
+        "step_id": "document",
+        "agent": "DocumentAgent",
+        "status": "SUCCEEDED",
+        "normalized_input": normalize_input({}),
+        "external_op_id": "doc-1",
+        "outputs": {"document_id": artifact_ref.model_dump()},
+        "expected_schema_refs": {"document_id": "markdown_text_result@v1"},
+        "timestamp": 1.0,
+    }
+    receipt.update(receipt_overrides)
+    receipts.put(key, receipt)
+
+    results = asyncio.run(scheduler.run(_graph(step), context={"task_id": "T"}))
+
+    assert results["document"].status == StepStatus.FAILED
+    assert results["document"].metrics["receipt_validation_error"] == validation_error
 
 
 def test_read_only_step_has_no_idempotency_receipt():
