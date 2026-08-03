@@ -22,6 +22,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Tuple
 
+from src.orchestration.output_contracts import OUTPUT_SCHEMAS
+
 # Accepted "type" tokens -> python types. ``number`` accepts int or float.
 _TYPE_MAP: Dict[str, tuple] = {
     "string": (str,),
@@ -129,9 +131,15 @@ class SchemaRegistry:
 
         errors: List[str] = []
 
-        if not isinstance(payload, dict):
+        top_level_type = str(schema.get("type") or "object").lower()
+        allowed_top_level = _TYPE_MAP.get(top_level_type)
+        if allowed_top_level is None:
             return False, [
-                f"payload must be an object for schema {schema_ref!r}, "
+                f"unknown top-level type {top_level_type!r} in schema {schema_ref!r}"
+            ]
+        if not isinstance(payload, allowed_top_level):
+            return False, [
+                f"payload must be {top_level_type} for schema {schema_ref!r}, "
                 f"got {type(payload).__name__}"
             ]
 
@@ -142,6 +150,8 @@ class SchemaRegistry:
 
 # Process-wide default registry (optional convenience for non-test callers).
 _DEFAULT_REGISTRY = SchemaRegistry()
+for _schema_ref, _schema in OUTPUT_SCHEMAS.items():
+    _DEFAULT_REGISTRY.register(_schema_ref, _schema)
 
 
 def get_schema_registry() -> SchemaRegistry:

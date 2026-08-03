@@ -41,6 +41,7 @@ SCHEDULER_TERMINAL_STATUSES = {
     "FAILED",
     "PARTIAL_FAILED",
     "CLARIFY_REQUIRED",
+    "APPROVAL_REQUIRED",
     "REJECTED",
     "NEEDS_RECONCILIATION",
 }
@@ -155,18 +156,51 @@ class TaskLogger:
         """Log an agent output message."""
         self.log_event(node_name=node_name, event="message", content=content, step=step)
 
-    def log_agent_start(self, node_name: str, step: Optional[int] = None, sub_agent_name: Optional[str] = None) -> None:
+    def log_agent_start(
+        self,
+        node_name: str,
+        step: Optional[int] = None,
+        sub_agent_name: Optional[str] = None,
+        *,
+        attempt: Optional[int] = None,
+        phase: Optional[str] = None,
+        planned_agent: Optional[str] = None,
+        executed_agent: Optional[str] = None,
+    ) -> None:
         """Log the start of an agent node."""
         display_name = f"{node_name}【{sub_agent_name}】" if sub_agent_name else node_name
+        extra: Dict[str, Any] = {}
+        if sub_agent_name:
+            extra["sub_agent_name"] = sub_agent_name
+        if attempt is not None:
+            extra["attempt"] = attempt
+        if phase:
+            extra["phase"] = phase
+        if planned_agent:
+            extra["planned_agent"] = planned_agent
+        if executed_agent:
+            extra["selected_agent"] = executed_agent
+            extra["executed_agent"] = executed_agent
         self.log_event(
             node_name=node_name,
             event="start_of_agent",
             content=f"Agent {display_name} started",
             step=step,
-            extra={"sub_agent_name": sub_agent_name} if sub_agent_name else None
+            extra=extra or None,
         )
 
-    def log_agent_end(self, node_name: str, next_node: Optional[str] = None, step: Optional[int] = None, sub_agent_name: Optional[str] = None) -> None:
+    def log_agent_end(
+        self,
+        node_name: str,
+        next_node: Optional[str] = None,
+        step: Optional[int] = None,
+        sub_agent_name: Optional[str] = None,
+        *,
+        attempt: Optional[int] = None,
+        phase: Optional[str] = None,
+        planned_agent: Optional[str] = None,
+        executed_agent: Optional[str] = None,
+    ) -> None:
         """Log the end of an agent node."""
         display_name = f"{node_name}【{sub_agent_name}】" if sub_agent_name else node_name
         content = f"Agent {display_name} finished"
@@ -175,6 +209,15 @@ class TaskLogger:
         extra = {"next_node": next_node}
         if sub_agent_name:
             extra["sub_agent_name"] = sub_agent_name
+        if attempt is not None:
+            extra["attempt"] = attempt
+        if phase:
+            extra["phase"] = phase
+        if planned_agent:
+            extra["planned_agent"] = planned_agent
+        if executed_agent:
+            extra["selected_agent"] = executed_agent
+            extra["executed_agent"] = executed_agent
         self.log_event(node_name=node_name, event="end_of_agent", content=content, step=step, extra=extra)
 
     def log_workflow_start(self, user_query: str = "") -> None:

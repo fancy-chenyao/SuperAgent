@@ -190,6 +190,26 @@ def test_converter_normalizes_single_subtask_and_intent_values():
     assert step.intents == ["employee_information_query"]
 
 
+def test_converter_normalizes_single_dependency_value():
+    graph = plan_to_task_graph(
+        [
+            {
+                "step_id": "query",
+                "subtask_ids": "subtask_1",
+                "agent_name": "RemoteHRAssistantAgent",
+            },
+            {
+                "step_id": "report",
+                "agent_name": "RemoteReportAgent",
+                "depends_on": "subtask_1",
+            },
+        ],
+        task_id="normalized-dependency",
+    )
+
+    assert graph.step_map()["report"].depends_on == ["query"]
+    assert graph.topological_order() == ["query", "report"]
+
 def test_converter_falls_back_from_empty_plural_fields_to_singular_values():
     graph = plan_to_task_graph(
         [
@@ -240,6 +260,43 @@ def test_converter_preserves_structured_execution_contract():
     assert step.verification_contract["required"] is True
     assert step.retry == 3
     assert step.completion_conditions[0].expression == "status == 'SUCCEEDED'"
+
+
+def test_converter_attaches_trusted_schema_for_known_side_effect_agents():
+    graph = plan_to_task_graph(
+        [
+            {"step_id": "document", "agent_name": "RemoteDocumentGeneratorAgent"},
+            {"step_id": "email", "agent_name": "RemoteEmailDispatchAgent"},
+        ],
+        task_id="trusted-output-contracts",
+    )
+
+    assert (
+        graph.step_map()["document"].expected_schema_ref
+        == "document_generation_result@v1"
+    )
+    assert (
+        graph.step_map()["email"].expected_schema_ref
+        == "email_dispatch_result@v1"
+    )
+
+
+def test_explicit_schema_takes_precedence_over_known_agent_default():
+    graph = plan_to_task_graph(
+        [
+            {
+                "step_id": "send",
+                "agent_name": "RemoteEmailDispatchAgent",
+                "expected_schema_ref": "tenant_email_receipt@v2",
+            }
+        ],
+        task_id="explicit-output-contract",
+    )
+
+    assert (
+        graph.step_map()["send"].expected_schema_ref
+        == "tenant_email_receipt@v2"
+    )
 
 
 def test_converter_skips_non_dict_steps():
@@ -469,7 +526,12 @@ class _Fake:
             "agent": selected_agent, "inputs": dict(inputs)}
         # produce a payload keyed by this step's primary expected output
         name = step.expected_outputs[0] if step.expected_outputs else "out"
-        return ExecuteResult(status=ExecutionStatus.SUCCESS, result={name: f"{step.step_id}-data"})
+        if name == "person_info":
+            return ExecuteResult(status=ExecutionStatus.SUCCESS, result=[])
+        return ExecuteResult(
+            status=ExecutionStatus.SUCCESS,
+            result={name: f"{step.step_id}-data"},
+        )
 
 
 def test_converted_graph_runs_end_to_end_serially():
@@ -529,6 +591,68 @@ def test_pure_query_agent_stays_read_only():
         [{"agent_name": "RemoteHRAssistantAgent", "title": "query"}], task_id="t"
     )
     assert g.step_map()["step_1"].is_read_only is True
+
+
+def test_converter_preserves_step_security_profile_fields():
+    g = plan_to_task_graph(
+        [
+            {
+                "agent_name": "reporter",
+                "required_capabilities": ["Document"],
+                "scenario_tags": ["reporting"],
+                "task_type": "Document",
+                "data_scope": "employee.salary.summary",
+                "risk_level": "HIGH",
+            }
+        ],
+        task_id="t",
+    )
+    step = g.step_map()["step_1"]
+
+    assert step.required_capabilities == ["Document"]
+    assert step.scenario_tags == ["reporting"]
+    assert step.task_type == "Document"
+    assert step.data_scope == "employee.salary.summary"
+    assert step.risk_level == "HIGH"
+
+
+@pytest.mark.parametrize(
+    "planner_field,planner_value",
+    [
+        ("required_capabilities", ["HR"]),
+        ("scenario_tags", ["salary_query"]),
+        ("task_type", "HR"),
+    ],
+)
+def test_converter_rejects_planner_security_claims_outside_trusted_agent_profile(
+    planner_field,
+    planner_value,
+):
+    with pytest.raises(
+        TaskGraphValidationError,
+        match="outside trusted Agent security attributes",
+    ):
+        plan_to_task_graph(
+            [
+                {
+                    "agent_name": "reporter",
+                    planner_field: planner_value,
+                }
+            ],
+            task_id="t",
+        )
+
+
+def test_calendar_and_weather_demo_agents_are_classified():
+    g = plan_to_task_graph(
+        [
+            {"agent_name": "RemoteHRCalendarAgent"},
+            {"agent_name": "RemoteWeatherAgent"},
+        ],
+        task_id="t",
+    )
+    assert g.step_map()["step_1"].operation_mode == "write"
+    assert g.step_map()["step_2"].operation_mode == "read"
 
 
 def test_unregistered_agent_is_unknown_not_read():
@@ -594,3 +718,91 @@ def test_business_risk_agent_with_export_is_write():
         [{"agent_name": "RemoteBusinessRiskAgent"}], task_id="t"
     )
     assert g.step_map()["step_1"].operation_mode == "write"
+
+
+def test_mixed_mode_calendar_query_uses_trusted_task_profile_action():
+    graph = plan_to_task_graph(
+        [
+            {
+                "agent_name": "RemoteHRCalendarAgent",
+                "subtask_ids": ["calendar-query"],
+            }
+        ],
+        task_id="calendar-query",
+        subtasks=[
+            {
+                "id": "calendar-query",
+                "intent": "schedule_management",
+                "action": "read",
+                "depends_on": [],
+            }
+        ],
+    )
+
+    step = graph.steps[0]
+    assert step.operation_mode == "read"
+    assert step.operation_mode_source == "task_profile_action"
+
+
+def test_dependency_edges_materialize_trusted_artifact_bindings():
+    graph = plan_to_task_graph(
+        [
+            {"agent_name": "RemoteBusinessRiskAgent", "step_id": "risk"},
+            {
+                "agent_name": "RemoteReportAgent",
+                "step_id": "report",
+                "depends_on": ["risk"],
+            },
+            {
+                "agent_name": "RemoteEmailDispatchAgent",
+                "step_id": "email",
+                "depends_on": ["report"],
+            },
+        ],
+        task_id="governed-chain",
+    )
+
+    risk, report, email = graph.steps
+    assert risk.expected_outputs == ["risk.records"]
+    assert risk.expected_schema_ref == "structured_agent_result@v1"
+    assert report.input_bindings == [
+        {
+            "parameter_name": "upstream_risk",
+            "source_step": "risk",
+            "source_output": "risk.records",
+        }
+    ]
+    assert email.input_bindings == [
+        {
+            "parameter_name": "upstream_report",
+            "source_step": "report",
+            "source_output": "report.markdown",
+        }
+    ]
+
+
+def test_builtin_research_report_chain_uses_markdown_contract_and_binding():
+    graph = plan_to_task_graph(
+        [
+            {"agent_name": "researcher", "step_id": "research"},
+            {
+                "agent_name": "reporter",
+                "step_id": "report",
+                "depends_on": ["research"],
+            },
+        ],
+        task_id="public-report",
+    )
+
+    research, report = graph.steps
+    assert research.expected_outputs == ["research.markdown"]
+    assert research.expected_schema_ref == "markdown_text_result@v1"
+    assert report.expected_outputs == ["report.markdown"]
+    assert report.expected_schema_ref == "markdown_text_result@v1"
+    assert report.input_bindings == [
+        {
+            "parameter_name": "upstream_research",
+            "source_step": "research",
+            "source_output": "research.markdown",
+        }
+    ]

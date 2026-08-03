@@ -399,6 +399,18 @@ def _step_declared_intents(step: dict) -> list[str]:
     return _string_list(step.get("intent"))
 
 
+def _scheduler_profile_validation_state(state: State) -> State:
+    """Carry Scheduler strictness without changing the validation call contract."""
+
+    from src.service.env import ORCHESTRATION_SCHEDULER_ENABLED
+
+    validation_state = dict(state)
+    validation_state["_require_trusted_subtask_bindings"] = bool(
+        ORCHESTRATION_SCHEDULER_ENABLED
+    )
+    return validation_state
+
+
 def _validate_plan_against_task_profile(steps: list, state: State) -> list[str]:
     """检查 Planner 是否忠实覆盖画像，不自动补写或复制任何计划步骤。"""
     if not isinstance(steps, list):
@@ -438,6 +450,16 @@ def _validate_plan_against_task_profile(steps: list, state: State) -> list[str]:
         step for step in steps
         if isinstance(step, dict) and _step_subtask_ids(step)
     ]
+    if (
+        state.get("_require_trusted_subtask_bindings")
+        and not structured_steps
+    ):
+        errors.append(
+            "调度器模式下，TaskProfile 存在子任务时，"
+            "每个执行步骤必须包含可验证的 subtask_ids"
+        )
+        return list(dict.fromkeys(errors))
+
     if structured_steps:
         if len(structured_steps) != len(steps):
             errors.append(
@@ -467,6 +489,24 @@ def _validate_plan_against_task_profile(steps: list, state: State) -> list[str]:
         for subtask_id in subtask_by_id:
             if subtask_id not in step_by_subtask_id:
                 errors.append(f"缺少对子任务 {subtask_id} 的执行覆盖")
+
+        # Planner 输出中的 depends_on 偶尔使用执行步骤 id 或上游 Agent 名，
+        # 而 TaskProfile 使用逻辑子任务 id。它们表达的是同一条边，校验前
+        # 统一换算为子任务 id，避免把可执行计划误判为结构错误。
+        dependency_aliases: dict[str, set[str]] = {}
+        for step in steps:
+            if not isinstance(step, dict):
+                continue
+            covered = {
+                subtask_id
+                for subtask_id in _step_subtask_ids(step)
+                if subtask_id in subtask_by_id
+            }
+            if not covered:
+                continue
+            for alias in (step.get("step_id"), step.get("agent_name")):
+                if alias:
+                    dependency_aliases.setdefault(str(alias), set()).update(covered)
 
         # 按执行步骤校验它覆盖的意图集合，以及跨执行步骤的依赖关系。
         # 同一步内部的逻辑依赖由该 Agent 在一次调用中完成，不应再形成图上的自依赖。
@@ -500,8 +540,11 @@ def _validate_plan_against_task_profile(steps: list, state: State) -> list[str]:
                 )
             # 同一步内的前后关系由 Agent 内部完成，只保留跨步骤依赖。
             expected_dependencies.difference_update(covered_set)
-            planned_dependencies = set(
-                _string_list(step.get("depends_on")))
+            planned_dependencies: set[str] = set()
+            for dependency in _string_list(step.get("depends_on")):
+                planned_dependencies.update(
+                    dependency_aliases.get(dependency, {dependency})
+                )
             if planned_dependencies != expected_dependencies:
                 errors.append(
                     f"执行步骤 {step.get('step_id') or index + 1} 的 depends_on 应为 "
@@ -567,8 +610,11 @@ async def _validate_plan_data_flow(steps: list, user_id: str) -> tuple[bool, lis
                 "produces": getattr(agent, "produces", []),
             }
 
-    # Track what data is available at each step
+    # Track what data is available at each step and where it came from. This
+    # lets us materialize an omitted but unambiguous input binding instead of
+    # rejecting a plan whose upstream Agent already produces the exact field.
     available_outputs = set()
+    available_output_sources: dict[str, str] = {}
 
     for step_idx, step in enumerate(steps):
         agent_name = step.get("agent_name")
@@ -585,18 +631,24 @@ async def _validate_plan_data_flow(steps: list, user_id: str) -> tuple[bool, lis
             )
             continue
 
-        required_params = metadata["requires"]
-        produced_outputs = metadata["produces"]
+        required_params = _string_list(metadata["requires"])
+        produced_outputs = _string_list(metadata["produces"])
 
         # If agent has no requirements, it's autonomous
         if not required_params:
             # Add this agent's outputs to available data
             for output in produced_outputs:
                 available_outputs.add(output)
+                available_output_sources[output] = str(
+                    step.get("step_id") or agent_name
+                )
             continue
 
         # Check if all required parameters are mapped
         inputs = step.get("inputs", [])
+        if not isinstance(inputs, list):
+            inputs = []
+            step["inputs"] = inputs
         mapped_params = set()
 
         for input_mapping in inputs:
@@ -668,6 +720,25 @@ async def _validate_plan_data_flow(steps: list, user_id: str) -> tuple[bool, lis
                         f"source_step '{source_step}' which does not exist in previous steps"
                     )
 
+        # If the Planner omitted an input mapping but an earlier Agent declares
+        # the exact required output, the dependency is deterministic. Persist
+        # the inferred binding into the plan so the TaskGraph resolver receives
+        # the upstream artifact during execution.
+        for param_name in required_params:
+            if param_name in mapped_params:
+                continue
+            source_step = available_output_sources.get(param_name)
+            if not source_step:
+                continue
+            inputs.append(
+                {
+                    "parameter_name": param_name,
+                    "source_step": source_step,
+                    "source_output": param_name,
+                }
+            )
+            mapped_params.add(param_name)
+
         # Check if all required parameters are mapped
         unmapped_params = set(required_params) - mapped_params
         if unmapped_params:
@@ -679,6 +750,9 @@ async def _validate_plan_data_flow(steps: list, user_id: str) -> tuple[bool, lis
         # Add this agent's outputs to available data
         for output in produced_outputs:
             available_outputs.add(output)
+            available_output_sources[output] = str(
+                step.get("step_id") or agent_name
+            )
 
     is_valid = len(errors) == 0
     return is_valid, errors
@@ -916,7 +990,13 @@ async def agent_proxy_node(state: State) -> Command[Literal["publisher", "__end_
     # Artifact. Gated OFF by default and wrapped so capture never breaks the legacy
     # flow; the messages/return below are unchanged.
     captured_artifact = None
-    step_key = f"{state.get('current_step')}:{_agent.agent_name}"
+    legacy_step_key = f"{state.get('current_step')}:{_agent.agent_name}"
+    # Legacy execution invokes one Agent once even when the Planner assigned
+    # several logical steps to that Agent.  Keep the old runtime key for
+    # Artifact/step-result compatibility, but bind execution evidence to the
+    # Planner's real step ids so workflow coverage compares the same identity
+    # space (step_1/step_2/...) instead of current graph counters (2:Agent).
+    step_key = legacy_step_key
     if artifact_capture_enabled:
         try:
             from src.manager.executor.artifact_adapter import to_artifact
@@ -966,16 +1046,53 @@ async def agent_proxy_node(state: State) -> Command[Literal["publisher", "__end_
     try:
         from src.skills.execution_evidence import build_step_evidence
 
-        evidence = build_step_evidence(
-            step_id=step_key,
-            agent_name=_agent.agent_name,
-            operation_mode=step_operation_mode,
-            risk_level=step_risk_level,
-            verification_contract=verification_contract,
-            execute_result=execute_result,
-            artifact=captured_artifact,
-        )
-        skill_step_evidence[step_key] = evidence.model_dump(mode="json")
+        evidence_steps: list[dict[str, Any] | None] = []
+        seen_step_ids: set[str] = set()
+        for assigned_step in assigned_steps:
+            planned_step_id = str(assigned_step.get("step_id") or "").strip()
+            if not planned_step_id or planned_step_id in seen_step_ids:
+                continue
+            seen_step_ids.add(planned_step_id)
+            evidence_steps.append(assigned_step)
+        if not evidence_steps:
+            evidence_steps = [None]
+
+        for assigned_step in evidence_steps:
+            evidence_step_id = (
+                str(assigned_step.get("step_id"))
+                if isinstance(assigned_step, dict)
+                else legacy_step_key
+            )
+            evidence_mode = (
+                _normalize_legacy_operation_mode(assigned_step.get("operation_mode"))
+                if isinstance(assigned_step, dict)
+                else ""
+            ) or step_operation_mode
+            evidence_risk = str(
+                (assigned_step or {}).get("risk_level")
+                or step_risk_level
+                or "LOW"
+            )
+            raw_contract = (
+                assigned_step.get("verification_contract")
+                if isinstance(assigned_step, dict)
+                else None
+            )
+            evidence_contract = (
+                dict(raw_contract)
+                if isinstance(raw_contract, dict)
+                else verification_contract
+            )
+            evidence = build_step_evidence(
+                step_id=evidence_step_id,
+                agent_name=_agent.agent_name,
+                operation_mode=evidence_mode,
+                risk_level=evidence_risk,
+                verification_contract=evidence_contract,
+                execute_result=execute_result,
+                artifact=captured_artifact,
+            )
+            skill_step_evidence[evidence_step_id] = evidence.model_dump(mode="json")
     except Exception as exc:  # pragma: no cover - evidence must not break execution
         logger.warning("skill execution evidence capture skipped: %s", exc)
 
@@ -1014,6 +1131,163 @@ async def agent_proxy_node(state: State) -> Command[Literal["publisher", "__end_
     )
 
 
+async def _finalize_validated_plan(
+    state: State,
+    steps: list | None,
+    *,
+    raw_content: str,
+    message_content: str,
+    goto: str,
+    plan_validation_failed: bool = False,
+) -> tuple[list | None, str, str, dict]:
+    """Persist one validated plan and prepare its scheduler approval snapshot.
+
+    Workflow-skill reuse and normal Planner generation must share this exact
+    closeout path. Otherwise a reused plan can be shown as approved without the
+    TaskGraph/PlanSnapshot that production execution requires.
+    """
+
+    if steps:
+        # Recover data-flow ordering the Planner drops for autonomous remote
+        # agents. Persisting the corrected steps keeps production snapshot
+        # re-derivation byte-identical to the approved graph.
+        try:
+            from src.orchestration.plan_to_task_graph import (
+                derive_step_dependencies,
+            )
+
+            subtasks = (state.get("task_profile") or {}).get("subtasks")
+            steps = derive_step_dependencies(steps, subtasks)
+        except Exception as dep_exc:  # noqa: BLE001 - planning remains fail-safe
+            logger.warning(
+                "scheduler wiring: dependency correction skipped: %s", dep_exc
+            )
+
+    if steps is not None:
+        cache.restore_planning_steps(
+            state["workflow_id"], steps, state["user_id"]
+        )
+        # The final planner message is authoritative for the frontend.
+        # Preserve validation errors when a streamed draft was rejected;
+        # otherwise the browser may display an executable-looking invalid plan.
+        if plan_validation_failed:
+            message_content = raw_content
+        else:
+            message_content = json.dumps(
+                {"steps": steps}, indent=2, ensure_ascii=False
+            )
+        if (
+            state.get("stop_after_planner")
+            and state.get("workflow_mode") == "launch"
+        ):
+            goto = "__end__"
+    else:
+        logger.warning("Planner response is not a valid JSON")
+        goto = "__end__"
+    cache.restore_system_node(
+        state["workflow_id"], goto, state["user_id"]
+    )
+
+    # When the governed scheduler is enabled, production accepts only a
+    # persisted PlanSnapshot re-derived from the current trusted registry.
+    # Build and save it here for every validated-plan source, including a
+    # promoted Workflow Skill.
+    plan_update: dict = {}
+    if not steps or plan_validation_failed:
+        return steps, message_content, goto, plan_update
+
+    def _block_scheduler_plan(reason: str) -> tuple[list, str, str, dict]:
+        logger.warning(
+            "scheduler wiring: plan cannot be approved for execution (%s)",
+            reason,
+        )
+        blocked_content = json.dumps(
+            {
+                "thought": (
+                    "计划无法生成受信 TaskGraph/PlanSnapshot，"
+                    "已阻止确认执行，请重新规划。"
+                ),
+                "validation_errors": [reason],
+                "steps": [],
+                "new_agents_needed": [],
+            },
+            ensure_ascii=False,
+        )
+        cache.restore_planning_steps(
+            state["workflow_id"], [], state["user_id"]
+        )
+        cache.restore_system_node(
+            state["workflow_id"], "__end__", state["user_id"]
+        )
+        return [], blocked_content, "__end__", {}
+
+    try:
+        from src.service.env import ORCHESTRATION_SCHEDULER_ENABLED
+
+        if not ORCHESTRATION_SCHEDULER_ENABLED:
+            return steps, message_content, goto, plan_update
+
+        from src.orchestration.plan_snapshot import save_plan_snapshot
+        from src.orchestration.plan_to_task_graph import plan_to_task_graph
+        from src.orchestration.runtime import unknown_operation_modes
+
+        registered_agents = await agent_manager.agent_registry.list()
+        contracts = {
+            agent.agent_name: agent.agent_contract
+            for agent in registered_agents
+            if getattr(agent, "agent_contract", None) is not None
+            and (
+                agent.user_id == "share"
+                or agent.user_id == state.get("user_id")
+            )
+        }
+        produces = {
+            agent.agent_name: list(getattr(agent, "produces", []) or [])
+            for agent in registered_agents
+            if (
+                agent.user_id == "share"
+                or agent.user_id == state.get("user_id")
+            )
+        }
+        task_graph = plan_to_task_graph(
+            steps,
+            task_id=state.get("workflow_id") or "task",
+            subject=state.get("user_id"),
+            goal=state.get("original_user_query", "")
+            or state.get("USER_QUERY", ""),
+            agent_produces=produces,
+            agent_contracts=contracts,
+        )
+        unknown = unknown_operation_modes(task_graph)
+        if unknown:
+            return _block_scheduler_plan(
+                "存在无法分类操作模式的步骤：" + ", ".join(unknown)
+            )
+
+        task_graph_dict = task_graph.model_dump()
+        # Publish task_graph to state only after its approval snapshot is
+        # durable. A transient save failure must not create an apparently
+        # executable plan with no production approval artifact.
+        save_plan_snapshot(
+            workflow_id=state.get("workflow_id") or "task",
+            user_id=state.get("user_id"),
+            planning_steps=steps,
+            task_graph=task_graph_dict,
+        )
+        plan_update["task_graph"] = task_graph_dict
+        logger.info(
+            "scheduler wiring: task_graph built and snapshot persisted (%d steps)",
+            len(task_graph.steps),
+        )
+    except Exception as exc:  # noqa: BLE001 - scheduler mode must fail closed
+        logger.warning(
+            "scheduler wiring: validated plan finalization failed: %s", exc
+        )
+        return _block_scheduler_plan("TaskGraph 或 PlanSnapshot 持久化失败")
+
+    return steps, message_content, goto, plan_update
+
+
 async def planner_node(state: State) -> Command[Literal["publisher", "__end__"]]:
     """Planner node that generates the plan."""
     start_time = time.time()
@@ -1027,6 +1301,7 @@ async def planner_node(state: State) -> Command[Literal["publisher", "__end__"]]
     retry_messages = None
     retry_llm = None
     plan_validation_failed = False
+    steps: list | None = None
     runtime_event_handler = state.get("runtime_event_handler")
 
     if state.get("workflow_mode") == "launch" and state.get("workflow_skill_match"):
@@ -1043,7 +1318,10 @@ async def planner_node(state: State) -> Command[Literal["publisher", "__end__"]]
                 data_flow_valid, data_flow_errors = await _validate_plan_data_flow(
                     steps, state.get("user_id", "")
                 )
-                profile_errors = _validate_plan_against_task_profile(steps, state)
+                profile_errors = _validate_plan_against_task_profile(
+                    steps,
+                    _scheduler_profile_validation_state(state),
+                )
                 validation_errors = list(data_flow_errors) + list(profile_errors)
                 skill_plan_valid = data_flow_valid and not profile_errors
             except Exception as exc:
@@ -1051,15 +1329,23 @@ async def planner_node(state: State) -> Command[Literal["publisher", "__end__"]]
         if isinstance(steps, list) and steps and skill_plan_valid:
             raw_content = json.dumps({"steps": steps}, ensure_ascii=False)
             message_content = json.dumps({"steps": steps}, indent=2, ensure_ascii=False)
-            cache.restore_planning_steps(state["workflow_id"], steps, state["user_id"])
             goto = "__end__" if state.get("stop_after_planner") else "publisher"
-            cache.restore_system_node(state["workflow_id"], goto, state["user_id"])
+            steps, message_content, goto, plan_update = (
+                await _finalize_validated_plan(
+                    state,
+                    steps,
+                    raw_content=raw_content,
+                    message_content=message_content,
+                    goto=goto,
+                )
+            )
             return Command(
                 update={
                     "messages": [{"content": message_content, "tool": "planner", "role": "assistant"}],
                     "agent_name": "planner",
                     "full_plan": raw_content,
                     "planning_steps": steps,
+                    **plan_update,
                 },
                 goto=goto,
             )
@@ -1353,7 +1639,10 @@ async def planner_node(state: State) -> Command[Literal["publisher", "__end__"]]
             is_valid, validation_errors = await _validate_plan_data_flow(
                 steps, state.get("user_id", "")
             )
-            profile_errors = _validate_plan_against_task_profile(steps, state)
+            profile_errors = _validate_plan_against_task_profile(
+                steps,
+                _scheduler_profile_validation_state(state),
+            )
             validation_errors = list(validation_errors) + profile_errors
             is_valid = is_valid and not profile_errors
             validation_time = time.time() - validation_start
@@ -1439,7 +1728,8 @@ async def planner_node(state: State) -> Command[Literal["publisher", "__end__"]]
                                     fixed_steps, state.get("user_id", "")
                                 )
                                 fixed_profile_errors = _validate_plan_against_task_profile(
-                                    fixed_steps, state
+                                    fixed_steps,
+                                    _scheduler_profile_validation_state(state),
                                 )
                                 fixed_errors = list(
                                     fixed_errors) + fixed_profile_errors
@@ -1482,120 +1772,24 @@ async def planner_node(state: State) -> Command[Literal["publisher", "__end__"]]
                 logger.info(
                     "[PERF] Applied fallback planner steps for obvious single-agent task")
 
-        if steps:
-            # Recover data-flow ordering the Planner drops for autonomous remote
-            # agents (the prompt tells it to leave `inputs` empty when an agent
-            # has no "Requires" field, e.g. a report/summary agent). The task
-            # profile's subtasks already carry the correct depends_on DAG, so
-            # use it as a fail-safe correction. Baking the edges into the
-            # persisted planning steps keeps the production snapshot
-            # re-derivation (which sees only planning_steps) byte-identical to
-            # the approved graph.
-            try:
-                from src.orchestration.plan_to_task_graph import (
-                    derive_step_dependencies,
-                )
-
-                subtasks = (state.get("task_profile") or {}).get("subtasks")
-                steps = derive_step_dependencies(steps, subtasks)
-            except Exception as dep_exc:  # noqa: BLE001 - never break planning
-                logger.warning(
-                    "scheduler wiring: dependency correction skipped: %s", dep_exc
-                )
-
-        if steps is not None:
-            cache.restore_planning_steps(
-                state["workflow_id"], steps, state["user_id"])
-            # The final planner message is authoritative for the frontend.
-            # Preserve validation errors when a streamed draft was rejected;
-            # otherwise the browser keeps showing the raw draft and enables
-            # Confirm execution even though the backend stored zero steps.
-            if plan_validation_failed:
-                message_content = raw_content
-            else:
-                message_content = json.dumps(
-                    {"steps": steps}, indent=2, ensure_ascii=False)
-            if state.get("stop_after_planner") and state["workflow_mode"] == "launch":
-                goto = "__end__"
-        else:
-            logger.warning("Planner response is not a valid JSON \n")
-            goto = "__end__"
-        cache.restore_system_node(state["workflow_id"], goto, state["user_id"])
+        steps, message_content, goto, plan_update = (
+            await _finalize_validated_plan(
+                state,
+                steps,
+                raw_content=raw_content,
+                message_content=message_content,
+                goto=goto,
+                plan_validation_failed=plan_validation_failed,
+            )
+        )
+    else:
+        plan_update = {}
 
     total_time = time.time() - start_time
     logger.info("=" * 60)
     logger.info("[PERF] PLANNER TOTAL TIME: %.2fs (mode: %s)",
                 total_time, state["workflow_mode"])
     logger.info("=" * 60)
-
-    # Execution-engine wiring: when the scheduler is enabled, convert the
-    # validated plan into an explicit TaskGraph so the real web/API path can
-    # drive the DAG scheduler. Gated OFF by default and fully fail-safe: any
-    # conversion problem (or an unclassifiable side-effect step) leaves
-    # ``task_graph`` unset so the legacy publisher/while loop runs unchanged.
-    plan_update: dict = {}
-    if steps and not plan_validation_failed:
-        try:
-            from src.service.env import ORCHESTRATION_SCHEDULER_ENABLED
-
-            if ORCHESTRATION_SCHEDULER_ENABLED:
-                from src.orchestration.plan_to_task_graph import plan_to_task_graph
-                from src.orchestration.runtime import unknown_operation_modes
-
-                registered_agents = await agent_manager.agent_registry.list()
-                contracts = {
-                    agent.agent_name: agent.agent_contract
-                    for agent in registered_agents
-                    if getattr(agent, "agent_contract", None) is not None
-                    and (agent.user_id == "share" or agent.user_id == state.get("user_id"))
-                }
-                produces = {
-                    agent.agent_name: list(getattr(agent, "produces", []) or [])
-                    for agent in registered_agents
-                    if agent.user_id == "share" or agent.user_id == state.get("user_id")
-                }
-                tg = plan_to_task_graph(
-                    steps,
-                    task_id=state.get("workflow_id") or "task",
-                    subject=state.get("user_id"),
-                    goal=state.get("original_user_query", "")
-                    or state.get("USER_QUERY", ""),
-                    agent_produces=produces,
-                    agent_contracts=contracts,
-                )
-                unknown = unknown_operation_modes(tg)
-                if unknown:
-                    logger.info(
-                        "scheduler wiring: skip task_graph (unclassified steps: %s)",
-                        unknown,
-                    )
-                else:
-                    tg_dict = tg.model_dump()
-                    plan_update["task_graph"] = tg_dict
-                    logger.info(
-                        "scheduler wiring: task_graph built (%d steps)", len(tg.steps))
-                    # Persist a validated PlanSnapshot so a later production
-                    # execution can load + verify (workflow/user/plan_hash) the
-                    # exact approved plan before entering the scheduler.
-                    try:
-                        from src.orchestration.plan_snapshot import save_plan_snapshot
-
-                        save_plan_snapshot(
-                            workflow_id=state.get("workflow_id") or "task",
-                            user_id=state.get("user_id"),
-                            planning_steps=steps,
-                            task_graph=tg_dict,
-                        )
-                        logger.info(
-                            "scheduler wiring: plan snapshot persisted")
-                    except Exception as snap_exc:  # noqa: BLE001 - never break planning
-                        logger.warning(
-                            "scheduler wiring: plan snapshot persist failed: %s", snap_exc
-                        )
-        except Exception as exc:  # noqa: BLE001 - stay on the legacy path on any error
-            logger.warning(
-                "scheduler wiring: plan_to_task_graph failed, staying on legacy: %s", exc
-            )
 
     return Command(
         update={

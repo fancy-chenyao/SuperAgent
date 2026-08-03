@@ -1,9 +1,12 @@
+import json
 import shutil
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 
+import src.security.enforcement as enforcement
 import src.security.scenario_analyzer as scenario_analyzer
 from src.security.approval import ApprovalStore
 from src.security.context import SecurityContextBuilder, UnknownSecurityUserError
@@ -12,6 +15,10 @@ from src.security.policy import Action, Object, PolicyEngine, Scenario, Subject
 from src.security.scenario_analyzer import analyze_object_fit, analyze_task_context
 from src.workflow.coor_task import _extract_plan_steps, _fallback_plan_steps
 from src.workflow.cache import WorkflowCache
+
+
+def _raise_llm_unavailable(*_args, **_kwargs):
+    raise RuntimeError("LLM disabled for deterministic offline test")
 
 
 def test_policy_engine_allows_low_sensitivity_by_clearance():
@@ -248,6 +255,83 @@ def test_policy_engine_uncertain_high_sensitivity_requires_review():
     assert result["decision"] == "REVIEW_REQUIRED"
 
 
+def test_explicit_allow_policy_cannot_bypass_resource_mandatory_review():
+    engine = PolicyEngine()
+    subject = SecurityContextBuilder.subject_for_user("hr_manager")
+    object_ = SecurityContextBuilder.object_for_tool("remote_salary_info_tool")
+    scenario = Scenario(
+        task_scenario={
+            "task_type": "HR",
+            "scenario_tags": ["salary_query", "employee_proof"],
+            "expected_capabilities": ["HR"],
+            "scenario_fit_result": {"fit": "match", "reason": "HR salary task"},
+        },
+        environment={"time": "working_hours", "network_zone": "internal"},
+    )
+    action = SecurityContextBuilder.action_for_tool_call(
+        "remote_salary_info_tool",
+        {"employee_id": "86000102", "operation_mode": "query"},
+    )
+
+    result = engine.evaluate(subject, object_, scenario, action)
+
+    assert result["allowed"] is False
+    assert result["decision"] == "REVIEW_REQUIRED"
+    assert result["human_review_required"] is True
+
+
+def test_governance_admin_bypasses_review_but_not_policy_evaluation():
+    engine = PolicyEngine()
+    subject = SecurityContextBuilder.subject_for_user("admin")
+    object_ = SecurityContextBuilder.object_for_tool("remote_salary_info_tool")
+    scenario = Scenario(
+        task_scenario={
+            "task_type": "HR",
+            "scenario_tags": ["salary_query"],
+            "expected_capabilities": ["HR"],
+            "scenario_fit_result": {"fit": "match", "reason": "HR salary task"},
+        },
+        environment={"time": "off_hours", "network_zone": "external"},
+    )
+    action = SecurityContextBuilder.action_for_tool_call(
+        "remote_salary_info_tool",
+        {"employee_id": "86000102", "operation_mode": "query"},
+    )
+
+    result = engine.evaluate(subject, object_, scenario, action)
+
+    assert result["allowed"] is True
+    assert result["decision"] == "ALLOW"
+
+
+def test_explicit_communication_policy_preserves_email_review_requirement():
+    engine = PolicyEngine()
+    subject = SecurityContextBuilder.subject_for_user("communication_officer")
+    object_ = SecurityContextBuilder.object_for_tool("remote_email_tool")
+    scenario = Scenario(
+        task_scenario={
+            "task_type": "COMMUNICATION",
+            "scenario_tags": ["notification_send", "external_send"],
+            "expected_capabilities": ["Communication"],
+            "scenario_fit_result": {"fit": "match", "reason": "send task"},
+        },
+        environment={"time": "working_hours", "network_zone": "internal"},
+    )
+    action = SecurityContextBuilder.action_for_tool_call(
+        "remote_email_tool",
+        {
+            "to": "manager@example.test",
+            "operation_mode": "send",
+            "irreversible": True,
+        },
+    )
+
+    result = engine.evaluate(subject, object_, scenario, action)
+
+    assert result["allowed"] is False
+    assert result["decision"] == "REVIEW_REQUIRED"
+
+
 def test_approval_store_approve_and_consume_once():
     store_path = Path("store") / f"approvals_test_{uuid4().hex}"
     store = ApprovalStore(store_path)
@@ -269,11 +353,119 @@ def test_approval_store_approve_and_consume_once():
     approved = store.approve(approval.approval_id, approver="alice")
     assert approved.status == "approved"
 
-    signature = store.signature(subject, object_, action)
+    signature = store.signature(subject, object_, action, {})
     consumed = store.consume_if_approved(task_id="task-1", signature=signature)
     assert consumed is not None
     assert store.consume_if_approved(task_id="task-1", signature=signature) is None
     shutil.rmtree(store_path, ignore_errors=True)
+
+
+def test_approval_signature_binds_full_policy_context():
+    subject = {
+        "id": "hr_manager",
+        "subject_type": "user",
+        "attributes": {"clearance_level": 3, "grants": ["salary_read"]},
+    }
+    object_ = {
+        "id": "remote_salary_info_tool",
+        "object_type": "tool",
+        "attributes": {"sensitivity": "HIGH", "max_amount": 100000},
+    }
+    action = {
+        "verb": "execute",
+        "attributes": {"parameters": {"employee_id": "86000102"}},
+    }
+    scenario = {
+        "task_scenario": {"risk_profile": "HIGH", "data_scope": "salary"}
+    }
+    baseline = ApprovalStore.signature(subject, object_, action, scenario)
+
+    changed_subject = {
+        **subject,
+        "attributes": {**subject["attributes"], "clearance_level": 1},
+    }
+    changed_object = {
+        **object_,
+        "attributes": {**object_["attributes"], "sensitivity": "CRITICAL"},
+    }
+    changed_scenario = {
+        "task_scenario": {"risk_profile": "CRITICAL", "data_scope": "salary"}
+    }
+
+    assert ApprovalStore.signature(changed_subject, object_, action, scenario) != baseline
+    assert ApprovalStore.signature(subject, changed_object, action, scenario) != baseline
+    assert ApprovalStore.signature(subject, object_, action, changed_scenario) != baseline
+
+
+def test_approval_signature_ignores_fit_prose_and_normalizes_stage():
+    subject = {"id": "hr_manager", "attributes": {"grants": ["salary_read"]}}
+    object_ = {"id": "remote_salary_info_tool", "attributes": {"sensitivity": "HIGH"}}
+    action = {
+        "verb": "execute",
+        "attributes": {
+            "parameters": {"employee_name": "李娜", "operation_mode": "read"}
+        },
+    }
+    first = {
+        "task_scenario": {
+            "stage": "WorkMode.PRODUCTION",
+            "task_type": "HR",
+            "data_scope": "employee.salary",
+            "scenario_fit_result": {
+                "fit": "match",
+                "confidence": 0.95,
+                "reason": "First generated explanation",
+                "suggested_agent_domains": ["HR"],
+                "suggested_tool_domains": ["HR"],
+            },
+        },
+        "environment": {"network_zone": "internal"},
+    }
+    resumed = json.loads(json.dumps(first, ensure_ascii=False))
+    resumed["task_scenario"]["stage"] = "PRODUCTION"
+    resumed["task_scenario"]["scenario_fit_result"]["confidence"] = 0.91
+    resumed["task_scenario"]["scenario_fit_result"]["reason"] = "Different wording"
+    mismatch = json.loads(json.dumps(resumed, ensure_ascii=False))
+    mismatch["task_scenario"]["scenario_fit_result"]["fit"] = "mismatch"
+
+    baseline = ApprovalStore.signature(subject, object_, action, first)
+    assert ApprovalStore.signature(subject, object_, action, resumed) == baseline
+    assert ApprovalStore.signature(subject, object_, action, mismatch) != baseline
+
+
+def test_approved_request_is_atomic_under_concurrent_consumers(tmp_path):
+    store = ApprovalStore(tmp_path / "approvals")
+    subject = {"id": "admin", "subject_type": "user", "attributes": {}}
+    object_ = {"id": "EmailAgent", "object_type": "agent", "attributes": {}}
+    scenario = {"task_scenario": {"risk_profile": "HIGH"}}
+    action = {"verb": "send", "attributes": {"to": "manager@example.test"}}
+    approval = store.create(
+        user_id="admin",
+        workflow_id="admin:wf",
+        task_id="task-concurrent",
+        resume_step=1,
+        node_name="EmailAgent",
+        subject=subject,
+        object=object_,
+        scenario=scenario,
+        action=action,
+        policy_result={"decision": "REVIEW_REQUIRED"},
+    )
+    store.approve(approval.approval_id, approver="admin")
+    signature = store.signature(subject, object_, action, scenario)
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        consumed = list(
+            pool.map(
+                lambda _: store.consume_if_approved(
+                    task_id="task-concurrent", signature=signature
+                ),
+                range(16),
+            )
+        )
+
+    assert sum(item is not None for item in consumed) == 1
+    assert store.get(approval.approval_id).status == "consumed"
 
 
 def test_approval_store_finds_rejected_decision():
@@ -295,7 +487,7 @@ def test_approval_store_finds_rejected_decision():
         policy_result={"human_review_required": True},
     )
     rejected = store.reject(approval.approval_id, approver="bob", comment="not allowed")
-    signature = store.signature(subject, object_, action)
+    signature = store.signature(subject, object_, action, {})
 
     assert rejected.status == "rejected"
     assert store.find_latest(task_id="task-2", signature=signature, statuses=["rejected"]) is not None
@@ -319,7 +511,10 @@ def test_security_context_builder_maps_agent_and_tool():
     assert action.attributes["amount"] == 200000
 
 
-def test_scenario_analyzer_heuristic_task_profile():
+def test_scenario_analyzer_heuristic_task_profile(monkeypatch):
+    monkeypatch.setattr(
+        scenario_analyzer, "get_llm_by_type", _raise_llm_unavailable
+    )
     profile = __import__("asyncio").run(
         analyze_task_context("Please send a batch notification email to all employees")
     )
@@ -328,7 +523,10 @@ def test_scenario_analyzer_heuristic_task_profile():
     assert "mass_notification" in profile["scenario_tags"]
 
 
-def test_scenario_analyzer_detects_chinese_hr_salary_query():
+def test_scenario_analyzer_detects_chinese_hr_salary_query(monkeypatch):
+    monkeypatch.setattr(
+        scenario_analyzer, "get_llm_by_type", _raise_llm_unavailable
+    )
     profile = __import__("asyncio").run(analyze_task_context("查询员工 E001 的工资信息"))
     assert profile["task_type"] == "HR"
     assert "HR" in profile["expected_capabilities"]
@@ -477,7 +675,10 @@ def test_enforcement_populates_scenario_fit_result_in_context():
     assert fit_result["fit"] in {"match", "uncertain"}
 
 
-def test_permission_payload_contains_scenario_fit_result():
+def test_permission_payload_contains_scenario_fit_result(monkeypatch):
+    # enforcement freezes S_ABAC_ENABLED at import time; pin it ON here so
+    # the deny path is exercised even without a .env (fresh clone / CI).
+    monkeypatch.setattr(enforcement, "S_ABAC_ENABLED", True)
     class DummyContext:
         def __init__(self):
             self.user_id = "communication_officer"
@@ -552,6 +753,66 @@ def test_scenario_analyzer_preserves_hr_profile_over_llm_general(monkeypatch):
     assert profile["task_type"] == "HR"
     assert "HR" in profile["expected_capabilities"]
     assert "salary_query" in profile["scenario_tags"]
+
+
+def test_scenario_analyzer_merges_coarse_and_fine_labels_in_order():
+    fallback = {
+        "task_type": "HR",
+        "expected_capabilities": ["HR"],
+        "scenario_tags": ["salary_query"],
+    }
+    llm_result = {
+        "task_type": "HR",
+        "expected_capabilities": ["HR_DATA_ACCESS"],
+        "scenario_tags": ["employee_compensation_access"],
+    }
+
+    merged = scenario_analyzer._merge_task_profile(fallback, llm_result)
+
+    assert merged["expected_capabilities"] == ["HR", "HR_DATA_ACCESS"]
+    assert merged["scenario_tags"] == [
+        "salary_query",
+        "employee_compensation_access",
+    ]
+
+
+def test_scenario_analyzer_merges_labels_case_insensitively():
+    fallback = {
+        "task_type": "HR",
+        "expected_capabilities": ["HR"],
+        "scenario_tags": ["salary_query"],
+    }
+    llm_result = {
+        "task_type": "HR",
+        "expected_capabilities": ["hr", " HR_DATA_ACCESS ", ""],
+        "scenario_tags": ["SALARY_QUERY", "employee_info"],
+    }
+
+    merged = scenario_analyzer._merge_task_profile(fallback, llm_result)
+
+    assert merged["expected_capabilities"] == ["HR", "HR_DATA_ACCESS"]
+    assert merged["scenario_tags"] == ["salary_query", "employee_info"]
+
+
+def test_scenario_analyzer_keeps_conflicting_domain_protection_before_union():
+    fallback = {
+        "task_type": "HR",
+        "business_goal": "查询工资",
+        "expected_capabilities": ["HR"],
+        "scenario_tags": ["salary_query"],
+    }
+    llm_result = {
+        "task_type": "COMMUNICATION",
+        "expected_capabilities": ["Communication"],
+        "scenario_tags": ["mass_notification"],
+    }
+
+    merged = scenario_analyzer._merge_task_profile(fallback, llm_result)
+
+    assert merged["task_type"] == "HR"
+    assert merged["expected_capabilities"] == ["HR"]
+    assert merged["scenario_tags"] == ["salary_query"]
+    assert merged["reason"] == "heuristic domain preserved over conflicting llm result"
 
 
 def test_scenario_analyzer_preserves_match_over_llm_mismatch():

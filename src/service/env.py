@@ -102,27 +102,49 @@ DEBUG = _parse_bool("DEBUG", False)
 BROWSER_BACKEND = os.getenv("BROWSER_BACKEND")
 MAX_STEPS = _parse_int("MAX_STEPS", 25)
 AUTO_RECOVERY_ENABLED = _parse_bool("AUTO_RECOVERY_ENABLED", False)
+SCHEDULER_AUTO_RECOVERY_MAX_ATTEMPTS = _parse_int(
+    "SCHEDULER_AUTO_RECOVERY_MAX_ATTEMPTS", 1
+)
+SCHEDULER_RETRY_BASE_SECONDS = _parse_float(
+    "SCHEDULER_RETRY_BASE_SECONDS", 0.25
+)
+SCHEDULER_RETRY_MAX_SECONDS = _parse_float(
+    "SCHEDULER_RETRY_MAX_SECONDS", 4.0
+)
+SCHEDULER_RETRY_JITTER_RATIO = _parse_float(
+    "SCHEDULER_RETRY_JITTER_RATIO", 0.2
+)
 S_ABAC_ENABLED = _parse_bool("S_ABAC_ENABLED", False)
 
 # Execution-engine feature flags.
-# ARTIFACT_CAPTURE_ENABLED        -> Phase 2: capture each executed step's
-#                                    output as a typed Artifact. Kept OFF until
-#                                    sensitive-artifact redaction/audit lands.
+# ARTIFACT_CAPTURE_ENABLED        -> Legacy publisher/while compatibility
+#                                    capture. Its code default stays OFF; the
+#                                    scheduler persists governed Artifacts
+#                                    independently through its runtime.
 # ORCHESTRATION_SCHEDULER_ENABLED -> Phase 3: drive the workflow through the
 #                                    TaskGraph scheduler when the plan yields a
-#                                    fully-classified task graph. Default OFF
-#                                    (safe baseline): only turn it on for a
-#                                    gated rollout via an explicit env var. When
-#                                    ON, the runtime enters the scheduler for a
-#                                    scheduler-ready graph, stays on the legacy
-#                                    publisher/while loop during the planning
-#                                    phase, and FAILS CLOSED (never falls back)
-#                                    for an invalid/unclassified graph or a
-#                                    missing graph in the production execution
-#                                    phase.
+#                                    fully-classified task graph. The code
+#                                    default stays OFF as the no-configuration
+#                                    safety baseline; the prototype template
+#                                    explicitly opts in. When ON, planning may
+#                                    stay on the legacy publisher/while path,
+#                                    while production execution FAILS CLOSED for
+#                                    a missing/invalid graph or rejected
+#                                    snapshot.
+# SCHEDULER_REDISPATCH_ENABLED    -> after a retryable read-only step exhausts
+#                                    its same-Agent budget, allow one trusted,
+#                                    equivalent Agent redispatch. Default OFF.
+# SCHEDULER_RETRY_DELAY_SECONDS   -> fixed delay before the bounded same-Agent
+#                                    retry. Clamped to zero; no backoff policy.
 ARTIFACT_CAPTURE_ENABLED = _parse_bool("ARTIFACT_CAPTURE_ENABLED", False)
 ORCHESTRATION_SCHEDULER_ENABLED = _parse_bool(
     "ORCHESTRATION_SCHEDULER_ENABLED", False)
+SCHEDULER_REDISPATCH_ENABLED = _parse_bool(
+    "SCHEDULER_REDISPATCH_ENABLED", False)
+SCHEDULER_RETRY_DELAY_SECONDS = max(
+    0.0,
+    _parse_float("SCHEDULER_RETRY_DELAY_SECONDS", 0.0),
+)
 
 # 意图识别：默认混合模式；Basic LLM 未配置或调用异常时由识别层自动降级为 rule。
 INTENT_RECOGNITION_MODE = _parse_choice(
@@ -192,6 +214,12 @@ WORKFLOW_SKILL_PROMOTION_THRESHOLD = _parse_int("WORKFLOW_SKILL_PROMOTION_THRESH
 WORKFLOW_SKILL_FAILURE_THRESHOLD = _parse_int("WORKFLOW_SKILL_FAILURE_THRESHOLD", 2)
 WORKFLOW_SKILL_DB_PATH = os.getenv("WORKFLOW_SKILL_DB_PATH")
 WORKFLOW_SKILL_ADMIN_API_KEY = os.getenv("WORKFLOW_SKILL_ADMIN_API_KEY")
+
+# Governance mutations are privileged operations. The bearer credential
+# authenticates one server-configured principal; request bodies never choose
+# the approver/operator identity.
+GOVERNANCE_ADMIN_API_KEY = os.getenv("GOVERNANCE_ADMIN_API_KEY")
+GOVERNANCE_ADMIN_ACTOR_ID = os.getenv("GOVERNANCE_ADMIN_ACTOR_ID", "admin")
 
 if not DEBUG:
     logging.basicConfig(

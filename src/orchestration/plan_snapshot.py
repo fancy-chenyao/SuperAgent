@@ -27,7 +27,7 @@ SCHEMA_VERSION = 1
 # Bumped whenever ``plan_to_task_graph`` changes its derivation so a snapshot
 # built by an older converter is refused (re-plan) instead of executed against a
 # graph the current converter would no longer produce.
-CONVERTER_VERSION = 2
+CONVERTER_VERSION = 3
 _DEFAULT_DIR = "store/plan_snapshots"
 
 
@@ -190,6 +190,7 @@ def verify_snapshot_for_execution(
     goal: str = "",
     current_agent_contracts: Optional[Dict[str, Any]] = None,
     current_agent_produces: Optional[Dict[str, List[str]]] = None,
+    subtasks: Optional[List[Dict[str, Any]]] = None,
 ) -> Tuple[Optional[Dict[str, Any]], str]:
     """Authoritative production gate: return ``(task_graph, reason)`` or ``(None, reason)``.
 
@@ -207,7 +208,8 @@ def verify_snapshot_for_execution(
        fields (or taken before an Agent adopted a Contract) cannot demote that
        Agent to the schema-free legacy path;
     5. the full graph rebuilt from trusted request identity, goal, current
-       planning steps, and current Agent Contracts must be byte-identical
+       planning steps, trusted TaskProfile subtasks, and current Agent Contracts
+       must be byte-identical
        (after normalization) to the stored graph -- any drift in the spec,
        operation modes, preferred resources, dependencies, Contract, or output
        bindings is rejected.
@@ -280,6 +282,7 @@ def verify_snapshot_for_execution(
             goal=goal or "",
             agent_produces=agent_produces,
             agent_contracts=agent_contracts,
+            subtasks=subtasks,
         ).model_dump()
     except Exception as exc:  # noqa: BLE001 - cannot rebuild -> refuse
         return None, f"rebuild failed (replan required): {exc}"

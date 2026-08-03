@@ -97,6 +97,114 @@ def test_t12_production_enters_scheduler_via_snapshot(monkeypatch):
     assert events[-1]["data"]["status"] == "SUCCEEDED"
 
 
+def test_reused_skill_plan_survives_web_confirm_and_enters_scheduler(monkeypatch):
+    """A matched Workflow Skill must use the same TaskGraph/snapshot closeout
+    as a newly generated plan before the Web confirmation request executes."""
+
+    import src.service.env as env_mod
+    import src.workflow.coor_task as coor_task
+
+    planned_steps = [
+        {
+            "agent_name": "RemoteHRAssistantAgent",
+            "title": "查询王强信息",
+        }
+    ]
+
+    class _Registry:
+        async def list(self):
+            return [
+                SimpleNamespace(
+                    agent_name="RemoteHRAssistantAgent",
+                    user_id="share",
+                    produces=[],
+                    agent_contract=None,
+                )
+            ]
+
+    class _AgentManager:
+        agent_registry = _Registry()
+
+        async def ensure_initialized(self):
+            return None
+
+    stored = {"steps": []}
+
+    def _restore_steps(_workflow_id, steps, _user_id):
+        stored["steps"] = list(steps)
+
+    monkeypatch.setattr(
+        proc.cache, "restore_planning_steps", _restore_steps, raising=False
+    )
+    monkeypatch.setattr(
+        proc.cache,
+        "get_planning_steps",
+        lambda _workflow_id: list(stored["steps"]),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        proc.cache, "restore_system_node", lambda *_args: None, raising=False
+    )
+    monkeypatch.setattr(coor_task, "agent_manager", _AgentManager())
+    monkeypatch.setattr(proc, "agent_manager", _AgentManager())
+    monkeypatch.setattr(
+        env_mod, "ORCHESTRATION_SCHEDULER_ENABLED", True, raising=False
+    )
+    monkeypatch.setattr(
+        proc, "orchestration_scheduler_enabled", True, raising=False
+    )
+
+    planning_state = {
+        "user_id": "u1",
+        "workflow_id": "wf-t12",
+        "workflow_mode": "launch",
+        "workflow_skill_match": {"skill_id": "wskill-1"},
+        "planning_steps": planned_steps,
+        "routing_decision": {"decision": "DISPATCH"},
+        "task_profile": {"task_type": "HR"},
+        "original_user_query": "查询王强信息",
+        "USER_QUERY": "查询王强信息",
+        "stop_after_planner": True,
+    }
+    command = asyncio.run(coor_task.planner_node(planning_state))
+
+    assert command.goto == "__end__"
+    assert command.update.get("task_graph") is not None
+    assert stored["steps"] == planned_steps
+
+    entered = {"value": False}
+
+    async def _fake_scheduler(state, *, task_id, **_kwargs):
+        entered["value"] = True
+        assert state.get("task_graph") is not None
+        yield {
+            "event": "end_of_workflow",
+            "data": {
+                "workflow_id": state["workflow_id"],
+                "task_id": task_id,
+                "mode": "scheduler",
+                "status": "SUCCEEDED",
+            },
+        }
+
+    monkeypatch.setattr(runtime_mod, "run_scheduler_workflow", _fake_scheduler)
+    workflow = SimpleNamespace(start_node="coordinator", nodes={})
+    events = _drive(
+        workflow,
+        _production_state(),
+        task_id="task-skill-confirm",
+        execution_phase="execution",
+    )
+
+    assert entered["value"] is True
+    assert events[-1]["data"]["status"] == "SUCCEEDED"
+    assert all(
+        failure.get("code") != "TASK_GRAPH_MISSING"
+        for event in events
+        for failure in event.get("data", {}).get("failures", [])
+    )
+
+
 def test_scheduler_distills_before_terminal_event(tmp_path, monkeypatch):
     task_id = "task-scheduler-distill"
     graph = plan_to_task_graph(
@@ -336,3 +444,69 @@ def test_scheduler_gate_failure_uses_safe_structured_protocol(monkeypatch):
     assert terminal["failed_steps"] == []
     assert terminal["blocked_steps"] == []
     assert "no explicit task graph" not in str(terminal)
+
+
+def test_profiled_graph_without_subtask_bindings_fails_closed(monkeypatch):
+    task_profile = {
+        "task_type": "HR",
+        "subtasks": [
+            {
+                "id": "subtask_hr",
+                "intent": "salary_query",
+                "task_type": "HR",
+                "expected_capabilities": ["HR"],
+                "scenario_tags": ["salary_query"],
+            }
+        ],
+    }
+    task_graph = plan_to_task_graph(
+        _STEPS,
+        task_id="wf-t12",
+        subject="u1",
+        goal="查询王强信息",
+    ).model_dump()
+    save_plan_snapshot(
+        workflow_id="wf-t12",
+        user_id="u1",
+        planning_steps=_STEPS,
+        task_graph=task_graph,
+    )
+    monkeypatch.setattr(
+        proc,
+        "orchestration_scheduler_enabled",
+        True,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        proc.cache,
+        "get_planning_steps",
+        lambda _workflow_id: _STEPS,
+        raising=False,
+    )
+
+    entered = {"value": False}
+
+    async def _fake_scheduler(*_args, **_kwargs):
+        entered["value"] = True
+        if False:  # pragma: no cover - keep this an async generator
+            yield {}
+
+    monkeypatch.setattr(
+        runtime_mod,
+        "run_scheduler_workflow",
+        _fake_scheduler,
+    )
+    state = _production_state()
+    state["task_profile"] = task_profile
+
+    events = _drive(
+        SimpleNamespace(start_node="coordinator", nodes={}),
+        state,
+        task_id="task-profile-binding-gate",
+        execution_phase="execution",
+    )
+
+    assert entered["value"] is False
+    terminal = events[-1]["data"]
+    assert terminal["status"] == "FAILED"
+    assert terminal["failures"][0]["code"] == "TASK_GRAPH_INVALID"

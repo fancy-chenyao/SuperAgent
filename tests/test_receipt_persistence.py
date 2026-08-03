@@ -18,6 +18,7 @@ from src.orchestration.completion import (
 )
 from src.orchestration.providers import StubRoutingProvider
 from src.orchestration.scheduler import TaskScheduler
+from src.orchestration.store import ArtifactStore
 
 
 def _send_graph(task_id="task-email", **step_kwargs):
@@ -52,9 +53,12 @@ def _email_graph():
     )
 
 
-def _run(execute, receipts):
+def _run(execute, receipts, artifact_store=None):
     sched = TaskScheduler(
-        execute_step=execute, routing_provider=StubRoutingProvider(), receipt_store=receipts
+        execute_step=execute,
+        routing_provider=StubRoutingProvider(),
+        receipt_store=receipts,
+        store=artifact_store,
     )
     return asyncio.run(sched.run(_email_graph(), context={"task_id": "task-email"}))
 
@@ -71,18 +75,57 @@ def test_t10_first_run_executes_and_records_receipt(tmp_path):
 
 def test_t9_repeated_run_after_restart_does_not_resend(tmp_path):
     execute = _SendCounter()
+    process_a_artifacts = ArtifactStore()
 
     # First run in "process A".
-    _run(execute, PersistentReceiptStore("task-email", base_dir=tmp_path))
+    _run(
+        execute,
+        PersistentReceiptStore("task-email", base_dir=tmp_path),
+        process_a_artifacts,
+    )
     assert execute.sends == 1
 
-    # "Process restart": a brand new receipt store instance reading the same dir.
+    # "Process restart": restore both durable receipts and persisted Artifacts.
     reloaded = PersistentReceiptStore("task-email", base_dir=tmp_path)
-    results = _run(execute, reloaded)
+    process_b_artifacts = ArtifactStore()
+    process_b_artifacts.load_state(process_a_artifacts.dump_state())
+    results = _run(execute, reloaded, process_b_artifacts)
 
     assert execute.sends == 1  # NOT re-sent
     assert results["send"].is_success
     assert results["send"].metrics.get("idempotent_reuse") is True
+
+
+def test_pre_side_effect_validation_failure_releases_receipt_for_safe_retry(
+    tmp_path,
+):
+    class _ValidationFailure:
+        calls = 0
+
+        async def __call__(self, **_kwargs):
+            self.calls += 1
+            return ExecuteResult(
+                status=ExecutionStatus.FAILED,
+                error="could not convert string to float: '待补充'",
+                metadata={
+                    "side_effect_started": False,
+                    "failure_phase": "validation",
+                    "safe_to_retry": True,
+                },
+            )
+
+    execute = _ValidationFailure()
+    receipts = PersistentReceiptStore("task-email", base_dir=tmp_path)
+    results = _run(execute, receipts)
+
+    assert execute.calls == 1
+    assert results.terminal_status == WorkflowStatus.FAILED
+    assert results["send"].metrics["safe_to_retry"] is True
+    assert results["send"].metrics["receipt_released"] is True
+    key = idempotency_key("task-email", "send", {})
+    assert PersistentReceiptStore(
+        "task-email", base_dir=tmp_path
+    ).get(key) is None
 
 
 # --------------------------------------------------------------------------- #
@@ -325,7 +368,7 @@ def test_read_step_retry_behavior_is_preserved():
     async def execute(*, step, selected_agent, inputs, context):
         calls["n"] += 1
         if calls["n"] == 1:
-            return ExecuteResult(status=ExecutionStatus.FAILED, error="transient")
+            return ExecuteResult(status=ExecutionStatus.TIMEOUT, error="transient")
         return ExecuteResult(status=ExecutionStatus.SUCCESS, result={"ok": True})
 
     graph = TaskGraph(

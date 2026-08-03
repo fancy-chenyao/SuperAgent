@@ -1071,6 +1071,41 @@ button:disabled {
   display: none;
 }
 
+.step-governance-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.step-governance-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid rgba(20, 24, 40, 0.08);
+  border-radius: 999px;
+  padding: 3px 7px;
+  background: var(--bg-soft);
+  color: var(--text);
+  font-size: 10px;
+}
+
+.step-governance-chip small {
+  color: var(--muted);
+}
+
+.step-governance-chip.ok {
+  border-color: rgba(75, 227, 172, 0.45);
+}
+
+.step-governance-chip.warn {
+  border-color: rgba(244, 163, 93, 0.5);
+}
+
+.step-governance-chip.danger {
+  border-color: rgba(217, 83, 79, 0.5);
+}
+
 /* ─── Result Content ─────────────────────────────────────────────────── */
 
 .step-result {
@@ -3191,6 +3226,32 @@ button.small {
   border-color: rgba(217, 83, 79, 0.4);
 }
 
+.sec-approval-item.status-frozen,
+.sec-approval-item.status-terminated {
+  border-color: rgba(217, 83, 79, 0.4);
+}
+
+.sec-approval-item.status-retry_ready,
+.sec-approval-item.status-confirmed_succeeded {
+  border-color: rgba(75, 227, 172, 0.4);
+}
+
+.sec-reconciliation-help {
+  margin: 0 0 10px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.sec-reconciliation-actions {
+  flex-wrap: wrap;
+}
+
+.sec-reconciliation-actions .danger {
+  color: var(--danger);
+  border-color: rgba(217, 83, 79, 0.35);
+}
+
 .sec-approval-header {
   display: flex;
   align-items: center;
@@ -3225,6 +3286,44 @@ button.small {
 .sec-event-detail {
   font-size: 12px;
   line-height: 1.8;
+}
+
+.governance-timeline {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 420px;
+  overflow: auto;
+}
+
+.governance-event {
+  display: grid;
+  grid-template-columns: 150px minmax(120px, 180px) 1fr;
+  gap: 10px;
+  align-items: start;
+  padding: 10px 12px;
+  border-left: 3px solid var(--accent);
+  border-radius: 8px;
+  background: var(--bg-soft);
+  font-size: 12px;
+}
+
+.governance-event.is-error {
+  border-left-color: var(--danger);
+}
+
+.governance-event.is-review {
+  border-left-color: var(--warning);
+}
+
+.governance-event-time,
+.governance-event-detail {
+  color: var(--muted);
+}
+
+.governance-event-type {
+  font-weight: 700;
+  overflow-wrap: anywhere;
 }
 
 /* Permission Summary (Run tab) */

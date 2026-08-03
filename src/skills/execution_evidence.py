@@ -172,6 +172,8 @@ class StepExecutionEvidence(BaseModel):
 
     step_id: str
     agent_name: str = ""
+    planned_agent: str = ""
+    executed_agent: str = ""
     operation_mode: str = "read"
     risk_level: str = "LOW"
     technical_success: bool = False
@@ -557,6 +559,26 @@ def aggregate_evidence(
         if len(expected_ids) == len(normalized_plan):
             actual_ids = {item.step_id for item in normalized_steps}
             covered_steps = sum(step_id in actual_ids for step_id in expected_ids)
+            # Records created by the legacy publisher/agent_proxy loop before
+            # Planner-id binding used runtime keys such as ``2:SomeAgent``.
+            # That loop executes one Agent for all plan steps assigned to it, so
+            # agent identity is the only durable join key available in those
+            # historical records.  Restrict this compatibility path to legacy
+            # mode; Scheduler evidence must continue matching exact step ids.
+            if (
+                covered_steps < len(normalized_plan)
+                and str(execution_mode).lower() == "legacy"
+            ):
+                actual_agents = {
+                    item.agent_name
+                    for item in normalized_steps
+                    if item.agent_name
+                }
+                legacy_covered_steps = sum(
+                    str(item.get("agent_name") or "") in actual_agents
+                    for item in normalized_plan
+                )
+                covered_steps = max(covered_steps, legacy_covered_steps)
         else:
             expected_agents = Counter(
                 str(item.get("agent_name"))
@@ -679,14 +701,20 @@ def build_scheduler_evidence(
     step_evidence: list[StepExecutionEvidence] = []
     for step in graph.steps:
         result = results.get(step.step_id) if isinstance(results, Mapping) else None
-        agent_name = str(
+        planned_agent = str(
             getattr(step, "agent_name", "") or step.preferred_resource_id or ""
+        )
+        metrics = _mapping(getattr(result, "metrics", None)) if result is not None else {}
+        executed_agent = str(
+            metrics.get("selected_agent") or planned_agent
         )
         if result is None:
             step_evidence.append(
                 StepExecutionEvidence(
                     step_id=step.step_id,
-                    agent_name=agent_name,
+                    agent_name=planned_agent,
+                    planned_agent=planned_agent,
+                    executed_agent="",
                     operation_mode=str(step.operation_mode),
                     risk_level=str(step.risk_level),
                     technical_success=False,
@@ -707,7 +735,6 @@ def build_scheduler_evidence(
                     artifacts.append(artifact_store.get(ref))
             except Exception:
                 continue
-        metrics = _mapping(getattr(result, "metrics", None))
         receipt_status = metrics.get("receipt_status")
         idem_key = metrics.get("idempotency_key")
         if receipt_store is not None and idem_key:
@@ -718,7 +745,7 @@ def build_scheduler_evidence(
                 pass
         item = build_step_evidence(
             step_id=step.step_id,
-            agent_name=agent_name,
+            agent_name=executed_agent,
             operation_mode=str(step.operation_mode),
             risk_level=str(step.risk_level),
             verification_contract=_mapping(
@@ -730,6 +757,8 @@ def build_scheduler_evidence(
             receipt_status=str(receipt_status) if receipt_status else None,
             idempotency_key=str(idem_key) if idem_key else None,
         )
+        item.planned_agent = planned_agent
+        item.executed_agent = executed_agent
         if refs:
             item.artifact_refs = refs
         if artifacts:

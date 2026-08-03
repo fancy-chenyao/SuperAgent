@@ -161,6 +161,7 @@ class SecurityContextBuilder:
             task_profile = {}
 
         workflow_mode = getattr(context, "workflow_mode", None) or metadata.get("workflow_mode", "execution")
+        workflow_mode = getattr(workflow_mode, "value", workflow_mode)
         user_query = metadata.get(
             "original_user_query",
             metadata.get("USER_QUERY", metadata.get("user_query", "workflow_execution")),

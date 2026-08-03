@@ -19,26 +19,29 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from collections.abc import Mapping
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
-from src.interface.artifact import StepResult, StepStatus
+from src.interface.artifact import ArtifactRef, StepResult, StepStatus
 from src.interface.task_graph import TaskGraph, TaskStep, WorkflowStatus
 from src.manager.executor.agent_result_adapter import (
     AgentResultNormalizationError,
     normalize_agent_result,
 )
-from src.manager.executor.artifact_adapter import to_artifacts
+from src.manager.executor.artifact_adapter import to_artifact, to_artifacts
 from src.manager.executor.base import ExecutionStatus
 from src.orchestration.completion import (
     ClaimStatus,
     ReceiptStore,
     evaluate_completion,
     idempotency_key,
+    missing_receipt_outputs,
     normalize_input,
 )
 from src.orchestration.providers import RoutingProvider, RoutingResult
+from src.orchestration.recovery import classify_failure, retry_delay_seconds
 from src.orchestration.resolver import (
     ArtifactAccessDenied,
     ArtifactResolver,
@@ -46,6 +49,7 @@ from src.orchestration.resolver import (
     ArtifactSchemaInvalid,
 )
 from src.orchestration.failure_mapper import (
+    failure_from_exception,
     failure_from_step_result,
     make_failure,
 )
@@ -68,52 +72,84 @@ def _is_dispatch_permission_error(exc: BaseException) -> bool:
     except Exception:  # noqa: BLE001 - optional security dependencies
         return False
     return isinstance(exc, PermissionDeniedError)
+
+
+# Optional authorization hook. It runs after routing/context construction but
+# before a side-effect receipt is claimed, so an approval pause never leaves a
+# misleading STARTED receipt behind.
+AuthorizeStep = Callable[..., Awaitable[Any]]
 # Optional async lifecycle hooks (used by the runtime bridge for SSE/logging).
 StepHook = Callable[..., Awaitable[None]]
 
 _DEFAULT_WRITE_LOCK = "__write__"
 
 
+def _mapping_path(mapping: Mapping[str, Any], *path: str) -> Any:
+    """Read an explicitly trusted provider-id path from a mapping."""
+
+    value: Any = mapping
+    for key in path:
+        if not isinstance(value, Mapping):
+            return None
+        value = value.get(key)
+    return value
+
+
 def _external_operation_id(exec_result: Any, artifact: Any) -> Optional[str]:
-    """Extract a durable provider/business id from normalized executor output."""
+    """Extract a durable provider/business id from normalized executor output.
+
+    Remote tools do not all return the identifier at the top level.  Keep the
+    accepted protocol explicit so an unrelated nested ``id`` (for example a
+    recipient or attachment id) can never accidentally confirm a side effect.
+    """
 
     metadata = getattr(exec_result, "metadata", None) or {}
     candidates: list[Any] = []
     if isinstance(metadata, Mapping):
         candidates.extend(
-            metadata.get(key)
-            for key in (
-                "external_op_id",
-                "external_operation_id",
-                "provider_operation_id",
+            _mapping_path(metadata, *path)
+            for path in (
+                ("external_op_id",),
+                ("external_operation_id",),
+                ("provider_operation_id",),
+                ("business_outcome", "external_op_id"),
+                ("business_outcome", "external_operation_id"),
+                ("business_outcome", "resource_id"),
+                ("business_outcome", "resource", "id"),
             )
         )
+    provider_paths = (
+        ("external_op_id",),
+        ("external_operation_id",),
+        ("operation_id",),
+        ("message_id",),
+        ("request_id",),
+        ("submission_id",),
+        # Provider-specific result envelopes used by remote write tools.
+        ("sent", "id"),
+        ("sent", "message_id"),
+        ("message", "id"),
+        ("event", "id"),
+        ("meeting", "id"),
+        ("submission", "id"),
+        ("resource", "id"),
+        ("business_outcome", "external_op_id"),
+        ("business_outcome", "external_operation_id"),
+        ("business_outcome", "resource_id"),
+        ("business_outcome", "resource", "id"),
+    )
+    # Read the raw result first.  A trusted output contract may split it into
+    # several Artifacts, in which case the first Artifact need not contain the
+    # provider receipt id.  The normalized payload remains a compatibility
+    # fallback for adapters that expose their identifier there.
+    raw_result = getattr(exec_result, "result", None)
     payload = getattr(artifact, "payload", None)
-    if isinstance(payload, Mapping):
-        outcome = payload.get("business_outcome")
-        if isinstance(outcome, Mapping):
-            resource = outcome.get("resource")
+    for source in (raw_result, payload):
+        if isinstance(source, Mapping):
             candidates.extend(
-                outcome.get(key)
-                for key in (
-                    "external_op_id",
-                    "external_operation_id",
-                    "resource_id",
-                )
+                _mapping_path(source, *path)
+                for path in provider_paths
             )
-            if isinstance(resource, Mapping):
-                candidates.append(resource.get("id"))
-        candidates.extend(
-            payload.get(key)
-            for key in (
-                "external_op_id",
-                "external_operation_id",
-                "operation_id",
-                "message_id",
-                "request_id",
-                "submission_id",
-            )
-        )
     for value in candidates:
         if value is not None and str(value).strip():
             return str(value).strip()
@@ -146,6 +182,7 @@ class WorkflowResult(dict):
         *,
         terminal_status: WorkflowStatus,
         clarifications: Optional[List[str]] = None,
+        approval_required_steps: Optional[List[str]] = None,
         rejected_steps: Optional[List[str]] = None,
         needs_reconciliation: Optional[List[str]] = None,
         blocked_steps: Optional[List[str]] = None,
@@ -154,6 +191,7 @@ class WorkflowResult(dict):
         super().__init__(step_results or {})
         self.terminal_status = terminal_status
         self.clarifications = list(clarifications or [])
+        self.approval_required_steps = list(approval_required_steps or [])
         self.rejected_steps = list(rejected_steps or [])
         self.needs_reconciliation = list(needs_reconciliation or [])
         self.blocked_steps = list(blocked_steps or [])
@@ -185,16 +223,22 @@ class TaskScheduler:
         self,
         *,
         execute_step: ExecuteStep,
+        authorize_step: Optional[AuthorizeStep] = None,
         routing_provider: Optional[RoutingProvider] = None,
         store: Optional[ArtifactStore] = None,
         resolver: Optional[ArtifactResolver] = None,
         receipt_store: Optional[ReceiptStore] = None,
+        redispatch_enabled: bool = False,
+        retry_delay_seconds: float = 0.0,
     ) -> None:
         self._execute_step = execute_step
+        self._authorize_step = authorize_step
         self._routing = routing_provider
         self.store = store or ArtifactStore()
         self.resolver = resolver or ArtifactResolver(self.store)
         self.receipt_store = receipt_store
+        self.redispatch_enabled = bool(redispatch_enabled)
+        self.retry_delay_seconds = max(0.0, float(retry_delay_seconds))
 
         # Runtime state (reset per run)
         self._outputs: Dict[str, Dict[str, Any]] = {}
@@ -203,6 +247,8 @@ class TaskScheduler:
         self._agent_to_steps: Dict[str, List[str]] = {}
         # Cached routing verdict per step id, filled by the pre-flight pass.
         self._routes: Dict[str, RoutingResult] = {}
+        self._on_attempt_start: Optional[StepHook] = None
+        self._on_attempt_end: Optional[StepHook] = None
 
     async def run(
         self,
@@ -214,7 +260,10 @@ class TaskScheduler:
         initial_results: Optional[Dict[str, StepResult]] = None,
         on_step_start: Optional[StepHook] = None,
         on_step_end: Optional[StepHook] = None,
+        on_retry: Optional[StepHook] = None,
         commit_step_result: Optional[StepHook] = None,
+        on_attempt_start: Optional[StepHook] = None,
+        on_attempt_end: Optional[StepHook] = None,
     ) -> "WorkflowResult":
         """Execute ``graph`` and return a :class:`WorkflowResult`.
 
@@ -233,6 +282,8 @@ class TaskScheduler:
         graph.validate_dag()
         smap = graph.step_map()
         context = context or {}
+        self._on_attempt_start = on_attempt_start
+        self._on_attempt_end = on_attempt_end
 
         self._outputs = {}
         if initial_outputs:
@@ -279,7 +330,9 @@ class TaskScheduler:
         # Pre-flight routing: resolve the routing verdict for every not-yet-done
         # step BEFORE executing anything, and cache it. This makes a global
         # clarification enforceable (any CLARIFY halts the whole workflow before
-        # a single side-effect step starts) and avoids re-routing at run time.
+        # a single side-effect step starts). A later recovery route is allowed
+        # only after this pass fully dispatches, only for a retryable read-only
+        # step, and never promotes runtime CLARIFY/REJECT into a global gate.
         self._routes = await self._preflight_routing(graph, context, skip=attempted)
 
         clarify_result = self._global_clarify(graph, results, completed=completed)
@@ -329,7 +382,7 @@ class TaskScheduler:
             batch = self._select_batch(runnable, smap)
             coros = [
                 self._run_step(smap[sid], context, on_step_start,
-                               on_step_end, commit_step_result)
+                               on_step_end, on_retry, commit_step_result)
                 for sid in batch
             ]
             batch_results = await asyncio.gather(*coros)
@@ -497,6 +550,9 @@ class TaskScheduler:
         blocked = [
             sid for sid, r in results.items() if r.status == StepStatus.SKIPPED
         ]
+        approval_required = [
+            sid for sid, r in results.items() if (r.metrics or {}).get("approval_required")
+        ]
         failed = [sid for sid, r in results.items() if r.status !=
                   StepStatus.SUCCEEDED]
         primary_failed = [
@@ -507,6 +563,8 @@ class TaskScheduler:
 
         if needs_recon:
             status = WorkflowStatus.NEEDS_RECONCILIATION
+        elif approval_required:
+            status = WorkflowStatus.APPROVAL_REQUIRED
         elif not failed:
             status = WorkflowStatus.SUCCEEDED
         elif succeeded:
@@ -519,6 +577,7 @@ class TaskScheduler:
         return WorkflowResult(
             results,
             terminal_status=status,
+            approval_required_steps=approval_required,
             rejected_steps=rejected,
             needs_reconciliation=needs_recon,
             blocked_steps=blocked,
@@ -563,13 +622,17 @@ class TaskScheduler:
         context: dict,
         on_step_start: Optional[StepHook],
         on_step_end: Optional[StepHook],
+        on_retry: Optional[StepHook] = None,
         commit_step_result: Optional[StepHook] = None,
     ) -> StepResult:
         # A single step must never crash the whole batch: routing, input
         # resolution, the start hook or completion evaluation raising would
         # otherwise abort ``asyncio.gather`` and kill independent branches.
+        started_at = time.monotonic()
         try:
-            result = await self._execute_step_core(step, context, on_step_start)
+            result = await self._execute_step_core(
+                step, context, on_step_start, on_retry
+            )
         except Exception as exc:  # noqa: BLE001 - degrade to a failed step
             result = StepResult(
                 step_id=step.step_id,
@@ -607,6 +670,15 @@ class TaskScheduler:
         # persistence/reconciliation failure as well.
         result = self._with_failure(step, result)
 
+        metrics = dict(result.metrics or {})
+        metrics.setdefault("operation_mode", str(step.operation_mode or ""))
+        metrics.setdefault("risk_level", str(step.risk_level or ""))
+        metrics.setdefault("max_attempts", max(1, int(step.retry or 0) + 1))
+        metrics["duration_seconds"] = round(
+            max(0.0, time.monotonic() - started_at), 6
+        )
+        result.metrics = metrics
+
         # Non-critical end hook (logging / SSE / monitoring): best effort only.
         if on_step_end is not None:
             try:
@@ -638,11 +710,539 @@ class TaskScheduler:
             }
         )
 
+    def _prepare_agent_execution(
+        self,
+        step: TaskStep,
+        context: dict,
+        selected_agent: Optional[str],
+    ) -> tuple[dict, dict]:
+        """Build an isolated context and resolve inputs for the actual Agent."""
+
+        step_ctx = dict(context)
+        factory = context.get("context_factory")
+        if callable(factory):
+            try:
+                step_ctx["execution_context"] = factory(step, selected_agent)
+            except Exception:  # noqa: BLE001 - context failures fail closed later
+                step_ctx["execution_context"] = None
+        inputs, upstream_sensitivities, upstream_refs = self._resolve_inputs(
+            step,
+            step_ctx,
+            consumer_agent=selected_agent,
+        )
+        step_ctx["upstream_sensitivities"] = upstream_sensitivities
+        step_ctx["upstream_artifact_refs"] = upstream_refs
+        return step_ctx, inputs
+
+    @staticmethod
+    def _attempt_trace(
+        failure: Any,
+        *,
+        attempt: int,
+        phase: str,
+    ) -> dict[str, Any]:
+        """Return a payload-free recovery trace entry."""
+
+        return {
+            "attempt": attempt,
+            "phase": phase,
+            "code": str(getattr(failure, "code", "INTERNAL_STEP_ERROR")),
+            "retryable": bool(getattr(failure, "retryable", False)),
+        }
+
+    def _classify_attempt_result(
+        self,
+        step: TaskStep,
+        result: StepResult,
+        *,
+        selected_agent: Optional[str],
+    ) -> StepResult:
+        """Attach the public failure descriptor while still inside the retry loop."""
+
+        metrics = dict(result.metrics or {})
+        metrics.setdefault("selected_agent", selected_agent)
+        classified = result.model_copy(update={"metrics": metrics})
+        if classified.is_success or classified.failure is not None:
+            return classified
+        return classified.model_copy(
+            update={
+                "failure": failure_from_step_result(
+                    step.step_id,
+                    classified.error,
+                    classified.metrics,
+                    agent_id=selected_agent,
+                )
+            }
+        )
+
+    async def _execute_read_only_with_agent(
+        self,
+        step: TaskStep,
+        step_ctx: dict,
+        selected_agent: Optional[str],
+        inputs: dict,
+        *,
+        retry_budget: int,
+        phase: str,
+        on_retry: Optional[StepHook] = None,
+    ) -> StepResult:
+        """Execute one read-only Agent with a retryable-driven bounded budget."""
+
+        max_attempts = 1 + min(max(int(retry_budget), 0), 1)
+        attempt_failures: list[dict[str, Any]] = []
+        for attempt_index in range(max_attempts):
+            attempt_number = attempt_index + 1
+            if self._on_attempt_start is not None:
+                try:
+                    await self._on_attempt_start(
+                        step=step,
+                        selected_agent=selected_agent,
+                        inputs=inputs,
+                        attempt=attempt_number,
+                        phase=phase,
+                    )
+                except Exception:  # noqa: BLE001 - monitoring is best effort
+                    pass
+            try:
+                exec_result = await self._invoke(
+                    step,
+                    selected_agent,
+                    inputs,
+                    step_ctx,
+                )
+            except asyncio.TimeoutError:
+                failure = make_failure(
+                    "AGENT_TIMEOUT",
+                    step_id=step.step_id,
+                    agent_id=selected_agent,
+                    details_safe={"attempts": attempt_number},
+                )
+                candidate = StepResult(
+                    step_id=step.step_id,
+                    status=StepStatus.FAILED,
+                    failure=failure,
+                    metrics={
+                        "attempts": attempt_number,
+                        "selected_agent": selected_agent,
+                    },
+                )
+            except Exception as exc:  # noqa: BLE001 - classify and fail closed
+                governed = self._policy_failure_result(step, selected_agent, exc)
+                if governed is not None:
+                    return governed
+                if _is_dispatch_permission_error(exc):
+                    failure = make_failure(
+                        "AGENT_DISPATCH_DENIED",
+                        step_id=step.step_id,
+                        agent_id=selected_agent,
+                    )
+                else:
+                    # An arbitrary exception may be a programming/configuration
+                    # defect. Only explicit transient signals are auto-retried.
+                    failure = failure_from_exception(
+                        exc,
+                        step_id=step.step_id,
+                        agent_id=selected_agent,
+                        retryable=False,
+                    )
+                candidate = StepResult(
+                    step_id=step.step_id,
+                    status=StepStatus.FAILED,
+                    failure=failure,
+                    metrics={
+                        "attempts": attempt_number,
+                        "selected_agent": selected_agent,
+                        **(
+                            {"failure_code": "AGENT_DISPATCH_DENIED"}
+                            if _is_dispatch_permission_error(exc)
+                            else {}
+                        ),
+                    },
+                )
+            else:
+                if getattr(exec_result, "is_success", True):
+                    candidate = self._record_success(
+                        step,
+                        exec_result,
+                        step_ctx,
+                        attempt_number,
+                        selected_agent,
+                    )
+                    if candidate.is_success:
+                        metrics = dict(candidate.metrics or {})
+                        metrics.update(
+                            {
+                                "attempts": attempt_number,
+                                "retry_count": attempt_index,
+                                "selected_agent": selected_agent,
+                                "attempt_failures": attempt_failures,
+                                "recovery_path": (
+                                    [phase, "same_agent_retry"]
+                                    if attempt_number > 1
+                                    else [phase]
+                                ),
+                            }
+                        )
+                        candidate = candidate.model_copy(
+                            update={"metrics": metrics}
+                        )
+                        if self._on_attempt_end is not None:
+                            try:
+                                await self._on_attempt_end(
+                                    step=step,
+                                    selected_agent=selected_agent,
+                                    result=candidate,
+                                    attempt=attempt_number,
+                                    phase=phase,
+                                )
+                            except Exception:  # noqa: BLE001
+                                pass
+                        return candidate
+                else:
+                    status = getattr(exec_result, "status", None)
+                    metrics = {
+                        "attempts": attempt_number,
+                        "selected_agent": selected_agent,
+                    }
+                    error = getattr(exec_result, "error", None) or "step failed"
+                    if status == ExecutionStatus.TIMEOUT:
+                        failure = make_failure(
+                            "AGENT_TIMEOUT",
+                            step_id=step.step_id,
+                            agent_id=selected_agent,
+                            details_safe={"attempts": attempt_number},
+                        )
+                        candidate = StepResult(
+                            step_id=step.step_id,
+                            status=StepStatus.FAILED,
+                            failure=failure,
+                            metrics=metrics,
+                        )
+                    else:
+                        classification = classify_failure(
+                            error,
+                            metrics,
+                            read_only=True,
+                        )
+                        # Free-form failure text is not itself a trusted retry
+                        # signal. Only a recognized transient/timeout/rate-limit
+                        # class may consume the bounded read retry budget.
+                        retryable = bool(
+                            classification.retryable
+                            and classification.category.value != "UNKNOWN"
+                        )
+                        failure = make_failure(
+                            "AGENT_EXECUTION_FAILED",
+                            step_id=step.step_id,
+                            agent_id=selected_agent,
+                            retryable=retryable,
+                            details_safe={
+                                "reason_code": classification.reason_code,
+                            },
+                        )
+                        metrics.update(
+                            {
+                                "failure_category": classification.category.value,
+                                "reason_code": classification.reason_code,
+                                "retryable": retryable,
+                            }
+                        )
+                        candidate = StepResult(
+                            step_id=step.step_id,
+                            status=StepStatus.FAILED,
+                            error=error,
+                            failure=failure,
+                            metrics=metrics,
+                        )
+
+            candidate = self._classify_attempt_result(
+                step,
+                candidate,
+                selected_agent=selected_agent,
+            )
+            attempt_failures.append(
+                self._attempt_trace(
+                    candidate.failure,
+                    attempt=attempt_number,
+                    phase=phase,
+                )
+            )
+            metrics = dict(candidate.metrics or {})
+            metrics.update(
+                {
+                    "attempts": attempt_number,
+                    "retry_count": attempt_index,
+                    "selected_agent": selected_agent,
+                    "attempt_failures": list(attempt_failures),
+                    "recovery_path": (
+                        [phase, "same_agent_retry"]
+                        if attempt_number > 1
+                        else [phase]
+                    ),
+                }
+            )
+            candidate = candidate.model_copy(update={"metrics": metrics})
+            if self._on_attempt_end is not None:
+                try:
+                    await self._on_attempt_end(
+                        step=step,
+                        selected_agent=selected_agent,
+                        result=candidate,
+                        attempt=attempt_number,
+                        phase=phase,
+                    )
+                except Exception:  # noqa: BLE001 - monitoring is best effort
+                    pass
+            if (
+                not bool(getattr(candidate.failure, "retryable", False))
+                or attempt_number >= max_attempts
+            ):
+                return candidate
+            if on_retry is not None:
+                classification = classify_failure(
+                    candidate.error,
+                    candidate.metrics,
+                    read_only=True,
+                )
+                try:
+                    await on_retry(
+                        step=step,
+                        selected_agent=selected_agent,
+                        attempt=attempt_number,
+                        next_attempt=attempt_number + 1,
+                        max_attempts=max_attempts,
+                        delay_seconds=self.retry_delay_seconds,
+                        error=candidate.error,
+                        reason_code=classification.reason_code,
+                    )
+                except Exception:  # noqa: BLE001 - monitoring is best effort
+                    pass
+            if self.retry_delay_seconds:
+                await asyncio.sleep(self.retry_delay_seconds)
+
+        raise AssertionError("read-only recovery loop exhausted unexpectedly")
+
+    async def _route_excluding(
+        self,
+        step: TaskStep,
+        context: dict,
+        excluded_agent_ids: set[str],
+    ) -> RoutingResult:
+        """Ask the bound router for a new verdict after excluding failed Agents."""
+
+        if self._routing is None:
+            return RoutingResult(
+                selected_agent=None,
+                decision="NO_CAPABLE_AGENT",
+                reason_codes=["REDISPATCH_ROUTER_UNAVAILABLE"],
+            )
+        authorized = set(context.get("authorized_agent_ids") or set())
+        authorized.difference_update(excluded_agent_ids)
+        return await self._routing.decide(
+            step,
+            user_query=context.get("user_query", ""),
+            task_id=context.get("task_id", ""),
+            workflow_id=context.get("workflow_id", ""),
+            agents=context.get("agents", ()),
+            authorized_agent_ids=authorized,
+            metadata=context.get("metadata"),
+        )
+
+    def _redispatch_contract_outcome(
+        self,
+        step: TaskStep,
+        context: dict,
+        selected_agent: str,
+    ) -> Optional[str]:
+        """Validate a recovery candidate before sending it any step inputs."""
+
+        planned_contract = getattr(step, "agent_contract", None)
+        if planned_contract is None:
+            return "REDISPATCH_PLANNED_CONTRACT_MISSING"
+        candidate_contract = self._trusted_agent_contract(selected_agent, context)
+        if candidate_contract is None:
+            return "REROUTED_AGENT_CONTRACT_MISSING"
+
+        expected_outputs = list(getattr(step, "expected_outputs", None) or [])
+        if not expected_outputs:
+            return "REDISPATCH_EXPECTED_OUTPUTS_MISSING"
+        planned_outputs = {
+            ref.name: ref for ref in planned_contract.produces
+        }
+        candidate_outputs = {
+            ref.name: ref for ref in candidate_contract.produces
+        }
+        if set(expected_outputs) != set(planned_outputs):
+            return "REDISPATCH_PLANNED_OUTPUT_BOUNDARY_MISMATCH"
+        if set(planned_outputs) - set(candidate_outputs):
+            return "REDISPATCH_OUTPUT_MISSING"
+        if set(candidate_outputs) - set(planned_outputs):
+            return "REDISPATCH_OUTPUT_EXTRA"
+        if candidate_contract.contract_version != planned_contract.contract_version:
+            return "REDISPATCH_CONTRACT_VERSION_MISMATCH"
+        for name, planned_ref in planned_outputs.items():
+            candidate_ref = candidate_outputs[name]
+            if candidate_ref.schema_ref != planned_ref.schema_ref:
+                return "REDISPATCH_OUTPUT_SCHEMA_MISMATCH"
+            if candidate_ref.cardinality != planned_ref.cardinality:
+                return "REDISPATCH_OUTPUT_CARDINALITY_MISMATCH"
+            if candidate_ref.required != planned_ref.required:
+                return "REDISPATCH_OUTPUT_REQUIRED_MISMATCH"
+
+        planned_inputs = {
+            ref.name: ref for ref in planned_contract.requires
+        }
+        candidate_inputs = {
+            ref.name: ref for ref in candidate_contract.requires
+        }
+        if set(planned_inputs) != set(candidate_inputs):
+            return "REDISPATCH_INPUT_MISSING"
+        for name, planned_ref in planned_inputs.items():
+            candidate_ref = candidate_inputs[name]
+            if candidate_ref.schema_ref != planned_ref.schema_ref:
+                return "REDISPATCH_INPUT_SCHEMA_MISMATCH"
+            if candidate_ref.cardinality != planned_ref.cardinality:
+                return "REDISPATCH_INPUT_CARDINALITY_MISMATCH"
+            if candidate_ref.required != planned_ref.required:
+                return "REDISPATCH_INPUT_REQUIRED_MISMATCH"
+        return None
+
+    @staticmethod
+    def _with_redispatch_outcome(
+        result: StepResult,
+        *,
+        outcome: str,
+    ) -> StepResult:
+        metrics = dict(result.metrics or {})
+        metrics["redispatch_outcome"] = outcome
+        return result.model_copy(update={"metrics": metrics})
+
+    async def _maybe_redispatch_read_only(
+        self,
+        step: TaskStep,
+        context: dict,
+        selected_agent: Optional[str],
+        primary: StepResult,
+    ) -> StepResult:
+        """Run at most one equivalent Agent after a retryable primary failure."""
+
+        failure = getattr(primary, "failure", None)
+        if (
+            not self.redispatch_enabled
+            or self._routing is None
+            or not step.is_read_only
+            or not selected_agent
+            or failure is None
+            or not failure.retryable
+            or bool((primary.metrics or {}).get("needs_reconciliation"))
+        ):
+            return primary
+
+        if getattr(step, "agent_contract", None) is None:
+            return self._with_redispatch_outcome(
+                primary,
+                outcome="REDISPATCH_PLANNED_CONTRACT_MISSING",
+            )
+        authorized = set(context.get("authorized_agent_ids") or set())
+        authorized.discard(selected_agent)
+        try:
+            routing = await self._route_excluding(step, context, {selected_agent})
+        except Exception:  # noqa: BLE001 - recovery routing never crashes the DAG
+            return self._with_redispatch_outcome(
+                primary,
+                outcome="ROUTING_FAILED",
+            )
+        decision = str(getattr(routing, "decision", "") or "").upper()
+        rerouted_agent = getattr(routing, "selected_agent", None)
+        if decision != "DISPATCH":
+            return self._with_redispatch_outcome(
+                primary,
+                outcome=decision or "ROUTING_FAILED",
+            )
+        if not rerouted_agent:
+            return self._with_redispatch_outcome(
+                primary,
+                outcome="DISPATCH_NO_AGENT",
+            )
+        if rerouted_agent == selected_agent:
+            return self._with_redispatch_outcome(
+                primary,
+                outcome="REDISPATCH_RESELECTED_EXCLUDED_AGENT",
+            )
+        if rerouted_agent not in authorized:
+            return self._with_redispatch_outcome(
+                primary,
+                outcome="REDISPATCH_AGENT_UNAUTHORIZED",
+            )
+
+        contract_outcome = self._redispatch_contract_outcome(
+            step,
+            context,
+            rerouted_agent,
+        )
+        if contract_outcome is not None:
+            return self._with_redispatch_outcome(
+                primary,
+                outcome=contract_outcome,
+            )
+        try:
+            rerouted_ctx, rerouted_inputs = self._prepare_agent_execution(
+                step,
+                context,
+                rerouted_agent,
+            )
+        except InputResolutionError:
+            return self._with_redispatch_outcome(
+                primary,
+                outcome="REDISPATCH_INPUT_RESOLUTION_FAILED",
+            )
+
+        rerouted = await self._execute_read_only_with_agent(
+            step,
+            rerouted_ctx,
+            rerouted_agent,
+            rerouted_inputs,
+            retry_budget=0,
+            phase="redispatch",
+        )
+        primary_metrics = dict(primary.metrics or {})
+        rerouted_metrics = dict(rerouted.metrics or {})
+        primary_attempts = int(primary_metrics.get("attempts") or 0)
+        combined_failures = list(primary_metrics.get("attempt_failures") or [])
+        for item in rerouted_metrics.get("attempt_failures") or []:
+            entry = dict(item)
+            entry["attempt"] = primary_attempts + int(entry.get("attempt") or 0)
+            combined_failures.append(entry)
+        merged_metrics = dict(rerouted_metrics)
+        merged_metrics.update(
+            {
+                "attempts": primary_attempts
+                + int(rerouted_metrics.get("attempts") or 0),
+                "retry_count": int(primary_metrics.get("retry_count") or 0),
+                "redispatch_count": 1,
+                "redispatched_from": selected_agent,
+                "redispatched_to": rerouted_agent,
+                "redispatch_outcome": (
+                    "SUCCEEDED"
+                    if rerouted.is_success
+                    else str(getattr(rerouted.failure, "code", "FAILED"))
+                ),
+                "attempt_failures": combined_failures,
+                "recovery_path": [
+                    *(primary_metrics.get("recovery_path") or ["primary"]),
+                    "redispatch",
+                ],
+                "selected_agent": rerouted_agent,
+            }
+        )
+        return rerouted.model_copy(update={"metrics": merged_metrics})
+
     async def _execute_step_core(
         self,
         step: TaskStep,
         context: dict,
         on_step_start: Optional[StepHook],
+        on_retry: Optional[StepHook] = None,
     ) -> StepResult:
         # Reuse the pre-flight routing verdict; only route here if a step was
         # somehow not covered by the pre-flight pass (defensive).
@@ -702,21 +1302,11 @@ class TaskScheduler:
                          "reason_codes": reason_codes},
             )
 
-        # Build a per-step execution context (never shared across concurrent
-        # steps). The injected ``context_factory`` yields an ExecutionContext
-        # carrying the acting user + producer agent so captured artifacts get
-        # correct owner/producer/provenance metadata.
-        step_ctx = dict(context)
-        factory = context.get("context_factory")
-        if callable(factory):
-            try:
-                step_ctx["execution_context"] = factory(step, selected_agent)
-            except Exception:  # noqa: BLE001 - never let context build crash a step
-                step_ctx["execution_context"] = None
-
         try:
-            inputs, upstream_sensitivities, upstream_refs = self._resolve_inputs(
-                step, step_ctx, consumer_agent=selected_agent
+            step_ctx, inputs = self._prepare_agent_execution(
+                step,
+                context,
+                selected_agent,
             )
         except InputResolutionError as exc:
             # A declared upstream dependency could not be satisfied. Fail closed
@@ -732,8 +1322,59 @@ class TaskScheduler:
                     "selected_agent": selected_agent,
                 },
             )
-        step_ctx["upstream_sensitivities"] = upstream_sensitivities
-        step_ctx["upstream_artifact_refs"] = upstream_refs
+
+        actual_contract, actual_schema_refs, contract_error = (
+            self._actual_output_contract(
+                step,
+                selected_agent,
+                step_ctx,
+                enforce_output_boundary=not step.is_read_only,
+            )
+        )
+        if contract_error is not None:
+            return StepResult(
+                step_id=step.step_id,
+                status=StepStatus.FAILED,
+                error=(
+                    f"actual Agent output contract is not safe for step "
+                    f"{step.step_id!r}: {contract_error}"
+                ),
+                metrics={
+                    "selected_agent": selected_agent,
+                    "result_error": contract_error,
+                    "side_effect_started": False,
+                },
+            )
+        # Bind one trusted contract immediately after routing. Every later
+        # stage (normalization, receipt persistence and resume) uses this same
+        # resolved contract rather than falling back to the planned Agent.
+        step_ctx["actual_agent_contract"] = actual_contract
+        step_ctx["actual_expected_schema_refs"] = dict(actual_schema_refs)
+
+        # Authorize dispatch after the isolated context and governed Artifact
+        # inputs are prepared, but before any side-effect receipt is claimed.
+        if self._authorize_step is not None:
+            try:
+                authorization_result = await self._authorize_step(
+                    step=step,
+                    selected_agent=selected_agent,
+                    context=step_ctx,
+                )
+                step_ctx["agent_dispatch_authorized"] = True
+                if isinstance(authorization_result, Mapping):
+                    step_ctx["permission_decision"] = str(
+                        authorization_result.get("decision")
+                        or ("ALLOW" if authorization_result.get("allowed") else "DENY")
+                    ).upper()
+                else:
+                    step_ctx["permission_decision"] = "ALLOW"
+            except Exception as exc:  # noqa: BLE001 - classify policy verdict
+                governed = self._policy_failure_result(step, selected_agent, exc)
+                if governed is not None:
+                    return governed
+                raise
+        else:
+            step_ctx["permission_decision"] = "NOT_ENFORCED"
 
         # Idempotency + crash-safety for side-effect steps: a single ATOMIC
         # claim replaces the old separate get()+put(STARTED) so two instances
@@ -760,6 +1401,8 @@ class TaskScheduler:
                     "agent": selected_agent,
                     "status": "STARTED",
                     "normalized_input": normalize_input(inputs),
+                    "expected_outputs": list(step.expected_outputs),
+                    "expected_schema_refs": dict(actual_schema_refs),
                     "external_op_id": None,
                     "timestamp": time.time(),
                 },
@@ -767,12 +1410,130 @@ class TaskScheduler:
             if claim.status == ClaimStatus.SUCCEEDED:
                 # Confirmed prior success: never re-run the side effect.
                 prior = claim.receipt or {}
+                receipt_agent = str(prior.get("agent") or selected_agent or "")
+                _receipt_contract, expected_schema_refs, contract_error = (
+                    self._actual_output_contract(
+                        step,
+                        receipt_agent or None,
+                        step_ctx,
+                        enforce_output_boundary=True,
+                    )
+                )
+                if contract_error is not None:
+                    return self._invalid_succeeded_receipt(
+                        step=step,
+                        selected_agent=receipt_agent or selected_agent,
+                        idempotency_key_value=idem_key,
+                        error=(
+                            "succeeded receipt Agent contract cannot be trusted: "
+                            f"{contract_error}"
+                        ),
+                        validation_error=contract_error,
+                        receipt=prior,
+                        expected_schema_refs=expected_schema_refs,
+                    )
+                missing_outputs = missing_receipt_outputs(
+                    prior.get("outputs"), step.expected_outputs
+                )
+                if missing_outputs:
+                    return self._invalid_succeeded_receipt(
+                        step=step,
+                        selected_agent=receipt_agent or selected_agent,
+                        idempotency_key_value=idem_key,
+                        error=(
+                            "succeeded receipt violates the trusted output contract; "
+                            f"missing: {', '.join(missing_outputs)}"
+                        ),
+                        validation_error="RECEIPT_OUTPUTS_MISSING",
+                        receipt=prior,
+                        expected_schema_refs=expected_schema_refs,
+                    )
+                prior_outputs = prior.get("outputs") or {}
+                outputs_kind = prior.get("outputs_kind")
+                if outputs_kind not in {"confirmed_payloads", "artifact_refs"}:
+                    return self._invalid_succeeded_receipt(
+                        step=step,
+                        selected_agent=selected_agent,
+                        idempotency_key_value=idem_key,
+                        error=(
+                            "succeeded receipt has no supported outputs_kind; "
+                            "legacy receipts require explicit reconciliation"
+                        ),
+                        validation_error="OUTPUTS_KIND_MISSING_OR_INVALID",
+                        receipt=prior,
+                        expected_schema_refs=expected_schema_refs,
+                    )
+                receipt_schema_refs = prior.get("expected_schema_refs")
+                if not isinstance(receipt_schema_refs, Mapping) or any(
+                    not isinstance(name, str)
+                    or not isinstance(schema_ref, str)
+                    or not schema_ref
+                    for name, schema_ref in receipt_schema_refs.items()
+                ):
+                    return self._invalid_succeeded_receipt(
+                        step=step,
+                        selected_agent=selected_agent,
+                        idempotency_key_value=idem_key,
+                        error=(
+                            "succeeded receipt has invalid expected_schema_refs; "
+                            "refusing output reuse"
+                        ),
+                        validation_error="RECEIPT_SCHEMA_REFS_INVALID",
+                        receipt=prior,
+                        expected_schema_refs=expected_schema_refs,
+                    )
+                normalized_receipt_schema_refs = dict(receipt_schema_refs)
+                if normalized_receipt_schema_refs != expected_schema_refs:
+                    return self._invalid_succeeded_receipt(
+                        step=step,
+                        selected_agent=selected_agent,
+                        idempotency_key_value=idem_key,
+                        error=(
+                            "succeeded receipt output schemas do not match the "
+                            "current trusted step contract"
+                        ),
+                        validation_error="RECEIPT_SCHEMA_REFS_MISMATCH",
+                        receipt=prior,
+                        expected_schema_refs=expected_schema_refs,
+                    )
+                if outputs_kind == "confirmed_payloads":
+                    if not isinstance(prior_outputs, Mapping):
+                        return self._invalid_succeeded_receipt(
+                            step=step,
+                            selected_agent=selected_agent,
+                            idempotency_key_value=idem_key,
+                            error="confirmed_payloads receipt outputs must be an object",
+                            validation_error="CONFIRMED_PAYLOADS_INVALID",
+                            receipt=prior,
+                            expected_schema_refs=expected_schema_refs,
+                        )
+                    return self._publish_confirmed_receipt_outputs(
+                        step=step,
+                        payloads=prior_outputs,
+                        context=step_ctx,
+                        selected_agent=receipt_agent or selected_agent,
+                        idempotency_key_value=idem_key,
+                        receipt=prior,
+                        expected_schema_refs=expected_schema_refs,
+                    )
+                artifact_refs, validation_failure = (
+                    self._validate_receipt_artifact_refs(
+                        step=step,
+                        outputs=prior_outputs,
+                        expected_schema_refs=expected_schema_refs,
+                        selected_agent=receipt_agent or selected_agent,
+                        idempotency_key_value=idem_key,
+                        receipt=prior,
+                    )
+                )
+                if validation_failure is not None:
+                    return validation_failure
                 return StepResult(
                     step_id=step.step_id,
                     status=StepStatus.SUCCEEDED,
-                    outputs=prior.get("outputs") or {},
+                    outputs=artifact_refs,
                     metrics={"idempotent_reuse": True,
-                             "selected_agent": selected_agent,
+                             "selected_agent": receipt_agent or selected_agent,
                              "idempotency_key": idem_key,
                              "receipt_status": "SUCCEEDED",
                              "external_op_id": prior.get("external_op_id")},
@@ -787,6 +1548,9 @@ class TaskScheduler:
                     selected_agent,
                     "needs reconciliation: side-effect claimed by another instance or prior outcome unconfirmed",
                     external_op_id=prior.get("external_op_id"),
+                    idempotency_key=idem_key,
+                    receipt=prior,
+                    expected_schema_refs=actual_schema_refs,
                 )
             if claim.status == ClaimStatus.CORRUPT:
                 # Fail closed: the receipt store is unparseable so we cannot know
@@ -811,8 +1575,32 @@ class TaskScheduler:
                 exec_result = await self._invoke(step, selected_agent, inputs, step_ctx)
             except asyncio.TimeoutError:
                 return self._needs_reconciliation(
-                    step, selected_agent, f"timeout after {step.timeout}s")
+                    step,
+                    selected_agent,
+                    f"timeout after {step.timeout}s",
+                    idempotency_key=idem_key,
+                    receipt={"claim_id": claim_id},
+                )
             except Exception as exc:  # noqa: BLE001 - indeterminate outcome
+                governed = self._policy_failure_result(step, selected_agent, exc)
+                if governed is not None:
+                    # A tool-level policy verdict may occur after the Agent has
+                    # already started a side-effect step. Keep the STARTED
+                    # receipt and require reconciliation instead of claiming
+                    # that no external effect occurred.
+                    metrics = dict(governed.metrics or {})
+                    metrics["needs_reconciliation"] = True
+                    metrics["approval_after_side_effect_start"] = bool(
+                        metrics.get("approval_required")
+                    )
+                    metrics["idempotency_key"] = idem_key
+                    metrics["receipt"] = {"claim_id": claim_id}
+                    return StepResult(
+                        step_id=step.step_id,
+                        status=StepStatus.FAILED,
+                        error=governed.error,
+                        metrics=metrics,
+                    )
                 if _is_dispatch_permission_error(exc):
                     return StepResult(
                         step_id=step.step_id,
@@ -824,13 +1612,48 @@ class TaskScheduler:
                         },
                     )
                 return self._needs_reconciliation(
-                    step, selected_agent, f"side-effect executor error: {exc}")
+                    step,
+                    selected_agent,
+                    f"side-effect executor error: {exc}",
+                    idempotency_key=idem_key,
+                    receipt={"claim_id": claim_id},
+                )
             if not getattr(exec_result, "is_success", True):
+                exec_metadata = dict(getattr(exec_result, "metadata", {}) or {})
+                if exec_metadata.get("side_effect_started") is False:
+                    try:
+                        self.receipt_store.release_for_retry(idem_key, claim_id)
+                    except Exception as exc:  # noqa: BLE001 - uncertain release
+                        return self._needs_reconciliation(
+                            step,
+                            selected_agent,
+                            f"safe failure reported but receipt release failed: {exc}",
+                            idempotency_key=idem_key,
+                            receipt={"claim_id": claim_id},
+                        )
+                    return StepResult(
+                        step_id=step.step_id,
+                        status=StepStatus.FAILED,
+                        error=getattr(exec_result, "error", None)
+                        or "side-effect validation failed before execution",
+                        metrics={
+                            "safe_to_retry": True,
+                            "side_effect_started": False,
+                            "failure_phase": exec_metadata.get(
+                                "failure_phase", "pre_execution"
+                            ),
+                            "receipt_released": True,
+                            "idempotency_key": idem_key,
+                            "selected_agent": selected_agent,
+                        },
+                    )
                 return self._needs_reconciliation(
                     step,
                     selected_agent,
                     getattr(exec_result, "error",
                             None) or "side-effect step failed",
+                    idempotency_key=idem_key,
+                    receipt={"claim_id": claim_id},
                 )
             result: Optional[StepResult] = self._record_success(
                 step, exec_result, step_ctx, 1, selected_agent)
@@ -850,67 +1673,108 @@ class TaskScheduler:
                 reconciled.metrics["needs_reconciliation"] = True
                 return reconciled
         else:
-            # Read-only (or no receipt store): the original retry behavior. A
-            # non-read step without a receipt store still runs at most once.
-            attempts = max(1, step.retry + 1) if step.is_read_only else 1
-            last_error: Optional[str] = None
-            last_failed: Optional[StepResult] = None
-            result = None
-            for attempt in range(attempts):
+            if step.is_read_only:
+                result = await self._execute_read_only_with_agent(
+                    step,
+                    step_ctx,
+                    selected_agent,
+                    inputs,
+                    retry_budget=step.retry,
+                    phase="primary",
+                    on_retry=on_retry,
+                )
+                if not result.is_success:
+                    return await self._maybe_redispatch_read_only(
+                        step,
+                        context,
+                        selected_agent,
+                        result,
+                    )
+            else:
+                # A non-read step without a receipt store still executes at
+                # most once. It is deliberately outside automatic recovery.
                 try:
-                    exec_result = await self._invoke(step, selected_agent, inputs, step_ctx)
+                    exec_result = await self._invoke(
+                        step,
+                        selected_agent,
+                        inputs,
+                        step_ctx,
+                    )
                 except asyncio.TimeoutError:
-                    last_error = f"timeout after {step.timeout}s"
-                    continue
-                except Exception as exc:  # noqa: BLE001 - record and maybe retry
+                    return StepResult(
+                        step_id=step.step_id,
+                        status=StepStatus.FAILED,
+                        error=f"timeout after {step.timeout}s",
+                        metrics={
+                            "attempts": 1,
+                            "selected_agent": selected_agent,
+                        },
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    governed = self._policy_failure_result(step, selected_agent, exc)
+                    if governed is not None:
+                        return governed
                     if _is_dispatch_permission_error(exc):
                         return StepResult(
                             step_id=step.step_id,
                             status=StepStatus.FAILED,
                             error="agent dispatch denied by policy",
                             metrics={
-                                "attempts": attempt + 1,
+                                "attempts": 1,
                                 "failure_code": "AGENT_DISPATCH_DENIED",
                                 "selected_agent": selected_agent,
                             },
                         )
-                    last_error = str(exc)
-                    continue
-
-                if getattr(exec_result, "is_success", True):
-                    candidate = self._record_success(
-                        step, exec_result, step_ctx, attempt + 1, selected_agent)
-                    if candidate.is_success:
-                        result = candidate
-                        break
-                    # Normalization/validation failed on a read-only step: no
-                    # durable state was published, so the remaining retry
-                    # budget still applies. Keep the classified failure (incl.
-                    # the Agent's retryable verdict) as the terminal candidate.
-                    last_failed = candidate
-                    last_error = candidate.error or "result normalization failed"
-                    continue
-                last_error = getattr(exec_result, "error",
-                                     None) or "step failed"
-
-            if result is None:
-                if last_failed is not None:
-                    last_failed.metrics.setdefault(
-                        "selected_agent", selected_agent)
-                    return last_failed
-                return StepResult(
-                    step_id=step.step_id,
-                    status=StepStatus.FAILED,
-                    error=last_error,
-                    metrics={"attempts": attempts,
-                             "selected_agent": selected_agent},
+                    return StepResult(
+                        step_id=step.step_id,
+                        status=StepStatus.FAILED,
+                        error=str(exc),
+                        metrics={
+                            "attempts": 1,
+                            "selected_agent": selected_agent,
+                        },
+                    )
+                if not getattr(exec_result, "is_success", True):
+                    return StepResult(
+                        step_id=step.step_id,
+                        status=StepStatus.FAILED,
+                        error=getattr(exec_result, "error", None) or "step failed",
+                        metrics={
+                            "attempts": 1,
+                            "selected_agent": selected_agent,
+                        },
+                    )
+                result = self._record_success(
+                    step,
+                    exec_result,
+                    step_ctx,
+                    1,
+                    selected_agent,
                 )
+                if not result.is_success:
+                    return result
+
+        result.metrics.setdefault(
+            "permission_decision",
+            step_ctx.get("permission_decision", "NOT_ENFORCED"),
+        )
 
         # Completion conditions gate success; a failing predicate marks FAILED.
         passed, failed_expr = evaluate_completion(
             step.completion_conditions, result.outputs, result.metrics, "SUCCEEDED"
         )
         if not passed:
+            if idem_key is not None:
+                return self._needs_reconciliation(
+                    step,
+                    selected_agent,
+                    f"side effect returned but completion condition failed: {failed_expr}",
+                    external_op_id=(result.metrics or {}).get(
+                        "external_op_id"
+                    ),
+                    idempotency_key=idem_key,
+                    receipt={"claim_id": claim_id},
+                )
             return StepResult(
                 step_id=step.step_id,
                 status=StepStatus.FAILED,
@@ -923,6 +1787,16 @@ class TaskScheduler:
         # recorded -> do NOT mark success; require reconciliation (never risk a
         # re-send on resume).
         if idem_key is not None:
+            external_op_id = (result.metrics or {}).get("external_op_id")
+            if not isinstance(external_op_id, str) or not external_op_id.strip():
+                return self._needs_reconciliation(
+                    step,
+                    selected_agent,
+                    "side effect succeeded but no durable external operation id was returned",
+                    idempotency_key=idem_key,
+                    receipt={"claim_id": claim_id},
+                    expected_schema_refs=actual_schema_refs,
+                )
             try:
                 self.receipt_store.complete(
                     idem_key,
@@ -934,8 +1808,11 @@ class TaskScheduler:
                         "agent": selected_agent,
                         "status": "SUCCEEDED",
                         "normalized_input": normalize_input(inputs),
-                        "external_op_id": (result.metrics or {}).get("external_op_id"),
+                        "expected_outputs": list(step.expected_outputs),
+                        "expected_schema_refs": dict(actual_schema_refs),
+                        "external_op_id": external_op_id.strip(),
                         "outputs": result.outputs,
+                        "outputs_kind": "artifact_refs",
                         "timestamp": time.time(),
                     },
                 )
@@ -947,8 +1824,54 @@ class TaskScheduler:
                     f"side effect succeeded but receipt persistence failed: {exc}",
                     external_op_id=(result.metrics or {}).get(
                         "external_op_id"),
+                    idempotency_key=idem_key,
+                    receipt={"claim_id": claim_id},
                 )
         return result
+
+    @staticmethod
+    def _policy_failure_result(
+        step: TaskStep,
+        selected_agent: Optional[str],
+        exc: Exception,
+    ) -> Optional[StepResult]:
+        """Convert S-ABAC denial/review exceptions into structured results."""
+
+        payload = getattr(exc, "payload", None)
+        if not isinstance(payload, dict):
+            return None
+        policy_result = payload.get("policy_result")
+        if not isinstance(policy_result, dict):
+            return None
+
+        decision = str(policy_result.get("decision") or "DENY").upper()
+        metrics: Dict[str, Any] = {
+            "selected_agent": selected_agent,
+            "governance_decision": decision,
+        }
+        if decision == "REVIEW_REQUIRED":
+            metrics.update(
+                {
+                    "approval_required": True,
+                    "approval_payload": payload,
+                    "approval_signature": payload.get("approval_signature"),
+                }
+            )
+            error = policy_result.get("reason") or "human approval required"
+        else:
+            metrics.update(
+                {
+                    "permission_denied": True,
+                    "permission_payload": payload,
+                }
+            )
+            error = policy_result.get("reason") or "permission denied"
+        return StepResult(
+            step_id=step.step_id,
+            status=StepStatus.FAILED,
+            error=str(error),
+            metrics=metrics,
+        )
 
     def _needs_reconciliation(
         self,
@@ -957,6 +1880,9 @@ class TaskScheduler:
         error: str,
         *,
         external_op_id: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
+        receipt: Optional[Dict[str, Any]] = None,
+        expected_schema_refs: Optional[Mapping[str, str]] = None,
     ) -> StepResult:
         """A side effect with an unconfirmed outcome: FAILED + needs_reconciliation.
 
@@ -971,6 +1897,9 @@ class TaskScheduler:
                 "needs_reconciliation": True,
                 "selected_agent": selected_agent,
                 "external_op_id": external_op_id,
+                "idempotency_key": idempotency_key,
+                "receipt": dict(receipt or {}),
+                "expected_schema_refs": dict(expected_schema_refs or {}),
             },
         )
 
@@ -995,6 +1924,345 @@ class TaskScheduler:
                 return getattr(agent, "agent_contract", None)
         return None
 
+    def _actual_output_contract(
+        self,
+        step: TaskStep,
+        selected_agent: Optional[str],
+        context: dict,
+        *,
+        enforce_output_boundary: bool,
+    ) -> tuple[Any, Dict[str, str], Optional[str]]:
+        """Resolve the one trusted output contract bound to an actual dispatch."""
+
+        planned_agent = (
+            getattr(step, "agent_name", None)
+            or getattr(step, "preferred_resource_id", None)
+        )
+        rerouted = bool(
+            selected_agent
+            and planned_agent
+            and str(selected_agent) != str(planned_agent)
+        )
+        contract = (
+            self._trusted_agent_contract(str(selected_agent), context)
+            if rerouted
+            else getattr(step, "agent_contract", None)
+        )
+        if (
+            rerouted
+            and contract is None
+            and getattr(step, "agent_contract", None) is not None
+        ):
+            return None, {}, "REROUTED_AGENT_CONTRACT_MISSING"
+
+        schema_refs = self._expected_schema_refs(step)
+        if contract is not None:
+            schema_refs = {
+                str(name): str(schema_ref)
+                for name, schema_ref in dict(
+                    getattr(contract, "output_schema_refs", None) or {}
+                ).items()
+                if schema_ref
+            }
+            if enforce_output_boundary:
+                expected_names = {str(name) for name in step.expected_outputs}
+                if expected_names != set(schema_refs):
+                    return (
+                        contract,
+                        schema_refs,
+                        "ACTUAL_AGENT_OUTPUT_BOUNDARY_MISMATCH",
+                    )
+        return contract, schema_refs, None
+
+    @staticmethod
+    def _expected_schema_refs(step: TaskStep) -> Dict[str, str]:
+        """Return the current trusted per-output schemas for receipt binding."""
+
+        schema_refs = {
+            str(name): str(schema_ref)
+            for name, schema_ref in dict(step.expected_schema_refs or {}).items()
+            if schema_ref
+        }
+        if len(step.expected_outputs) == 1 and step.expected_schema_ref:
+            schema_refs.setdefault(
+                str(step.expected_outputs[0]), str(step.expected_schema_ref)
+            )
+        return schema_refs
+
+    @staticmethod
+    def _invalid_succeeded_receipt(
+        *,
+        step: TaskStep,
+        selected_agent: Optional[str],
+        idempotency_key_value: str,
+        error: str,
+        validation_error: str,
+        receipt: Optional[Mapping[str, Any]] = None,
+        expected_schema_refs: Optional[Mapping[str, str]] = None,
+        **metrics: Any,
+    ) -> StepResult:
+        """Fail closed when a SUCCEEDED receipt cannot prove usable output."""
+
+        return StepResult(
+            step_id=step.step_id,
+            status=StepStatus.FAILED,
+            error=error,
+            metrics={
+                "idempotent_reuse": False,
+                "selected_agent": selected_agent,
+                "idempotency_key": idempotency_key_value,
+                "receipt_status": "SUCCEEDED",
+                "receipt_output_contract_invalid": True,
+                "receipt_validation_error": validation_error,
+                "needs_reconciliation": True,
+                "reconciliation_reason": "SUCCEEDED_RECEIPT_OUTPUT_UNUSABLE",
+                "receipt": dict(receipt or {}),
+                "external_op_id": (receipt or {}).get("external_op_id"),
+                "expected_schema_refs": dict(expected_schema_refs or {}),
+                **metrics,
+            },
+        )
+
+    def _validate_receipt_artifact_refs(
+        self,
+        *,
+        step: TaskStep,
+        outputs: Any,
+        expected_schema_refs: Mapping[str, str],
+        selected_agent: Optional[str],
+        idempotency_key_value: str,
+        receipt: Mapping[str, Any],
+    ) -> tuple[Dict[str, ArtifactRef], Optional[StepResult]]:
+        """Resolve and revalidate every Artifact referenced by a success receipt."""
+
+        if not isinstance(outputs, Mapping):
+            return {}, self._invalid_succeeded_receipt(
+                step=step,
+                selected_agent=selected_agent,
+                idempotency_key_value=idempotency_key_value,
+                error="artifact_refs receipt outputs must be an object",
+                validation_error="ARTIFACT_REFS_INVALID",
+                receipt=receipt,
+                expected_schema_refs=expected_schema_refs,
+            )
+
+        refs: Dict[str, ArtifactRef] = {}
+        registry = get_schema_registry()
+        for raw_logical_name, value in outputs.items():
+            logical_name = str(raw_logical_name)
+            try:
+                ref = ArtifactRef.model_validate(value)
+            except Exception as exc:
+                return {}, self._invalid_succeeded_receipt(
+                    step=step,
+                    selected_agent=selected_agent,
+                    idempotency_key_value=idempotency_key_value,
+                    error=(
+                        f"receipt output {logical_name!r} is not a valid "
+                        f"ArtifactRef: {exc}"
+                    ),
+                    validation_error="ARTIFACT_REF_INVALID",
+                    receipt=receipt,
+                    expected_schema_refs=expected_schema_refs,
+                    logical_name=logical_name,
+                )
+
+            if ref.version is None or ref.selector is not None:
+                return {}, self._invalid_succeeded_receipt(
+                    step=step,
+                    selected_agent=selected_agent,
+                    idempotency_key_value=idempotency_key_value,
+                    error=(
+                        f"receipt output {logical_name!r} must reference one "
+                        "immutable root Artifact version"
+                    ),
+                    validation_error="ARTIFACT_REF_NOT_IMMUTABLE_ROOT",
+                    receipt=receipt,
+                    expected_schema_refs=expected_schema_refs,
+                    logical_name=logical_name,
+                )
+
+            if not self.store.exists(ref):
+                return {}, self._invalid_succeeded_receipt(
+                    step=step,
+                    selected_agent=selected_agent,
+                    idempotency_key_value=idempotency_key_value,
+                    error=(
+                        f"receipt output {logical_name!r} references a missing "
+                        "Artifact"
+                    ),
+                    validation_error="ARTIFACT_NOT_FOUND",
+                    receipt=receipt,
+                    expected_schema_refs=expected_schema_refs,
+                    logical_name=logical_name,
+                    artifact_id=ref.artifact_id,
+                    artifact_version=ref.version,
+                )
+
+            try:
+                artifact = self.store.get(ref)
+            except ArtifactNotFoundError:
+                return {}, self._invalid_succeeded_receipt(
+                    step=step,
+                    selected_agent=selected_agent,
+                    idempotency_key_value=idempotency_key_value,
+                    error=(
+                        f"receipt output {logical_name!r} references a missing "
+                        "Artifact"
+                    ),
+                    validation_error="ARTIFACT_NOT_FOUND",
+                    receipt=receipt,
+                    expected_schema_refs=expected_schema_refs,
+                    logical_name=logical_name,
+                    artifact_id=ref.artifact_id,
+                    artifact_version=ref.version,
+                )
+
+            if artifact.logical_name != logical_name:
+                return {}, self._invalid_succeeded_receipt(
+                    step=step,
+                    selected_agent=selected_agent,
+                    idempotency_key_value=idempotency_key_value,
+                    error=(
+                        f"receipt output {logical_name!r} points to Artifact "
+                        f"logical output {artifact.logical_name!r}"
+                    ),
+                    validation_error="ARTIFACT_LOGICAL_NAME_MISMATCH",
+                    receipt=receipt,
+                    expected_schema_refs=expected_schema_refs,
+                    logical_name=logical_name,
+                )
+
+            expected_schema_ref = expected_schema_refs.get(logical_name)
+            if expected_schema_ref:
+                if artifact.schema_ref != expected_schema_ref:
+                    return {}, self._invalid_succeeded_receipt(
+                        step=step,
+                        selected_agent=selected_agent,
+                        idempotency_key_value=idempotency_key_value,
+                        error=(
+                            f"receipt output {logical_name!r} expected schema "
+                            f"{expected_schema_ref!r}, but stored Artifact has "
+                            f"{artifact.schema_ref!r}"
+                        ),
+                        validation_error="ARTIFACT_SCHEMA_MISMATCH",
+                        receipt=receipt,
+                        expected_schema_refs=expected_schema_refs,
+                        logical_name=logical_name,
+                        schema_ref=expected_schema_ref,
+                    )
+                valid, errors = registry.validate(
+                    artifact.payload, expected_schema_ref
+                )
+                if artifact.schema_valid is not True or not valid:
+                    return {}, self._invalid_succeeded_receipt(
+                        step=step,
+                        selected_agent=selected_agent,
+                        idempotency_key_value=idempotency_key_value,
+                        error=(
+                            f"receipt output {logical_name!r} failed stored "
+                            "Artifact schema validation"
+                        ),
+                        validation_error="ARTIFACT_SCHEMA_INVALID",
+                        receipt=receipt,
+                        expected_schema_refs=expected_schema_refs,
+                        logical_name=logical_name,
+                        schema_ref=expected_schema_ref,
+                        schema_errors=errors,
+                    )
+            refs[logical_name] = ref
+
+        return refs, None
+
+    def _publish_confirmed_receipt_outputs(
+        self,
+        *,
+        step: TaskStep,
+        payloads: Mapping[str, Any],
+        context: dict,
+        selected_agent: Optional[str],
+        idempotency_key_value: str,
+        receipt: Mapping[str, Any],
+        expected_schema_refs: Mapping[str, str],
+    ) -> StepResult:
+        """Publish human-confirmed payloads through the normal Artifact adapter."""
+
+        planned_agent = (
+            getattr(step, "agent_name", None)
+            or getattr(step, "preferred_resource_id", None)
+        )
+        producer_agent = selected_agent or planned_agent
+        schema_refs = dict(expected_schema_refs)
+
+        artifacts: Dict[str, Any] = {}
+        for logical_name in step.expected_outputs:
+            output_result = type(
+                "_HumanConfirmedExecuteResult",
+                (),
+                {
+                    "is_success": True,
+                    "result": payloads[logical_name],
+                    "error": None,
+                    "metadata": {
+                        "producer_agent": producer_agent,
+                        "human_confirmed": True,
+                        "external_op_id": receipt.get("external_op_id"),
+                    },
+                },
+            )()
+            artifact = to_artifact(
+                output_result,
+                step=step,
+                context=context.get("execution_context"),
+                logical_name=logical_name,
+                schema_ref=schema_refs.get(logical_name),
+                upstream_sensitivities=context.get("upstream_sensitivities"),
+            )
+            upstream_refs = list(context.get("upstream_artifact_refs") or [])
+            if upstream_refs:
+                lineage = list(artifact.derived_from or [])
+                seen = {
+                    (ref.artifact_id, ref.version, ref.selector)
+                    for ref in lineage
+                }
+                for ref in upstream_refs:
+                    key = (ref.artifact_id, ref.version, ref.selector)
+                    if key not in seen:
+                        lineage.append(ref)
+                        seen.add(key)
+                artifact = artifact.model_copy(update={"derived_from": lineage})
+            if schema_refs.get(logical_name) and artifact.schema_valid is not True:
+                return StepResult(
+                    step_id=step.step_id,
+                    status=StepStatus.FAILED,
+                    error=f"confirmed output {logical_name!r} failed schema validation",
+                    metrics={
+                        "receipt_output_contract_invalid": True,
+                        "logical_name": logical_name,
+                        "schema_ref": schema_refs.get(logical_name),
+                        "idempotency_key": idempotency_key_value,
+                    },
+                )
+            artifacts[logical_name] = artifact
+
+        outputs = {
+            logical_name: self.store.put(artifact)
+            for logical_name, artifact in artifacts.items()
+        }
+        return StepResult(
+            step_id=step.step_id,
+            status=StepStatus.SUCCEEDED,
+            outputs=outputs,
+            metrics={
+                "idempotent_reuse": True,
+                "human_confirmed_outputs": True,
+                "selected_agent": selected_agent,
+                "idempotency_key": idempotency_key_value,
+                "receipt_status": "SUCCEEDED",
+                "external_op_id": receipt.get("external_op_id"),
+            },
+        )
+
     def _record_success(
         self,
         step: TaskStep,
@@ -1013,23 +2281,26 @@ class TaskScheduler:
             or getattr(step, "preferred_resource_id", None)
         )
         producer_agent = selected_agent or planned_agent
-        contract = getattr(step, "agent_contract", None)
-        if selected_agent and planned_agent and selected_agent != planned_agent:
-            contract = self._trusted_agent_contract(selected_agent, context)
-            if contract is None and getattr(step, "agent_contract", None) is not None:
-                # The planned step is contracted but the rerouted Agent has no
-                # trusted contract: the result cannot be validated -> refuse.
+        if "actual_agent_contract" in context:
+            contract = context.get("actual_agent_contract")
+        else:
+            contract, _, contract_error = self._actual_output_contract(
+                step,
+                selected_agent,
+                context,
+                enforce_output_boundary=False,
+            )
+            if contract_error is not None:
                 return StepResult(
                     step_id=step.step_id,
                     status=StepStatus.FAILED,
                     error=(
-                        f"no trusted contract for rerouted agent "
-                        f"{selected_agent!r}: refusing to publish an "
-                        "unvalidated result"
+                        f"actual Agent output contract is not trusted: "
+                        f"{contract_error}"
                     ),
                     metrics={
                         "attempts": attempts,
-                        "result_error": "REROUTED_AGENT_CONTRACT_MISSING",
+                        "result_error": contract_error,
                         "selected_agent": selected_agent,
                     },
                 )

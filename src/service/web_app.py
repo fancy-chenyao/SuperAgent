@@ -1,6 +1,7 @@
 import asyncio
 import hmac
 import json
+import shutil
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -23,6 +24,22 @@ from src.utils.path_utils import get_project_root
 from src.workflow.cache import workflow_cache
 from src.robust.checkpoint import CheckpointManager
 from src.robust.task_logger import TaskLogger
+from src.orchestration.governance import (
+    get_governance_event_store,
+    record_governance_event,
+)
+from src.orchestration.artifact_payload_store import ArtifactPayloadStore
+from src.orchestration.completion import (
+    PersistentReceiptStore,
+    ReceiptClaimMismatch,
+    ReceiptStoreCorruption,
+)
+from src.orchestration.reconciliation import get_reconciliation_store
+from src.security.approval import get_approval_store
+from src.security.cleanup_capabilities import (
+    CleanupCapabilityError,
+    get_cleanup_capability_store,
+)
 from config.s_abac_demo_users import get_demo_user, list_demo_users, get_user_available_agents
 from config.s_abac_config import (
     AGENT_SECURITY_ATTRIBUTES,
@@ -30,7 +47,19 @@ from config.s_abac_config import (
     S_ABAC_POLICIES,
     SENSITIVITY_LEVELS,
 )
-from src.service.env import S_ABAC_ENABLED, USE_MCP_TOOLS, WORKFLOW_SKILL_ADMIN_API_KEY
+from src.service.env import (
+    AUTO_RECOVERY_ENABLED,
+    ORCHESTRATION_SCHEDULER_ENABLED,
+    S_ABAC_ENABLED,
+    SCHEDULER_AUTO_RECOVERY_MAX_ATTEMPTS,
+    SCHEDULER_RETRY_BASE_SECONDS,
+    SCHEDULER_RETRY_MAX_SECONDS,
+    SCHEDULER_RETRY_JITTER_RATIO,
+    USE_MCP_TOOLS,
+    WORKFLOW_SKILL_ADMIN_API_KEY,
+    GOVERNANCE_ADMIN_API_KEY,
+    GOVERNANCE_ADMIN_ACTOR_ID,
+)
 from src.memory import get_memory_manager
 from src.memory.store import SecretDetectedError
 from src.skills.workflow_skill import get_workflow_skill_manager
@@ -68,6 +97,275 @@ class WorkflowSkillDistillRequest(BaseModel):
     user_id: str
     task_id: str
     workflow_id: Optional[str] = None
+
+
+class ApprovalDecisionRequest(BaseModel):
+    comment: str = ""
+
+
+class ReconciliationDecisionRequest(BaseModel):
+    comment: str = ""
+    external_operation_id: str = ""
+    outputs: dict[str, Any] = Field(default_factory=dict)
+
+
+def _governance_actor_profile(actor_id: str) -> dict[str, Any]:
+    """Resolve a declared demo actor and fail closed for unknown identities."""
+
+    profile = get_demo_user(str(actor_id or "").strip())
+    if not profile:
+        raise HTTPException(
+            status_code=403,
+            detail="unknown governance operator",
+        )
+    return profile
+
+
+def _is_governance_reviewer(profile: dict[str, Any]) -> bool:
+    grants = {str(item).lower() for item in (profile.get("grants") or [])}
+    return bool(
+        "all" in grants
+        or "governance_review" in grants
+        or str(profile.get("job_role") or "").lower() == "system_orchestrator"
+    )
+
+
+def _require_governance_reviewer(actor_id: str) -> dict[str, Any]:
+    profile = _governance_actor_profile(actor_id)
+    if not _is_governance_reviewer(profile):
+        raise HTTPException(
+            status_code=403,
+            detail="governance reviewer permission required",
+        )
+    return profile
+
+
+def _authenticate_governance_operator(
+    authorization: Optional[str] = Header(default=None),
+) -> str:
+    """Return the server-owned governance principal for a valid credential."""
+
+    configured = str(GOVERNANCE_ADMIN_API_KEY or "")
+    if not configured:
+        raise HTTPException(
+            status_code=503,
+            detail="governance mutation credential is not configured",
+        )
+    scheme, separator, supplied = (authorization or "").partition(" ")
+    if (
+        not separator
+        or scheme.casefold() != "bearer"
+        or not hmac.compare_digest(supplied, configured)
+    ):
+        raise HTTPException(
+            status_code=401,
+            detail="governance mutation authentication failed",
+        )
+    actor_id = str(GOVERNANCE_ADMIN_ACTOR_ID or "").strip()
+    _require_governance_reviewer(actor_id)
+    return actor_id
+
+
+def _authorize_runtime_cleanup(
+    *,
+    task_id: str = "",
+    workflow_id: str = "",
+    owner_token: str = "",
+    authorization: str = "",
+) -> str:
+    """Accept a resource-owner capability or a governance-admin credential."""
+
+    capabilities = get_cleanup_capability_store()
+    if task_id and capabilities.authorize_task(task_id, owner_token):
+        return "task_owner"
+    if workflow_id and capabilities.authorize_workflow(workflow_id, owner_token):
+        return "workflow_owner"
+    if authorization:
+        return _authenticate_governance_operator(authorization)
+    raise HTTPException(
+        status_code=401,
+        detail="runtime cleanup authentication failed",
+    )
+
+
+def _bind_runtime_cleanup_capability(
+    *,
+    token: str,
+    user_id: str,
+    workflow_id: str,
+    task_id: str = "",
+    trusted_new_task_id: str = "",
+) -> None:
+    if not token or not workflow_id:
+        return
+    try:
+        get_cleanup_capability_store().bind(
+            token=token,
+            user_id=user_id,
+            workflow_id=workflow_id,
+            task_id=task_id,
+            allow_new_workflow=not _workflow_has_persisted_records(
+                workflow_id,
+                excluding_task_id=trusted_new_task_id,
+            ),
+        )
+    except CleanupCapabilityError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+
+def _workflow_has_persisted_records(
+    workflow_id: str, *, excluding_task_id: str = ""
+) -> bool:
+    """Whether a workflow predates the requesting cleanup capability."""
+
+    excluded = str(excluding_task_id or "")
+    for task in TaskLogger.list_tasks(workflow_id=workflow_id):
+        if str(task.get("task_id") or "") != excluded:
+            return True
+    for approval in get_approval_store().list(workflow_id=workflow_id):
+        if str(approval.get("task_id") or "") != excluded:
+            return True
+    for reconciliation in get_reconciliation_store().list():
+        if (
+            str(reconciliation.get("workflow_id") or "") == workflow_id
+            and str(reconciliation.get("task_id") or "") != excluded
+        ):
+            return True
+    return False
+
+
+def _task_record_owner_ids(task_id: str) -> set[str]:
+    """Collect trusted owners from persisted task and governance records."""
+
+    owners: set[str] = set()
+    task = TaskLogger.load(task_id)
+    if task is not None:
+        owner, _ = _parse_workflow_id(str(task.workflow_id or ""))
+        if owner:
+            owners.add(owner)
+    for item in get_approval_store().list(task_id=task_id):
+        if item.get("user_id"):
+            owners.add(str(item["user_id"]))
+    for item in get_reconciliation_store().list(task_id=task_id):
+        if item.get("user_id"):
+            owners.add(str(item["user_id"]))
+    return owners
+
+
+def _authorize_task_cleanup(task_id: str, actor_id: str) -> None:
+    profile = _governance_actor_profile(actor_id)
+    if _is_governance_reviewer(profile):
+        return
+    owners = _task_record_owner_ids(task_id)
+    if not owners or str(actor_id) not in owners:
+        raise HTTPException(
+            status_code=403,
+            detail="task does not belong to the selected user",
+        )
+
+
+def _static_resource_precheck(
+    profile: dict[str, Any],
+    attrs: Optional[dict[str, Any]],
+    *,
+    resource_name: str,
+    operation_mode: str = "",
+) -> dict[str, Any]:
+    """Evaluate the static subset of S-ABAC without claiming runtime approval.
+
+    Scenario fit and concrete invocation arguments remain runtime decisions;
+    this helper makes the dashboard honest about roles, job roles, grants,
+    clearance, operation modes and mandatory review.
+    """
+
+    if not isinstance(attrs, dict) or not attrs:
+        return {
+            "allowed": False,
+            "can_access": False,
+            "eligible": False,
+            "decision": "DENY",
+            "review_required": False,
+            "blocked_reason": f"Unregistered resource: {resource_name}",
+            "resource_registered": False,
+        }
+
+    user_role = str(profile.get("role") or "")
+    user_job_role = str(profile.get("job_role") or "")
+    user_clearance = int(profile.get("clearance_level") or 0)
+    user_grants = {str(item) for item in (profile.get("grants") or [])}
+    allowed_roles = [str(item) for item in (attrs.get("allowed_roles") or [])]
+    allowed_job_roles = [
+        str(item) for item in (attrs.get("allowed_job_roles") or [])
+    ]
+    required_grants = [
+        str(item) for item in (attrs.get("grants_required") or [])
+    ]
+    sensitivity = str(attrs.get("sensitivity") or "LOW").upper()
+    allowed_modes = {
+        str(item).lower()
+        for item in (attrs.get("allowed_operation_modes") or [])
+        if str(item).lower() != "delegate"
+    }
+
+    role_match = not allowed_roles or user_role in allowed_roles
+    job_role_match = not allowed_job_roles or user_job_role in allowed_job_roles
+    grants_match = "all" in user_grants or set(required_grants).issubset(user_grants)
+    clearance_match = user_clearance >= SENSITIVITY_LEVELS.get(sensitivity, 1)
+    mode_match = (
+        not operation_mode
+        or not allowed_modes
+        or str(operation_mode).lower() in allowed_modes
+    )
+
+    blockers: list[str] = []
+    if not role_match:
+        blockers.append(f"Role {user_role} not in {allowed_roles}")
+    if not job_role_match:
+        blockers.append(f"Job role {user_job_role} not in {allowed_job_roles}")
+    if not grants_match:
+        blockers.append(f"Missing grants {required_grants}")
+    if not clearance_match:
+        blockers.append(
+            f"Clearance L{user_clearance} below {sensitivity} "
+            f"(needs L{SENSITIVITY_LEVELS.get(sensitivity, 1)})"
+        )
+    if not mode_match:
+        blockers.append(
+            f"Operation mode {operation_mode} not in {sorted(allowed_modes)}"
+        )
+
+    eligible = not blockers
+    bypass_review = _is_governance_reviewer(profile)
+    review_required = eligible and not bypass_review and bool(
+        attrs.get("requires_approval") or attrs.get("irreversible")
+    )
+    decision = (
+        "DENY"
+        if not eligible
+        else "REVIEW_REQUIRED"
+        if review_required
+        else "ALLOW"
+    )
+    return {
+        "allowed": decision == "ALLOW",
+        "can_access": decision == "ALLOW",
+        "eligible": eligible,
+        "decision": decision,
+        "review_required": review_required,
+        "blocked_reason": "; ".join(blockers),
+        "resource_registered": True,
+        "sensitivity": sensitivity,
+        "allowed_roles": allowed_roles,
+        "allowed_job_roles": allowed_job_roles,
+        "required_grants": required_grants,
+        "allowed_operation_modes": sorted(allowed_modes),
+        "role_match": role_match,
+        "job_role_match": job_role_match,
+        "grants_match": grants_match,
+        "clearance_match": clearance_match,
+        "operation_mode_match": mode_match,
+        "scenario_dependent": True,
+    }
 
 
 def _authorize_workflow_skill_api(
@@ -119,6 +417,66 @@ def _finalize_disconnected_task(task_id: Optional[str], reason: str) -> None:
     if task_log is None or task_log.status != "running":
         return
     task_log.log_workflow_terminal("FAILED", error=reason)
+
+
+def _delete_task_runtime_records(task_id: str) -> dict[str, int]:
+    """Delete one task's operational history without deleting business outputs.
+
+    Generated documents and simulated external-system records are deliberately
+    preserved. This cleanup covers only the conversation/task execution state
+    that would otherwise leave orphan cards in Task History or Security.
+    """
+
+    normalized = str(task_id or "").strip()
+    if not normalized:
+        raise ValueError("task_id is required")
+    counts = {
+        "task_logs": 0,
+        "checkpoints": 0,
+        "receipts": 0,
+        "artifacts": 0,
+        "governance_events": 0,
+        "approvals": 0,
+        "reconciliations": 0,
+    }
+
+    task_log = TaskLogger.load(normalized)
+    if task_log is not None:
+        try:
+            task_log._log_file.unlink()
+            counts["task_logs"] = 1
+        except FileNotFoundError:
+            pass
+
+    checkpoint_manager = CheckpointManager()
+    checkpoint_root = checkpoint_manager.base_dir.resolve()
+    checkpoint_dir = (checkpoint_root / normalized).resolve()
+    if checkpoint_dir.parent != checkpoint_root:
+        raise ValueError("task_id resolves outside checkpoint store")
+    if checkpoint_dir.exists():
+        shutil.rmtree(checkpoint_dir)
+        counts["checkpoints"] = 1
+
+    receipt_store = PersistentReceiptStore(normalized)
+    if receipt_store._path.exists():
+        receipt_store._path.unlink()
+        counts["receipts"] = 1
+
+    artifact_store = ArtifactPayloadStore(normalized)
+    artifact_dir_existed = artifact_store._dir.exists() and any(
+        artifact_store._dir.iterdir()
+    )
+    artifact_store.clear()
+    counts["artifacts"] = int(artifact_dir_existed)
+
+    counts["governance_events"] = int(
+        get_governance_event_store().delete(normalized)
+    )
+    counts["approvals"] = get_approval_store().delete(task_id=normalized)
+    counts["reconciliations"] = get_reconciliation_store().delete(
+        task_id=normalized
+    )
+    return counts
 
 
 def _parse_workflow_id(workflow_id: str) -> tuple[str, str]:
@@ -390,14 +748,40 @@ def create_app() -> FastAPI:
     @app.post("/api/workflows/run")
     async def run_workflow(request: Request, body: AgentRequest):
         server = Server()
+        cleanup_token = str(request.headers.get("X-Task-Owner-Token") or "")
+        if body.workflow_id:
+            _bind_runtime_cleanup_capability(
+                token=cleanup_token,
+                user_id=body.user_id,
+                workflow_id=body.workflow_id,
+            )
 
         async def event_stream() -> AsyncGenerator[str, None]:
             active_task_id: Optional[str] = None
+            bound_records: set[tuple[str, str]] = set()
             disconnected = False
             try:
                 async for event in server._run_agent_workflow(body):
                     event_data = event.get("data") or {}
                     active_task_id = event_data.get("task_id") or active_task_id
+                    active_workflow_id = str(
+                        event_data.get("workflow_id") or body.workflow_id or ""
+                    )
+                    binding = (active_workflow_id, str(active_task_id or ""))
+                    if (
+                        cleanup_token
+                        and active_workflow_id
+                        and (body.workflow_id or active_task_id)
+                        and binding not in bound_records
+                    ):
+                        _bind_runtime_cleanup_capability(
+                            token=cleanup_token,
+                            user_id=body.user_id,
+                            workflow_id=active_workflow_id,
+                            task_id=str(active_task_id or ""),
+                            trusted_new_task_id=str(active_task_id or ""),
+                        )
+                        bound_records.add(binding)
                     if await request.is_disconnected():
                         disconnected = True
                         break
@@ -843,6 +1227,20 @@ def create_app() -> FastAPI:
         checkpoints = checkpoint_manager.list_checkpoints(task_id=task_id)
         return checkpoints
 
+    @app.get("/api/tasks/{task_id}/governance")
+    async def list_task_governance_events(
+        task_id: str,
+        event_type: Optional[str] = None,
+        step_id: Optional[str] = None,
+        _operator: str = Depends(_authenticate_governance_operator),
+    ):
+        """Return the append-only governance timeline for one task."""
+        return get_governance_event_store().list(
+            task_id,
+            event_type=event_type.upper() if event_type else None,
+            step_id=step_id,
+        )
+
     @app.get("/api/tasks/{task_id}/checkpoints/{step}")
     async def get_checkpoint_detail(task_id: str, step: int):
         """Get the full checkpoint data for a specific step."""
@@ -941,33 +1339,79 @@ def create_app() -> FastAPI:
         )
 
     @app.delete("/api/tasks/{task_id}")
-    async def delete_task(task_id: str):
+    async def delete_task(
+        task_id: str,
+        authorization: Optional[str] = Header(default=None),
+        x_task_owner_token: Optional[str] = Header(default=None),
+    ):
         """
-        Delete a task log and its associated checkpoints.
+        Delete a task's operational history and Security queue records.
         """
-        import shutil
-        from src.robust.task_logger import _get_task_logs_dir
-        from src.robust.checkpoint import CheckpointManager
-
-        # Delete task log
-        logs_dir = _get_task_logs_dir()
-        log_file = logs_dir / f"{task_id}.json"
-        if not log_file.exists():
-            raise HTTPException(status_code=404, detail=f"Task log not found: {task_id}")
-
+        _authorize_runtime_cleanup(
+            task_id=task_id,
+            owner_token=str(x_task_owner_token or ""),
+            authorization=str(authorization or ""),
+        )
         try:
-            # Delete log file
-            log_file.unlink()
-
-            # Delete checkpoints directory
-            checkpoint_manager = CheckpointManager()
-            checkpoint_dir = checkpoint_manager._get_task_dir(task_id)
-            if checkpoint_dir.exists():
-                shutil.rmtree(checkpoint_dir)
-
-            return {"result": "success", "message": f"Task {task_id} deleted successfully"}
+            deleted = _delete_task_runtime_records(task_id)
+            if not any(deleted.values()):
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Task runtime records not found: {task_id}",
+                )
+            get_cleanup_capability_store().delete_task_binding(task_id)
+            return {
+                "result": "success",
+                "task_id": task_id,
+                "deleted": deleted,
+                "business_outputs_preserved": True,
+            }
+        except HTTPException:
+            raise
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Failed to delete task: {str(e)}")
+
+    @app.delete("/api/conversation-history")
+    async def delete_conversation_history(
+        workflow_id: str,
+        authorization: Optional[str] = Header(default=None),
+        x_task_owner_token: Optional[str] = Header(default=None),
+    ):
+        """Remove orphan Security records for a deleted browser conversation.
+
+        A workflow id can be reused by many executions, so task runtime records
+        are deleted only through the exact ``/api/tasks/{task_id}`` endpoint.
+        """
+
+        owner_id, _ = _parse_workflow_id(workflow_id)
+        if not owner_id:
+            raise HTTPException(status_code=400, detail="invalid workflow id")
+        _authorize_runtime_cleanup(
+            workflow_id=workflow_id,
+            owner_token=str(x_task_owner_token or ""),
+            authorization=str(authorization or ""),
+        )
+
+        # Older browser history entries did not persist exact task ids. Remove
+        # their workflow-scoped queue cards, but do not guess which task logs
+        # the user intended to delete.
+        totals = {
+            "reconciliations": get_reconciliation_store().delete(
+                workflow_id=workflow_id,
+            ),
+            "approvals": get_approval_store().delete(
+                workflow_id=workflow_id,
+            ),
+        }
+        get_cleanup_capability_store().delete_workflow_binding(workflow_id)
+
+        return {
+            "result": "success",
+            "workflow_id": workflow_id,
+            "deleted_tasks": 0,
+            "deleted": totals,
+            "business_outputs_preserved": True,
+        }
 
     # ---- Workflow skill administration API ----
 
@@ -1089,11 +1533,330 @@ def create_app() -> FastAPI:
 
     # ---- S-ABAC Security & Demo API ----
 
+    @app.get("/api/security/approvals")
+    async def list_security_approvals(
+        status: Optional[str] = None,
+        workflow_id: Optional[str] = None,
+        task_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        _operator: str = Depends(_authenticate_governance_operator),
+    ):
+        return get_approval_store().list(
+            status=status,
+            workflow_id=workflow_id,
+            task_id=task_id,
+            user_id=user_id,
+        )
+
+    @app.post("/api/security/approvals/{approval_id}/approve")
+    async def approve_security_request(
+        approval_id: str,
+        body: ApprovalDecisionRequest,
+        operator: str = Depends(_authenticate_governance_operator),
+    ):
+        try:
+            approval = get_approval_store().approve(
+                approval_id,
+                approver=operator,
+                comment=body.comment,
+            )
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        record_governance_event(
+            "APPROVAL_GRANTED",
+            task_id=approval.task_id,
+            workflow_id=approval.workflow_id,
+            step_id=approval.step_id or None,
+            subject=operator,
+            agent=approval.node_name,
+            decision="APPROVED",
+            details={
+                "approval_id": approval.approval_id,
+                "approver": operator,
+                "request_user_id": approval.user_id,
+                "comment": body.comment,
+                "resume_step": approval.resume_step,
+            },
+        )
+        return {
+            **approval.__dict__,
+            "resume_endpoint": "/api/tasks/resume",
+            "resume_request": {
+                "task_id": approval.task_id,
+                "resume_step": approval.resume_step,
+                "user_id": approval.user_id,
+                "workmode": "production",
+            },
+        }
+
+    @app.post("/api/security/approvals/{approval_id}/reject")
+    async def reject_security_request(
+        approval_id: str,
+        body: ApprovalDecisionRequest,
+        operator: str = Depends(_authenticate_governance_operator),
+    ):
+        try:
+            approval = get_approval_store().reject(
+                approval_id,
+                approver=operator,
+                comment=body.comment,
+            )
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        record_governance_event(
+            "APPROVAL_REJECTED",
+            task_id=approval.task_id,
+            workflow_id=approval.workflow_id,
+            step_id=approval.step_id or None,
+            subject=operator,
+            agent=approval.node_name,
+            decision="REJECTED",
+            details={
+                "approval_id": approval.approval_id,
+                "approver": operator,
+                "request_user_id": approval.user_id,
+                "comment": body.comment,
+            },
+        )
+        return approval.__dict__
+
+    @app.get("/api/security/reconciliations")
+    async def list_security_reconciliations(
+        status: Optional[str] = None,
+        task_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        _operator: str = Depends(_authenticate_governance_operator),
+    ):
+        """List uncertain side effects that require an explicit human verdict."""
+        return get_reconciliation_store().list(
+            status=status,
+            task_id=task_id,
+            user_id=user_id,
+        )
+
+    def _reconciliation_resume_response(reconciliation: Any) -> dict[str, Any]:
+        return {
+            **reconciliation.__dict__,
+            "resume_endpoint": "/api/tasks/resume",
+            "resume_request": {
+                "task_id": reconciliation.task_id,
+                "resume_step": reconciliation.resume_step,
+                "user_id": reconciliation.user_id,
+                "workmode": "production",
+            },
+        }
+
+    def _load_reconciliation(reconciliation_id: str) -> Any:
+        reconciliation = get_reconciliation_store().get(reconciliation_id)
+        if reconciliation is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"reconciliation not found: {reconciliation_id}",
+            )
+        return reconciliation
+
+    def _raise_reconciliation_conflict(exc: Exception) -> None:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post("/api/security/reconciliations/{reconciliation_id}/retry")
+    async def retry_reconciliation(
+        reconciliation_id: str,
+        body: ReconciliationDecisionRequest,
+        operator: str = Depends(_authenticate_governance_operator),
+    ):
+        """Confirm no external effect occurred and release the receipt for retry."""
+        reconciliation = _load_reconciliation(reconciliation_id)
+        if reconciliation.status not in {"pending", "frozen"}:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "reconciliation is not retryable in "
+                    f"status={reconciliation.status}"
+                ),
+            )
+        if not reconciliation.idempotency_key:
+            raise HTTPException(
+                status_code=409,
+                detail="missing idempotency key; automatic receipt release is unsafe",
+            )
+        try:
+            reconciliation = get_reconciliation_store().resolve_with_receipt(
+                reconciliation_id,
+                receipt_store=PersistentReceiptStore(reconciliation.task_id),
+                decision="retry",
+                operator=operator,
+                comment=body.comment,
+            )
+        except (
+            KeyError,
+            ValueError,
+            ReceiptClaimMismatch,
+            ReceiptStoreCorruption,
+            OSError,
+        ) as exc:
+            _raise_reconciliation_conflict(exc)
+        record_governance_event(
+            "RECONCILIATION_RESOLVED",
+            task_id=reconciliation.task_id,
+            workflow_id=reconciliation.workflow_id,
+            step_id=reconciliation.step_id or None,
+            subject=operator,
+            agent=reconciliation.agent_name,
+            decision="SAFE_TO_RETRY",
+            details={
+                "reconciliation_id": reconciliation.reconciliation_id,
+                "operator": operator,
+                "request_user_id": reconciliation.user_id,
+                "comment": body.comment,
+                "receipt_released": True,
+                "resume_step": reconciliation.resume_step,
+            },
+        )
+        return _reconciliation_resume_response(reconciliation)
+
+    @app.post("/api/security/reconciliations/{reconciliation_id}/succeeded")
+    async def confirm_reconciliation_succeeded(
+        reconciliation_id: str,
+        body: ReconciliationDecisionRequest,
+        operator: str = Depends(_authenticate_governance_operator),
+    ):
+        """Confirm the external operation succeeded and complete its receipt."""
+        reconciliation = _load_reconciliation(reconciliation_id)
+        if reconciliation.status not in {"pending", "frozen"}:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "reconciliation is not confirmable in "
+                    f"status={reconciliation.status}"
+                ),
+            )
+        if not reconciliation.idempotency_key:
+            raise HTTPException(status_code=409, detail="missing idempotency key")
+        if not body.external_operation_id.strip():
+            raise HTTPException(
+                status_code=422,
+                detail="external_operation_id is required",
+            )
+        try:
+            reconciliation = get_reconciliation_store().resolve_with_receipt(
+                reconciliation_id,
+                receipt_store=PersistentReceiptStore(reconciliation.task_id),
+                decision="succeeded",
+                operator=operator,
+                comment=body.comment,
+                external_operation_id=body.external_operation_id.strip(),
+                outputs=body.outputs,
+            )
+        except (
+            KeyError,
+            ValueError,
+            ReceiptClaimMismatch,
+            ReceiptStoreCorruption,
+            OSError,
+        ) as exc:
+            _raise_reconciliation_conflict(exc)
+        record_governance_event(
+            "RECONCILIATION_RESOLVED",
+            task_id=reconciliation.task_id,
+            workflow_id=reconciliation.workflow_id,
+            step_id=reconciliation.step_id or None,
+            subject=operator,
+            agent=reconciliation.agent_name,
+            decision="CONFIRMED_SUCCEEDED",
+            details={
+                "reconciliation_id": reconciliation.reconciliation_id,
+                "operator": operator,
+                "request_user_id": reconciliation.user_id,
+                "comment": body.comment,
+                "external_operation_id": body.external_operation_id.strip(),
+                "resume_step": reconciliation.resume_step,
+            },
+        )
+        return _reconciliation_resume_response(reconciliation)
+
+    @app.post("/api/security/reconciliations/{reconciliation_id}/freeze")
+    async def freeze_reconciliation(
+        reconciliation_id: str,
+        body: ReconciliationDecisionRequest,
+        operator: str = Depends(_authenticate_governance_operator),
+    ):
+        try:
+            reconciliation = get_reconciliation_store().freeze(
+                reconciliation_id,
+                operator=operator,
+                comment=body.comment,
+            )
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            _raise_reconciliation_conflict(exc)
+        record_governance_event(
+            "RECONCILIATION_FROZEN",
+            task_id=reconciliation.task_id,
+            workflow_id=reconciliation.workflow_id,
+            step_id=reconciliation.step_id or None,
+            subject=operator,
+            agent=reconciliation.agent_name,
+            decision="FROZEN",
+            details={
+                "reconciliation_id": reconciliation.reconciliation_id,
+                "operator": operator,
+                "request_user_id": reconciliation.user_id,
+                "comment": body.comment,
+            },
+        )
+        return reconciliation.__dict__
+
+    @app.post("/api/security/reconciliations/{reconciliation_id}/terminate")
+    async def terminate_reconciliation(
+        reconciliation_id: str,
+        body: ReconciliationDecisionRequest,
+        operator: str = Depends(_authenticate_governance_operator),
+    ):
+        try:
+            reconciliation = get_reconciliation_store().resolve(
+                reconciliation_id,
+                status="terminated",
+                operator=operator,
+                comment=body.comment,
+            )
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            _raise_reconciliation_conflict(exc)
+        record_governance_event(
+            "RECONCILIATION_TERMINATED",
+            task_id=reconciliation.task_id,
+            workflow_id=reconciliation.workflow_id,
+            step_id=reconciliation.step_id or None,
+            subject=operator,
+            agent=reconciliation.agent_name,
+            decision="TERMINATED",
+            details={
+                "reconciliation_id": reconciliation.reconciliation_id,
+                "operator": operator,
+                "request_user_id": reconciliation.user_id,
+                "comment": body.comment,
+                "receipt_preserved": True,
+            },
+        )
+        return reconciliation.__dict__
+
     @app.get("/api/security/status")
     async def get_security_status():
         """Get the current S-ABAC status."""
         return {
             "s_abac_enabled": S_ABAC_ENABLED,
+            "orchestration_scheduler_enabled": ORCHESTRATION_SCHEDULER_ENABLED,
+            "auto_recovery_enabled": AUTO_RECOVERY_ENABLED,
+            "auto_recovery_max_attempts": SCHEDULER_AUTO_RECOVERY_MAX_ATTEMPTS,
+            "retry_base_seconds": SCHEDULER_RETRY_BASE_SECONDS,
+            "retry_max_seconds": SCHEDULER_RETRY_MAX_SECONDS,
+            "retry_jitter_ratio": SCHEDULER_RETRY_JITTER_RATIO,
             "policies_count": len(S_ABAC_POLICIES),
             "agent_attributes_count": len(AGENT_SECURITY_ATTRIBUTES),
             "resource_attributes_count": len(RESOURCE_SECURITY_ATTRIBUTES),
@@ -1205,46 +1968,40 @@ def create_app() -> FastAPI:
         profile = get_demo_user(user_id)
         if not profile:
             raise HTTPException(status_code=404, detail=f"User not found: {user_id}")
+        if bool(tool_name) == bool(agent_name):
+            raise HTTPException(
+                status_code=422,
+                detail="exactly one of tool_name or agent_name is required",
+            )
 
-        user_role = profile.get("role", "")
-        user_clearance = profile.get("clearance_level", 0)
-
-        result = {"allowed": False, "reason": "", "details": {}}
-
-        if tool_name:
-            attrs = RESOURCE_SECURITY_ATTRIBUTES.get(tool_name, {})
-            allowed_roles = attrs.get("allowed_roles", [])
-            sensitivity = attrs.get("sensitivity", "LOW")
-
-            role_match = (not allowed_roles or user_role in allowed_roles)
-            clearance_match = user_clearance >= SENSITIVITY_LEVELS.get(sensitivity, 1)
-
-            result["allowed"] = role_match and clearance_match
-            result["details"] = {
-                "tool_name": tool_name,
-                "sensitivity": sensitivity,
-                "allowed_roles": allowed_roles,
-                "user_role": user_role,
-                "user_clearance": user_clearance,
-                "role_match": role_match,
-                "clearance_match": clearance_match,
-            }
-            if not role_match:
-                result["reason"] = f"Role {user_role} not in allowed roles {allowed_roles}"
-            elif not clearance_match:
-                result["reason"] = f"Clearance level {user_clearance} insufficient for {sensitivity}"
-
+        resource_name = tool_name or agent_name
+        result = _static_resource_precheck(
+            profile,
+            RESOURCE_SECURITY_ATTRIBUTES.get(resource_name),
+            resource_name=resource_name,
+            operation_mode=action,
+        )
         if agent_name:
-            attrs = AGENT_SECURITY_ATTRIBUTES.get(agent_name, {})
-            agent_role = attrs.get("role", "")
-            agent_dept = attrs.get("department", "")
-            result["details"].update({
-                "agent_name": agent_name,
-                "agent_role": agent_role,
-                "agent_department": agent_dept,
-            })
-
-        return result
+            available = get_user_available_agents(user_id)
+            available_to_user = available == ["*"] or agent_name in available
+            result["available_to_user"] = available_to_user
+            if not available_to_user:
+                result.update(
+                    {
+                        "allowed": False,
+                        "can_access": False,
+                        "eligible": False,
+                        "decision": "DENY",
+                        "blocked_reason": "Agent is not available to this user",
+                    }
+                )
+        return {
+            **result,
+            "reason": result.get("blocked_reason") or result.get("decision"),
+            "details": dict(result),
+            "user_id": user_id,
+            "resource_name": resource_name,
+        }
 
     @app.get("/api/security/users/{user_id}/precheck")
     async def precheck_user_permissions(user_id: str):
@@ -1252,39 +2009,39 @@ def create_app() -> FastAPI:
         if not profile:
             raise HTTPException(status_code=404, detail=f"Demo user not found: {user_id}")
 
-        user_role = profile.get("role", "")
-        user_clearance = profile.get("clearance_level", 0)
         available_agents = get_user_available_agents(user_id)
 
         tool_access = {}
         for tool_name, attrs in RESOURCE_SECURITY_ATTRIBUTES.items():
-            allowed_roles = attrs.get("allowed_roles", [])
-            sensitivity = attrs.get("sensitivity", "LOW")
-            role_match = (not allowed_roles or user_role in allowed_roles)
-            clearance_match = user_clearance >= SENSITIVITY_LEVELS.get(sensitivity, 1)
-            can_access = role_match and clearance_match
-            tool_access[tool_name] = {
-                "can_access": can_access,
-                "sensitivity": sensitivity,
-                "allowed_roles": allowed_roles,
-                "role_match": role_match,
-                "clearance_match": clearance_match,
-                "blocked_reason": (
-                    "" if can_access else
-                    f"Role mismatch: {user_role} not in {allowed_roles}" if not role_match else
-                    f"Clearance too low: L{user_clearance} < {sensitivity} (needs L{SENSITIVITY_LEVELS.get(sensitivity, 1)})"
-                ),
-            }
+            if attrs.get("type") == "agent":
+                continue
+            tool_access[tool_name] = _static_resource_precheck(
+                profile, attrs, resource_name=tool_name
+            )
 
         agent_access = {}
-        for agent_name, attrs in AGENT_SECURITY_ATTRIBUTES.items():
-            agent_role = attrs.get("role", "")
-            agent_clearance = attrs.get("clearance_level", 0)
+        for agent_name, subject_attrs in AGENT_SECURITY_ATTRIBUTES.items():
             is_available = available_agents == ["*"] or agent_name in available_agents
+            access = _static_resource_precheck(
+                profile,
+                RESOURCE_SECURITY_ATTRIBUTES.get(agent_name),
+                resource_name=agent_name,
+            )
+            if not is_available:
+                access.update(
+                    {
+                        "allowed": False,
+                        "can_access": False,
+                        "eligible": False,
+                        "decision": "DENY",
+                        "blocked_reason": "Agent is not available to this user",
+                    }
+                )
             agent_access[agent_name] = {
+                **access,
                 "agent_name": agent_name,
-                "agent_role": agent_role,
-                "agent_clearance": agent_clearance,
+                "agent_role": subject_attrs.get("role", ""),
+                "agent_clearance": subject_attrs.get("clearance_level", 0),
                 "available_to_user": is_available,
             }
 
@@ -1307,29 +2064,15 @@ def create_app() -> FastAPI:
         if not profile:
             raise HTTPException(status_code=404, detail=f"Demo user not found: {user_id}")
 
-        from src.security.policy import PolicyEngine
-        from config.s_abac_demo_users import DEMO_USERS
-
-        user_role = profile.get("role", "")
-        user_clearance = profile.get("clearance_level", 0)
-
-        attrs = RESOURCE_SECURITY_ATTRIBUTES.get(tool_name, DEFAULT_OBJECT_ATTRIBUTES)
-        allowed_roles = attrs.get("allowed_roles", [])
-        sensitivity = attrs.get("sensitivity", "LOW")
-
-        role_match = not allowed_roles or user_role in allowed_roles
-        clearance_match = user_clearance >= SENSITIVITY_LEVELS.get(sensitivity, 1)
-
+        result = _static_resource_precheck(
+            profile,
+            RESOURCE_SECURITY_ATTRIBUTES.get(tool_name),
+            resource_name=tool_name,
+        )
         return {
-            "allowed": role_match and clearance_match,
+            **result,
             "tool_name": tool_name,
             "user_id": user_id,
-            "user_role": user_role,
-            "user_clearance": user_clearance,
-            "sensitivity": sensitivity,
-            "allowed_roles": allowed_roles,
-            "role_match": role_match,
-            "clearance_match": clearance_match,
         }
 
     return app

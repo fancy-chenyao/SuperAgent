@@ -28,6 +28,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional, Tuple
 
+from src.utils.file_lock import FileLock
+
 logger = logging.getLogger(__name__)
 
 
@@ -181,6 +183,15 @@ def normalize_input(inputs: Any) -> str:
         return json.dumps(inputs, sort_keys=True, ensure_ascii=False, default=str)
     except Exception:  # pragma: no cover - defensive
         return str(inputs)
+
+
+def missing_receipt_outputs(outputs: Any, expected_outputs: Iterable[str]) -> list[str]:
+    """Return required logical outputs absent from a receipt payload."""
+
+    required = [str(name) for name in expected_outputs if str(name)]
+    if not isinstance(outputs, dict):
+        return required
+    return [name for name in required if name not in outputs or outputs[name] is None]
 
 
 def idempotency_key(task_id: str, step_id: str, inputs: Any) -> str:
@@ -355,6 +366,50 @@ class ReceiptStore:
         receipt.setdefault("claim_id", claim_id)
         self.put(key, receipt)
 
+    def release_for_retry(self, key: str, claim_id: Optional[str] = None) -> None:
+        """Release an unconfirmed STARTED claim after a human confirms no effect."""
+        existing = self._receipts.get(key)
+        if not isinstance(existing, dict):
+            raise KeyError(f"receipt not found: {key}")
+        if existing.get("status") != "STARTED":
+            raise ValueError(
+                f"receipt is not releasable in status={existing.get('status')}"
+            )
+        owner = existing.get("claim_id")
+        if claim_id and owner and owner != claim_id:
+            raise ReceiptClaimMismatch(
+                f"claim id mismatch for {key}: {owner!r} != {claim_id!r}"
+            )
+        del self._receipts[key]
+
+    def confirm_succeeded(
+        self,
+        key: str,
+        *,
+        claim_id: Optional[str],
+        external_operation_id: str,
+        outputs: Optional[Dict[str, Any]] = None,
+        operator: str = "",
+    ) -> None:
+        """Turn an uncertain STARTED receipt into a human-confirmed success."""
+        if not str(external_operation_id or "").strip():
+            raise ValueError("external_operation_id is required")
+        existing = self._receipts.get(key)
+        if not isinstance(existing, dict):
+            raise KeyError(f"receipt not found: {key}")
+        self.complete(
+            key,
+            claim_id,
+            {
+                **existing,
+                "status": "SUCCEEDED",
+                "external_op_id": str(external_operation_id),
+                "outputs": dict(outputs or {}),
+                "confirmed_by": operator,
+                "timestamp": time.time(),
+            },
+        )
+
 
 def _json_default(obj: Any) -> Any:
     """Serialize pydantic models (e.g. ArtifactRef) inside a receipt."""
@@ -362,54 +417,6 @@ def _json_default(obj: Any) -> Any:
     if callable(dump):
         return dump()
     return str(obj)
-
-
-class _FileLock:
-    """Coarse cross-process mutex via ``O_CREAT|O_EXCL`` on a ``.lock`` file.
-
-    Portable (works on Windows + POSIX) without extra dependencies. A stale lock
-    older than ``timeout`` is stolen so a crashed holder cannot deadlock peers.
-    """
-
-    def __init__(self, path: Path, *, timeout: float = 10.0, poll: float = 0.05) -> None:
-        self._path = Path(str(path) + ".lock")
-        self._timeout = timeout
-        self._poll = poll
-        self._fd: Optional[int] = None
-
-    def __enter__(self) -> "_FileLock":
-        start = time.time()
-        while True:
-            try:
-                self._fd = os.open(
-                    str(self._path), os.O_CREAT | os.O_EXCL | os.O_WRONLY
-                )
-                return self
-            except FileExistsError:
-                waited = time.time() - start
-                # Steal a stale lock left by a crashed holder.
-                try:
-                    age = time.time() - self._path.stat().st_mtime
-                    if age > self._timeout:
-                        os.unlink(self._path)
-                        continue
-                except OSError:
-                    pass
-                if waited > self._timeout:
-                    raise TimeoutError(f"could not acquire lock {self._path}")
-                time.sleep(self._poll)
-
-    def __exit__(self, *exc: Any) -> None:
-        try:
-            if self._fd is not None:
-                os.close(self._fd)
-        except OSError:  # pragma: no cover - best effort
-            pass
-        try:
-            if self._path.exists():
-                os.unlink(self._path)
-        except OSError:  # pragma: no cover - best effort
-            pass
 
 
 class PersistentReceiptStore(ReceiptStore):
@@ -509,7 +516,7 @@ class PersistentReceiptStore(ReceiptStore):
         self._path.parent.mkdir(parents=True, exist_ok=True)
         try:
             with self._lock:
-                with _FileLock(self._path):
+                with FileLock(self._path):
                     data = self._read_strict()
                     existing = data.get(key)
                     if isinstance(existing, dict):
@@ -540,7 +547,7 @@ class PersistentReceiptStore(ReceiptStore):
         """
         self._path.parent.mkdir(parents=True, exist_ok=True)
         with self._lock:
-            with _FileLock(self._path):
+            with FileLock(self._path):
                 data = self._read_strict()
                 existing = data.get(key)
                 if isinstance(existing, dict):
@@ -559,9 +566,65 @@ class PersistentReceiptStore(ReceiptStore):
 
     def put(self, key: str, receipt: Dict[str, Any]) -> None:
         with self._lock:
-            with _FileLock(self._path):
+            with FileLock(self._path):
                 # Merge the latest on-disk state so a concurrent writer's
                 # receipts are not clobbered by this write.
                 self._load()
                 self._receipts[key] = receipt
                 self._flush()
+
+    def release_for_retry(self, key: str, claim_id: Optional[str] = None) -> None:
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        with self._lock:
+            with FileLock(self._path):
+                data = self._read_strict()
+                existing = data.get(key)
+                if not isinstance(existing, dict):
+                    raise KeyError(f"receipt not found: {key}")
+                if existing.get("status") != "STARTED":
+                    raise ValueError(
+                        f"receipt is not releasable in status={existing.get('status')}"
+                    )
+                owner = existing.get("claim_id")
+                if claim_id and owner and owner != claim_id:
+                    raise ReceiptClaimMismatch(
+                        f"claim id mismatch for {key}: {owner!r} != {claim_id!r}"
+                    )
+                del data[key]
+                self._flush_data(data)
+                self._receipts = data
+
+    def confirm_succeeded(
+        self,
+        key: str,
+        *,
+        claim_id: Optional[str],
+        external_operation_id: str,
+        outputs: Optional[Dict[str, Any]] = None,
+        operator: str = "",
+    ) -> None:
+        if not str(external_operation_id or "").strip():
+            raise ValueError("external_operation_id is required")
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        with self._lock:
+            with FileLock(self._path):
+                data = self._read_strict()
+                existing = data.get(key)
+                if not isinstance(existing, dict):
+                    raise KeyError(f"receipt not found: {key}")
+                owner = existing.get("claim_id")
+                if claim_id and owner and owner != claim_id:
+                    raise ReceiptClaimMismatch(
+                        f"claim id mismatch for {key}: {owner!r} != {claim_id!r}"
+                    )
+                succeeded = {
+                    **existing,
+                    "status": "SUCCEEDED",
+                    "external_op_id": str(external_operation_id),
+                    "outputs": dict(outputs or {}),
+                    "confirmed_by": operator,
+                    "timestamp": time.time(),
+                }
+                data[key] = succeeded
+                self._flush_data(data)
+                self._receipts = data

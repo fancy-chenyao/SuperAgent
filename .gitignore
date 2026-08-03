@@ -26,6 +26,7 @@ store
 .pytest_tmp_*/
 .pytest-tmp-daily-*/
 .ruff_cache/
+/.artifacts/
 
 # Tool-generated logs
 src/tools/excel/excel-mcp.log

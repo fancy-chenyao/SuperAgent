@@ -184,6 +184,16 @@ async def _trusted_registry_contract_data(
         for agent in registered_agents
         if agent.user_id == "share" or agent.user_id == user_id
     }
+    # Built-in contracts and live Agent Cards may enumerate the same logical
+    # outputs in different orders. Preserve the server-owned catalog order when
+    # the sets are identical so snapshot re-derivation is deterministic and the
+    # primary output used for implicit bindings does not drift across restarts.
+    from src.orchestration.output_contracts import get_agent_output_logical_names
+
+    for agent_name, live_outputs in list(produces.items()):
+        catalog_outputs = get_agent_output_logical_names(agent_name)
+        if catalog_outputs and set(catalog_outputs) == set(live_outputs):
+            produces[agent_name] = catalog_outputs
     return contracts, produces
 
 
@@ -277,11 +287,14 @@ def load_production_task_graph(
             else _current_agent_contracts(state.get("agent_cards"))
         ),
         current_agent_produces=current_agent_produces,
+        subtasks=(state.get("task_profile") or {}).get("subtasks"),
     )
     if task_graph is None:
         logger.warning("plan snapshot rejected for %s: %s",
                        workflow_id, reason)
+        state["task_graph_rejection_reason"] = reason
         return False, reason
+    state.pop("task_graph_rejection_reason", None)
     state["task_graph"] = task_graph
     return True, "loaded"
 
@@ -1357,6 +1370,9 @@ async def _process_workflow(
                 )
 
             ready, category, detail = scheduler_ready(state)
+            if category == "no_graph" and state.get("task_graph_rejection_reason"):
+                category = "invalid"
+                detail = str(state["task_graph_rejection_reason"])
             if ready:
                 terminal_event = None
                 async for scheduler_event in run_scheduler_workflow(
@@ -1455,6 +1471,10 @@ async def _process_workflow(
 
             # Store original node name to avoid being overwritten in message loop
             original_node_name = agent_name
+            # A workflow can enter agent_proxy multiple times.  Each entry must
+            # have its own event identity; otherwise the frontend treats all
+            # remote-agent executions as one result card.
+            node_event_id = f"{workflow_id}_{original_node_name}_{step_count}"
 
             # For agent_proxy, get the actual sub-agent name from state["next"]
             # Note: state["next"] is set by publisher in the previous iteration
@@ -1485,7 +1505,7 @@ async def _process_workflow(
                 "event": "start_of_agent",
                 "data": {
                     "agent_name": display_name,
-                    "agent_id": f"{workflow_id}_{agent_name}_1",
+                    "agent_id": node_event_id,
                     "sub_agent_name": sub_agent_name,
                 },
             }
@@ -1614,7 +1634,7 @@ async def _process_workflow(
                 "event": "end_of_agent",
                 "data": {
                     "agent_name": end_display_name,
-                    "agent_id": f"{workflow_id}_{original_node_name}_1",
+                    "agent_id": node_event_id,
                     "sub_agent_name": sub_agent_name,
                 },
             }

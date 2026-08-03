@@ -442,6 +442,7 @@ def failure_from_exception(
     *,
     step_id: str | None = None,
     agent_id: str | None = None,
+    retryable: bool | None = None,
 ) -> FailureDescriptor:
     """Classify a caught exception without exposing its raw text."""
 
@@ -451,7 +452,12 @@ def failure_from_exception(
         code = FailureCode.ARTIFACT_ACCESS_DENIED
     else:
         code = FailureCode.INTERNAL_STEP_ERROR
-    return make_failure(code, step_id=step_id, agent_id=agent_id)
+    return make_failure(
+        code,
+        step_id=step_id,
+        agent_id=agent_id,
+        retryable=retryable,
+    )
 
 
 __all__ = [

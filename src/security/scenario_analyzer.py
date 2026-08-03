@@ -41,9 +41,33 @@ def _score_overlap(left: set[str], right: set[str]) -> float:
     return len(inter) / len(union)
 
 
-def _coalesce_list(primary: Any, fallback: Any) -> list[str]:
-    primary_list = _normalize_list(primary)
-    return primary_list if primary_list else _normalize_list(fallback)
+def _ordered_union(*values: Any) -> list[str]:
+    """Merge labels in source order with case-insensitive de-duplication."""
+    merged: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        for item in _normalize_list(value):
+            cleaned = item.strip()
+            normalized = _normalize_token(cleaned)
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            merged.append(cleaned)
+    return merged
+
+
+def _merge_lists(primary: Any, fallback: Any) -> list[str]:
+    """Keep model detail without dropping canonical security domains."""
+
+    merged: list[str] = []
+    seen: set[str] = set()
+    for item in [*_normalize_list(fallback), *_normalize_list(primary)]:
+        normalized = _normalize_token(item)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        merged.append(item)
+    return merged
 
 
 def _merge_task_profile(fallback: Dict[str, Any], llm_result: Dict[str, Any]) -> Dict[str, Any]:
@@ -52,10 +76,26 @@ def _merge_task_profile(fallback: Dict[str, Any], llm_result: Dict[str, Any]) ->
 
     fallback_type = str(fallback.get("task_type") or "GENERAL").upper()
     llm_type = str(merged.get("task_type") or fallback_type).upper()
-    fallback_caps = {item.lower() for item in _normalize_list(fallback.get("expected_capabilities"))}
-    llm_caps = {item.lower() for item in _normalize_list(merged.get("expected_capabilities"))}
-    fallback_tags = {item.lower() for item in _normalize_list(fallback.get("scenario_tags"))}
-    llm_tags = {item.lower() for item in _normalize_list(merged.get("scenario_tags"))}
+    fallback_caps = {
+        _normalize_token(item)
+        for item in _normalize_list(fallback.get("expected_capabilities"))
+        if _normalize_token(item)
+    }
+    llm_caps = {
+        _normalize_token(item)
+        for item in _normalize_list(merged.get("expected_capabilities"))
+        if _normalize_token(item)
+    }
+    fallback_tags = {
+        _normalize_token(item)
+        for item in _normalize_list(fallback.get("scenario_tags"))
+        if _normalize_token(item)
+    }
+    llm_tags = {
+        _normalize_token(item)
+        for item in _normalize_list(merged.get("scenario_tags"))
+        if _normalize_token(item)
+    }
 
     # Do not allow the LLM to downgrade a strongly identified domain task
     # back to GENERAL when the heuristic profile already found a specific domain.
@@ -88,10 +128,15 @@ def _merge_task_profile(fallback: Dict[str, Any], llm_result: Dict[str, Any]) ->
         merged["reason"] = "heuristic domain preserved over conflicting llm result"
         return merged
 
-    merged["scenario_tags"] = _coalesce_list(merged.get("scenario_tags"), fallback.get("scenario_tags"))
-    merged["expected_capabilities"] = _coalesce_list(
-        merged.get("expected_capabilities"),
+    # Keep heuristic domain labels as authorization-compatible anchors while
+    # retaining the LLM's finer-grained labels as additional scenario context.
+    merged["scenario_tags"] = _ordered_union(
+        fallback.get("scenario_tags"),
+        merged.get("scenario_tags"),
+    )
+    merged["expected_capabilities"] = _ordered_union(
         fallback.get("expected_capabilities"),
+        merged.get("expected_capabilities"),
     )
     merged["business_goal"] = merged.get("business_goal") or fallback.get("business_goal") or ""
     merged["operation_mode"] = merged.get("operation_mode") or fallback.get("operation_mode") or "read"
