@@ -1297,6 +1297,34 @@ class TaskScheduler:
                 },
             )
 
+        actual_contract, actual_schema_refs, contract_error = (
+            self._actual_output_contract(
+                step,
+                selected_agent,
+                step_ctx,
+                enforce_output_boundary=not step.is_read_only,
+            )
+        )
+        if contract_error is not None:
+            return StepResult(
+                step_id=step.step_id,
+                status=StepStatus.FAILED,
+                error=(
+                    f"actual Agent output contract is not safe for step "
+                    f"{step.step_id!r}: {contract_error}"
+                ),
+                metrics={
+                    "selected_agent": selected_agent,
+                    "result_error": contract_error,
+                    "side_effect_started": False,
+                },
+            )
+        # Bind one trusted contract immediately after routing. Every later
+        # stage (normalization, receipt persistence and resume) uses this same
+        # resolved contract rather than falling back to the planned Agent.
+        step_ctx["actual_agent_contract"] = actual_contract
+        step_ctx["actual_expected_schema_refs"] = dict(actual_schema_refs)
+
         # Authorize dispatch after the isolated context and governed Artifact
         # inputs are prepared, but before any side-effect receipt is claimed.
         if self._authorize_step is not None:
@@ -1348,7 +1376,7 @@ class TaskScheduler:
                     "status": "STARTED",
                     "normalized_input": normalize_input(inputs),
                     "expected_outputs": list(step.expected_outputs),
-                    "expected_schema_refs": self._expected_schema_refs(step),
+                    "expected_schema_refs": dict(actual_schema_refs),
                     "external_op_id": None,
                     "timestamp": time.time(),
                 },
@@ -1356,24 +1384,43 @@ class TaskScheduler:
             if claim.status == ClaimStatus.SUCCEEDED:
                 # Confirmed prior success: never re-run the side effect.
                 prior = claim.receipt or {}
+                receipt_agent = str(prior.get("agent") or selected_agent or "")
+                _receipt_contract, expected_schema_refs, contract_error = (
+                    self._actual_output_contract(
+                        step,
+                        receipt_agent or None,
+                        step_ctx,
+                        enforce_output_boundary=True,
+                    )
+                )
+                if contract_error is not None:
+                    return self._invalid_succeeded_receipt(
+                        step=step,
+                        selected_agent=receipt_agent or selected_agent,
+                        idempotency_key_value=idem_key,
+                        error=(
+                            "succeeded receipt Agent contract cannot be trusted: "
+                            f"{contract_error}"
+                        ),
+                        validation_error=contract_error,
+                        receipt=prior,
+                        expected_schema_refs=expected_schema_refs,
+                    )
                 missing_outputs = missing_receipt_outputs(
                     prior.get("outputs"), step.expected_outputs
                 )
                 if missing_outputs:
-                    return StepResult(
-                        step_id=step.step_id,
-                        status=StepStatus.FAILED,
+                    return self._invalid_succeeded_receipt(
+                        step=step,
+                        selected_agent=receipt_agent or selected_agent,
+                        idempotency_key_value=idem_key,
                         error=(
                             "succeeded receipt violates the trusted output contract; "
                             f"missing: {', '.join(missing_outputs)}"
                         ),
-                        metrics={
-                            "idempotent_reuse": False,
-                            "selected_agent": selected_agent,
-                            "idempotency_key": idem_key,
-                            "receipt_status": "SUCCEEDED",
-                            "receipt_output_contract_invalid": True,
-                        },
+                        validation_error="RECEIPT_OUTPUTS_MISSING",
+                        receipt=prior,
+                        expected_schema_refs=expected_schema_refs,
                     )
                 prior_outputs = prior.get("outputs") or {}
                 outputs_kind = prior.get("outputs_kind")
@@ -1387,8 +1434,9 @@ class TaskScheduler:
                             "legacy receipts require explicit reconciliation"
                         ),
                         validation_error="OUTPUTS_KIND_MISSING_OR_INVALID",
+                        receipt=prior,
+                        expected_schema_refs=expected_schema_refs,
                     )
-                expected_schema_refs = self._expected_schema_refs(step)
                 receipt_schema_refs = prior.get("expected_schema_refs")
                 if not isinstance(receipt_schema_refs, Mapping) or any(
                     not isinstance(name, str)
@@ -1405,6 +1453,8 @@ class TaskScheduler:
                             "refusing output reuse"
                         ),
                         validation_error="RECEIPT_SCHEMA_REFS_INVALID",
+                        receipt=prior,
+                        expected_schema_refs=expected_schema_refs,
                     )
                 normalized_receipt_schema_refs = dict(receipt_schema_refs)
                 if normalized_receipt_schema_refs != expected_schema_refs:
@@ -1417,6 +1467,8 @@ class TaskScheduler:
                             "current trusted step contract"
                         ),
                         validation_error="RECEIPT_SCHEMA_REFS_MISMATCH",
+                        receipt=prior,
+                        expected_schema_refs=expected_schema_refs,
                     )
                 if outputs_kind == "confirmed_payloads":
                     if not isinstance(prior_outputs, Mapping):
@@ -1426,22 +1478,26 @@ class TaskScheduler:
                             idempotency_key_value=idem_key,
                             error="confirmed_payloads receipt outputs must be an object",
                             validation_error="CONFIRMED_PAYLOADS_INVALID",
+                            receipt=prior,
+                            expected_schema_refs=expected_schema_refs,
                         )
                     return self._publish_confirmed_receipt_outputs(
                         step=step,
                         payloads=prior_outputs,
                         context=step_ctx,
-                        selected_agent=selected_agent,
+                        selected_agent=receipt_agent or selected_agent,
                         idempotency_key_value=idem_key,
                         receipt=prior,
+                        expected_schema_refs=expected_schema_refs,
                     )
                 artifact_refs, validation_failure = (
                     self._validate_receipt_artifact_refs(
                         step=step,
                         outputs=prior_outputs,
                         expected_schema_refs=expected_schema_refs,
-                        selected_agent=selected_agent,
+                        selected_agent=receipt_agent or selected_agent,
                         idempotency_key_value=idem_key,
+                        receipt=prior,
                     )
                 )
                 if validation_failure is not None:
@@ -1451,7 +1507,7 @@ class TaskScheduler:
                     status=StepStatus.SUCCEEDED,
                     outputs=artifact_refs,
                     metrics={"idempotent_reuse": True,
-                             "selected_agent": selected_agent,
+                             "selected_agent": receipt_agent or selected_agent,
                              "idempotency_key": idem_key,
                              "receipt_status": "SUCCEEDED",
                              "external_op_id": prior.get("external_op_id")},
@@ -1468,6 +1524,7 @@ class TaskScheduler:
                     external_op_id=prior.get("external_op_id"),
                     idempotency_key=idem_key,
                     receipt=prior,
+                    expected_schema_refs=actual_schema_refs,
                 )
             if claim.status == ClaimStatus.CORRUPT:
                 # Fail closed: the receipt store is unparseable so we cannot know
@@ -1716,7 +1773,7 @@ class TaskScheduler:
                         "status": "SUCCEEDED",
                         "normalized_input": normalize_input(inputs),
                         "expected_outputs": list(step.expected_outputs),
-                        "expected_schema_refs": self._expected_schema_refs(step),
+                        "expected_schema_refs": dict(actual_schema_refs),
                         "external_op_id": (result.metrics or {}).get("external_op_id"),
                         "outputs": result.outputs,
                         "outputs_kind": "artifact_refs",
@@ -1789,6 +1846,7 @@ class TaskScheduler:
         external_op_id: Optional[str] = None,
         idempotency_key: Optional[str] = None,
         receipt: Optional[Dict[str, Any]] = None,
+        expected_schema_refs: Optional[Mapping[str, str]] = None,
     ) -> StepResult:
         """A side effect with an unconfirmed outcome: FAILED + needs_reconciliation.
 
@@ -1805,6 +1863,7 @@ class TaskScheduler:
                 "external_op_id": external_op_id,
                 "idempotency_key": idempotency_key,
                 "receipt": dict(receipt or {}),
+                "expected_schema_refs": dict(expected_schema_refs or {}),
             },
         )
 
@@ -1829,6 +1888,56 @@ class TaskScheduler:
                 return getattr(agent, "agent_contract", None)
         return None
 
+    def _actual_output_contract(
+        self,
+        step: TaskStep,
+        selected_agent: Optional[str],
+        context: dict,
+        *,
+        enforce_output_boundary: bool,
+    ) -> tuple[Any, Dict[str, str], Optional[str]]:
+        """Resolve the one trusted output contract bound to an actual dispatch."""
+
+        planned_agent = (
+            getattr(step, "agent_name", None)
+            or getattr(step, "preferred_resource_id", None)
+        )
+        rerouted = bool(
+            selected_agent
+            and planned_agent
+            and str(selected_agent) != str(planned_agent)
+        )
+        contract = (
+            self._trusted_agent_contract(str(selected_agent), context)
+            if rerouted
+            else getattr(step, "agent_contract", None)
+        )
+        if (
+            rerouted
+            and contract is None
+            and getattr(step, "agent_contract", None) is not None
+        ):
+            return None, {}, "REROUTED_AGENT_CONTRACT_MISSING"
+
+        schema_refs = self._expected_schema_refs(step)
+        if contract is not None:
+            schema_refs = {
+                str(name): str(schema_ref)
+                for name, schema_ref in dict(
+                    getattr(contract, "output_schema_refs", None) or {}
+                ).items()
+                if schema_ref
+            }
+            if enforce_output_boundary:
+                expected_names = {str(name) for name in step.expected_outputs}
+                if expected_names != set(schema_refs):
+                    return (
+                        contract,
+                        schema_refs,
+                        "ACTUAL_AGENT_OUTPUT_BOUNDARY_MISMATCH",
+                    )
+        return contract, schema_refs, None
+
     @staticmethod
     def _expected_schema_refs(step: TaskStep) -> Dict[str, str]:
         """Return the current trusted per-output schemas for receipt binding."""
@@ -1852,6 +1961,8 @@ class TaskScheduler:
         idempotency_key_value: str,
         error: str,
         validation_error: str,
+        receipt: Optional[Mapping[str, Any]] = None,
+        expected_schema_refs: Optional[Mapping[str, str]] = None,
         **metrics: Any,
     ) -> StepResult:
         """Fail closed when a SUCCEEDED receipt cannot prove usable output."""
@@ -1867,6 +1978,11 @@ class TaskScheduler:
                 "receipt_status": "SUCCEEDED",
                 "receipt_output_contract_invalid": True,
                 "receipt_validation_error": validation_error,
+                "needs_reconciliation": True,
+                "reconciliation_reason": "SUCCEEDED_RECEIPT_OUTPUT_UNUSABLE",
+                "receipt": dict(receipt or {}),
+                "external_op_id": (receipt or {}).get("external_op_id"),
+                "expected_schema_refs": dict(expected_schema_refs or {}),
                 **metrics,
             },
         )
@@ -1879,6 +1995,7 @@ class TaskScheduler:
         expected_schema_refs: Mapping[str, str],
         selected_agent: Optional[str],
         idempotency_key_value: str,
+        receipt: Mapping[str, Any],
     ) -> tuple[Dict[str, ArtifactRef], Optional[StepResult]]:
         """Resolve and revalidate every Artifact referenced by a success receipt."""
 
@@ -1889,6 +2006,8 @@ class TaskScheduler:
                 idempotency_key_value=idempotency_key_value,
                 error="artifact_refs receipt outputs must be an object",
                 validation_error="ARTIFACT_REFS_INVALID",
+                receipt=receipt,
+                expected_schema_refs=expected_schema_refs,
             )
 
         refs: Dict[str, ArtifactRef] = {}
@@ -1907,6 +2026,8 @@ class TaskScheduler:
                         f"ArtifactRef: {exc}"
                     ),
                     validation_error="ARTIFACT_REF_INVALID",
+                    receipt=receipt,
+                    expected_schema_refs=expected_schema_refs,
                     logical_name=logical_name,
                 )
 
@@ -1920,6 +2041,8 @@ class TaskScheduler:
                         "immutable root Artifact version"
                     ),
                     validation_error="ARTIFACT_REF_NOT_IMMUTABLE_ROOT",
+                    receipt=receipt,
+                    expected_schema_refs=expected_schema_refs,
                     logical_name=logical_name,
                 )
 
@@ -1933,6 +2056,8 @@ class TaskScheduler:
                         "Artifact"
                     ),
                     validation_error="ARTIFACT_NOT_FOUND",
+                    receipt=receipt,
+                    expected_schema_refs=expected_schema_refs,
                     logical_name=logical_name,
                     artifact_id=ref.artifact_id,
                     artifact_version=ref.version,
@@ -1950,6 +2075,8 @@ class TaskScheduler:
                         "Artifact"
                     ),
                     validation_error="ARTIFACT_NOT_FOUND",
+                    receipt=receipt,
+                    expected_schema_refs=expected_schema_refs,
                     logical_name=logical_name,
                     artifact_id=ref.artifact_id,
                     artifact_version=ref.version,
@@ -1965,6 +2092,8 @@ class TaskScheduler:
                         f"logical output {artifact.logical_name!r}"
                     ),
                     validation_error="ARTIFACT_LOGICAL_NAME_MISMATCH",
+                    receipt=receipt,
+                    expected_schema_refs=expected_schema_refs,
                     logical_name=logical_name,
                 )
 
@@ -1981,6 +2110,8 @@ class TaskScheduler:
                             f"{artifact.schema_ref!r}"
                         ),
                         validation_error="ARTIFACT_SCHEMA_MISMATCH",
+                        receipt=receipt,
+                        expected_schema_refs=expected_schema_refs,
                         logical_name=logical_name,
                         schema_ref=expected_schema_ref,
                     )
@@ -1997,6 +2128,8 @@ class TaskScheduler:
                             "Artifact schema validation"
                         ),
                         validation_error="ARTIFACT_SCHEMA_INVALID",
+                        receipt=receipt,
+                        expected_schema_refs=expected_schema_refs,
                         logical_name=logical_name,
                         schema_ref=expected_schema_ref,
                         schema_errors=errors,
@@ -2014,6 +2147,7 @@ class TaskScheduler:
         selected_agent: Optional[str],
         idempotency_key_value: str,
         receipt: Mapping[str, Any],
+        expected_schema_refs: Mapping[str, str],
     ) -> StepResult:
         """Publish human-confirmed payloads through the normal Artifact adapter."""
 
@@ -2022,30 +2156,7 @@ class TaskScheduler:
             or getattr(step, "preferred_resource_id", None)
         )
         producer_agent = selected_agent or planned_agent
-        contract = getattr(step, "agent_contract", None)
-        if selected_agent and planned_agent and selected_agent != planned_agent:
-            contract = self._trusted_agent_contract(selected_agent, context)
-            if contract is None and getattr(step, "agent_contract", None) is not None:
-                return StepResult(
-                    step_id=step.step_id,
-                    status=StepStatus.FAILED,
-                    error=(
-                        f"no trusted contract for rerouted agent {selected_agent!r}: "
-                        "refusing to publish human-confirmed outputs"
-                    ),
-                    metrics={
-                        "receipt_output_contract_invalid": True,
-                        "idempotency_key": idempotency_key_value,
-                    },
-                )
-
-        schema_refs = dict(getattr(step, "expected_schema_refs", None) or {})
-        if contract is not None:
-            schema_refs.update(dict(getattr(contract, "output_schema_refs", None) or {}))
-        if len(step.expected_outputs) == 1 and getattr(
-            step, "expected_schema_ref", None
-        ):
-            schema_refs.setdefault(step.expected_outputs[0], step.expected_schema_ref)
+        schema_refs = dict(expected_schema_refs)
 
         artifacts: Dict[str, Any] = {}
         for logical_name in step.expected_outputs:
@@ -2134,23 +2245,26 @@ class TaskScheduler:
             or getattr(step, "preferred_resource_id", None)
         )
         producer_agent = selected_agent or planned_agent
-        contract = getattr(step, "agent_contract", None)
-        if selected_agent and planned_agent and selected_agent != planned_agent:
-            contract = self._trusted_agent_contract(selected_agent, context)
-            if contract is None and getattr(step, "agent_contract", None) is not None:
-                # The planned step is contracted but the rerouted Agent has no
-                # trusted contract: the result cannot be validated -> refuse.
+        if "actual_agent_contract" in context:
+            contract = context.get("actual_agent_contract")
+        else:
+            contract, _, contract_error = self._actual_output_contract(
+                step,
+                selected_agent,
+                context,
+                enforce_output_boundary=False,
+            )
+            if contract_error is not None:
                 return StepResult(
                     step_id=step.step_id,
                     status=StepStatus.FAILED,
                     error=(
-                        f"no trusted contract for rerouted agent "
-                        f"{selected_agent!r}: refusing to publish an "
-                        "unvalidated result"
+                        f"actual Agent output contract is not trusted: "
+                        f"{contract_error}"
                     ),
                     metrics={
                         "attempts": attempts,
-                        "result_error": "REROUTED_AGENT_CONTRACT_MISSING",
+                        "result_error": contract_error,
                         "selected_agent": selected_agent,
                     },
                 )

@@ -1532,8 +1532,39 @@ async def run_scheduler_workflow(
             reconciliation_data: dict[str, Any] = {}
             idempotency_key = str(metrics.get("idempotency_key") or "")
             receipt = dict(metrics.get("receipt") or {})
-            if idempotency_key and not receipt:
-                receipt = dict(receipt_store.get(idempotency_key) or {})
+            if idempotency_key:
+                persisted_receipt = dict(receipt_store.get(idempotency_key) or {})
+                if persisted_receipt:
+                    receipt = {**persisted_receipt, **receipt}
+            trusted_schema_refs = metrics.get("expected_schema_refs")
+            succeeded_output_repair = (
+                metrics.get("receipt_status") == "SUCCEEDED"
+                and isinstance(trusted_schema_refs, dict)
+            )
+            if not isinstance(trusted_schema_refs, dict) or (
+                not trusted_schema_refs and not succeeded_output_repair
+            ):
+                trusted_schema_refs = receipt.get("expected_schema_refs")
+            if not isinstance(trusted_schema_refs, dict):
+                trusted_schema_refs = {
+                    name: (
+                        step.expected_schema_refs.get(name)
+                        or (
+                            step.expected_schema_ref
+                            if len(step.expected_outputs) == 1
+                            else None
+                        )
+                    )
+                    for name in step.expected_outputs
+                    if (
+                        step.expected_schema_refs.get(name)
+                        or (
+                            step.expected_schema_ref
+                            if len(step.expected_outputs) == 1
+                            else None
+                        )
+                    )
+                }
             try:
                 reconciliation = get_reconciliation_store().create(
                     user_id=str(state.get("user_id") or ""),
@@ -1552,25 +1583,7 @@ async def run_scheduler_workflow(
                     ),
                     receipt=receipt,
                     expected_outputs=list(step.expected_outputs),
-                    expected_schema_refs={
-                        name: (
-                            step.expected_schema_refs.get(name)
-                            or (
-                                step.expected_schema_ref
-                                if len(step.expected_outputs) == 1
-                                else None
-                            )
-                        )
-                        for name in step.expected_outputs
-                        if (
-                            step.expected_schema_refs.get(name)
-                            or (
-                                step.expected_schema_ref
-                                if len(step.expected_outputs) == 1
-                                else None
-                            )
-                        )
-                    },
+                    expected_schema_refs=dict(trusted_schema_refs),
                 )
                 reconciliation_data = {
                     "reconciliation_id": reconciliation.reconciliation_id,
@@ -1601,7 +1614,10 @@ async def run_scheduler_workflow(
                 operation_mode=str(getattr(step, "operation_mode", "") or ""),
                 risk_level=str(getattr(step, "risk_level", "") or ""),
                 decision="MANUAL_REVIEW",
-                reason_code="SIDE_EFFECT_OUTCOME_UNCONFIRMED",
+                reason_code=str(
+                    metrics.get("reconciliation_reason")
+                    or "SIDE_EFFECT_OUTCOME_UNCONFIRMED"
+                ),
                 details={
                     "error": result.error,
                     **reconciliation_data,

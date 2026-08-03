@@ -418,6 +418,8 @@ def test_receipt_artifact_ref_must_exist_before_successful_reuse():
     assert results["document"].metrics["receipt_validation_error"] == (
         "ARTIFACT_NOT_FOUND"
     )
+    assert results["document"].metrics["needs_reconciliation"] is True
+    assert results["document"].metrics["receipt"]["status"] == "SUCCEEDED"
 
 
 @pytest.mark.parametrize(
@@ -490,6 +492,8 @@ def test_receipt_artifact_must_match_and_pass_current_output_schema(
     assert calls["n"] == 0
     assert results["document"].status == StepStatus.FAILED
     assert results["document"].metrics["receipt_validation_error"] == validation_error
+    assert results["document"].metrics["needs_reconciliation"] is True
+    assert results["document"].metrics["receipt"]["status"] == "SUCCEEDED"
 
 
 @pytest.mark.parametrize(

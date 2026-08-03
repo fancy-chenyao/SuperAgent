@@ -191,9 +191,13 @@ class ReconciliationStore:
                 existing = receipt_data.get(key)
                 if not isinstance(existing, dict):
                     raise KeyError(f"receipt not found: {key}")
-                if existing.get("status") != "STARTED":
+                existing_status = str(existing.get("status") or "")
+                repairing_succeeded = (
+                    existing_status == "SUCCEEDED" and decision == "succeeded"
+                )
+                if existing_status != "STARTED" and not repairing_succeeded:
                     raise ValueError(
-                        f"receipt is not resolvable in status={existing.get('status')}"
+                        f"receipt is not resolvable in status={existing_status}"
                     )
                 owner = existing.get("claim_id")
                 if request.claim_id and owner and owner != request.claim_id:
@@ -204,20 +208,30 @@ class ReconciliationStore:
                 before_request = asdict(request)
                 before_receipts = dict(receipt_data)
                 if decision == "retry":
+                    if existing_status != "STARTED":
+                        raise ValueError(
+                            "a confirmed side effect cannot be released for retry"
+                        )
                     del receipt_data[key]
                     target_status = "retry_ready"
                 else:
                     if not str(external_operation_id).strip():
                         raise ValueError("external_operation_id is required")
-                    trusted_expected = existing.get("expected_outputs")
-                    if trusted_expected is None:
-                        trusted_expected = request.expected_outputs
-                    elif request.expected_outputs and set(trusted_expected) != set(
-                        request.expected_outputs
-                    ):
-                        raise ValueError(
-                            "receipt output contract does not match reconciliation request"
-                        )
+                    if repairing_succeeded:
+                        # The runtime created this request from the current
+                        # trusted actual-Agent contract. It intentionally
+                        # supersedes a stale/legacy SUCCEEDED receipt contract.
+                        trusted_expected = list(request.expected_outputs)
+                    else:
+                        trusted_expected = existing.get("expected_outputs")
+                        if trusted_expected is None:
+                            trusted_expected = request.expected_outputs
+                        elif request.expected_outputs and set(trusted_expected) != set(
+                            request.expected_outputs
+                        ):
+                            raise ValueError(
+                                "receipt output contract does not match reconciliation request"
+                            )
                     missing = missing_receipt_outputs(
                         outputs, trusted_expected or []
                     )
@@ -226,15 +240,18 @@ class ReconciliationStore:
                             "confirmed outputs violate the trusted output contract; "
                             f"missing: {', '.join(missing)}"
                         )
-                    trusted_schema_refs = existing.get("expected_schema_refs")
-                    if trusted_schema_refs is None:
-                        trusted_schema_refs = request.expected_schema_refs
-                    elif request.expected_schema_refs and trusted_schema_refs != (
-                        request.expected_schema_refs
-                    ):
-                        raise ValueError(
-                            "receipt output schemas do not match reconciliation request"
-                        )
+                    if repairing_succeeded:
+                        trusted_schema_refs = dict(request.expected_schema_refs)
+                    else:
+                        trusted_schema_refs = existing.get("expected_schema_refs")
+                        if trusted_schema_refs is None:
+                            trusted_schema_refs = request.expected_schema_refs
+                        elif request.expected_schema_refs and trusted_schema_refs != (
+                            request.expected_schema_refs
+                        ):
+                            raise ValueError(
+                                "receipt output schemas do not match reconciliation request"
+                            )
                     registry = get_schema_registry()
                     for logical_name, schema_ref in dict(
                         trusted_schema_refs or {}
@@ -253,6 +270,8 @@ class ReconciliationStore:
                         "external_op_id": str(external_operation_id).strip(),
                         "outputs": dict(outputs or {}),
                         "outputs_kind": "confirmed_payloads",
+                        "expected_outputs": list(trusted_expected or []),
+                        "expected_schema_refs": dict(trusted_schema_refs or {}),
                         "confirmed_by": operator,
                         "timestamp": time.time(),
                     }

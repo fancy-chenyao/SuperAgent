@@ -267,6 +267,59 @@ def test_reconciliation_api_validates_confirmed_output_schema(
     assert PersistentReceiptStore("task-recon").get(key)["status"] == "STARTED"
 
 
+def test_reconciliation_api_repairs_succeeded_or_legacy_receipt_outputs(
+    tmp_path, monkeypatch
+):
+    reconciliation, key = _reconciliation(
+        tmp_path,
+        monkeypatch,
+        expected_schema_refs={"document_id": "markdown_text_result@v1"},
+    )
+    receipts = PersistentReceiptStore(reconciliation.task_id)
+    succeeded = dict(receipts.get(key) or {})
+    succeeded.update(
+        {
+            "status": "SUCCEEDED",
+            "external_op_id": "doc-existing",
+            # Model both the pre-Artifact-checkpoint crash and the stale
+            # pre-outputs_kind format. The trusted reconciliation request must
+            # be able to replace these unusable outputs without retrying.
+            "outputs": {
+                "document_id": {"artifact_id": "missing", "version": 1}
+            },
+        }
+    )
+    succeeded.pop("outputs_kind", None)
+    succeeded["expected_schema_refs"] = {
+        "document_id": "document_generation_result@v1"
+    }
+    receipts.put(key, succeeded)
+    client = _client()
+
+    retry = client.post(
+        f"/api/security/reconciliations/{reconciliation.reconciliation_id}/retry",
+        json={"comment": "must not resend"},
+    )
+    assert retry.status_code == 409
+
+    repaired = client.post(
+        f"/api/security/reconciliations/{reconciliation.reconciliation_id}/succeeded",
+        json={
+            "external_operation_id": "doc-existing",
+            "outputs": {"document_id": "recovered document id"},
+        },
+    )
+
+    assert repaired.status_code == 200
+    receipt = PersistentReceiptStore(reconciliation.task_id).get(key)
+    assert receipt["status"] == "SUCCEEDED"
+    assert receipt["outputs_kind"] == "confirmed_payloads"
+    assert receipt["outputs"] == {"document_id": "recovered document id"}
+    assert receipt["expected_schema_refs"] == {
+        "document_id": "markdown_text_result@v1"
+    }
+
+
 def test_reconciliation_api_can_freeze_and_terminate(tmp_path, monkeypatch):
     reconciliation, key = _reconciliation(tmp_path, monkeypatch)
     client = _client()
