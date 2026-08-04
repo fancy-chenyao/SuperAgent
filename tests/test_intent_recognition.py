@@ -349,6 +349,7 @@ def test_leave_policy_questions_do_not_create_leave_record_tasks() -> None:
         "公司有没有请假相关的管理制度",
         "是否有关于休假的员工管理政策",
         "有没有请假方面的新政策",
+        "查询公司请假记录保留制度",
     )
 
     for query in cases:
@@ -357,6 +358,21 @@ def test_leave_policy_questions_do_not_create_leave_record_tasks() -> None:
 
         assert "knowledge_lookup" in executable_names
         assert "leave_record_query" not in executable_names
+
+
+def test_leave_intention_questions_do_not_create_record_tasks_or_employee_entities() -> None:
+    for query in (
+        "张三有没有打算请假",
+        "李娜是否需要请假",
+        "王强有没有请假计划",
+    ):
+        entities = extract_entities(query)
+        result = _run(RuleIntentRecognizer().recognize(query))
+
+        assert "employee_name" not in entities
+        assert "leave_record_query" not in {
+            item.name for item in result.executable_intents
+        }
 
 
 def test_explicit_leave_record_keyword_survives_policy_context() -> None:
@@ -381,6 +397,92 @@ def test_leave_policy_exclusion_is_scoped_to_its_clause() -> None:
     assert "leave_record_query" in {
         item.name for item in result.executable_intents
     }
+
+
+def test_independent_send_keeps_user_order_before_later_document_generation() -> None:
+    provider = FakeSemanticProvider(
+        _payload(
+            "message_or_email_send",
+            [
+                _candidate(
+                    "message_or_email_send",
+                    0.96,
+                    text_span="给王经理发送独立通知",
+                ),
+                _candidate(
+                    "document_generation",
+                    0.95,
+                    text_span="生成李娜的收入证明",
+                ),
+            ],
+            entities={
+                "employee_name": "李娜",
+                "people": ["李娜", "王经理"],
+                "recipient": "王经理",
+                "document_type": "income_proof",
+            },
+        )
+    )
+
+    profile = _run(
+        profile_task(
+            "给王经理发送独立通知，然后生成李娜的收入证明",
+            task_id="independent-send-before-document",
+            recognition_mode="semantic",
+            semantic_provider=provider,
+        )
+    )
+
+    assert profile.sub_intents[0] == "message_or_email_send"
+    assert profile.subtasks[0]["depends_on"] == []
+    assert profile.sub_intents.index("message_or_email_send") < profile.sub_intents.index(
+        "document_generation"
+    )
+
+
+def test_send_result_waits_for_preceding_leave_query_despite_semantic_order() -> None:
+    provider = FakeSemanticProvider(
+        _payload(
+            "leave_record_query",
+            [
+                _candidate(
+                    "message_or_email_send",
+                    0.96,
+                    text_span="发送给王经理",
+                ),
+                _candidate(
+                    "leave_record_query",
+                    0.95,
+                    text_span="查询张三的请假记录",
+                ),
+            ],
+            entities={
+                "employee_name": "张三",
+                "people": ["张三", "王经理"],
+                "recipient": "王经理",
+            },
+        )
+    )
+
+    profile = _run(
+        profile_task(
+            "查询张三的请假记录，然后发送给王经理",
+            task_id="leave-query-before-send",
+            recognition_mode="semantic",
+            semantic_provider=provider,
+        )
+    )
+
+    assert profile.sub_intents == [
+        "employee_information_query",
+        "leave_record_query",
+        "message_or_email_send",
+    ]
+    assert [item["depends_on"] for item in profile.subtasks] == [
+        [],
+        ["subtask_1"],
+        ["subtask_2"],
+    ]
 
 
 def test_synonym_expression_and_inferred_salary_are_distinguished() -> None:
@@ -431,7 +533,7 @@ def test_weak_keyword_schedule_expression() -> None:
     assert profile.entities["time"] == "明天"
 
 
-def test_weather_travel_advice_has_two_tasks_and_asks_for_employee() -> None:
+def test_weather_travel_advice_has_two_tasks_without_blocking_on_employee() -> None:
     provider = FakeSemanticProvider(
         _payload(
             "weather_query",
@@ -460,11 +562,9 @@ def test_weather_travel_advice_has_two_tasks_and_asks_for_employee() -> None:
     assert profile.entities["location"] == "北京"
     assert "employee_name" not in profile.entities
     assert "schedule_management" not in profile.sub_intents
-    assert profile.needs_clarification is True
-    assert profile.missing_fields == ["employee_or_criteria"]
-    assert profile.clarification_questions == [
-        "请问要结合哪位员工的出差行程？请提供员工姓名或工号。"
-    ]
+    assert profile.needs_clarification is False
+    assert profile.missing_fields == []
+    assert profile.clarification_questions == []
 
 
 def test_rule_fallback_does_not_treat_weather_location_as_employee() -> None:
@@ -480,7 +580,7 @@ def test_rule_fallback_does_not_treat_weather_location_as_employee() -> None:
     assert profile.entities["location"] == "北京"
     assert "employee_name" not in profile.entities
     assert "people" not in profile.entities
-    assert profile.needs_clarification is True
+    assert profile.needs_clarification is False
 
 
 def test_named_travel_query_infers_employee_id_lookup() -> None:
@@ -671,3 +771,30 @@ def test_employee_profile_leave_records_and_summary_are_three_distinct_tasks() -
         ["subtask_1"],
         ["subtask_1", "subtask_2"],
     ]
+
+
+def test_travel_reminder_depends_on_preceding_weather_result() -> None:
+    provider = FakeSemanticProvider(
+        _payload(
+            "weather_query",
+            [
+                _candidate("weather_query", 0.96, text_span="查询北京明天天气"),
+                _candidate("travel_service", 0.94, text_span="结合出差行程给出提醒"),
+            ],
+            entities={"location": "北京", "time": "明天"},
+        )
+    )
+    profile = _run(
+        profile_task(
+            "查询北京明天天气，结合出差行程给出提醒",
+            task_id="weather-travel",
+            recognition_mode="hybrid",
+            semantic_provider=provider,
+        )
+    )
+
+    assert [item["intent"] for item in profile.subtasks] == [
+        "weather_query",
+        "travel_service",
+    ]
+    assert profile.subtasks[1]["depends_on"] == ["subtask_1"]

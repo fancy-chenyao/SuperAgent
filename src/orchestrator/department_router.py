@@ -5,6 +5,7 @@ from typing import Any, Iterable
 
 from config.s_abac_config import AGENT_SECURITY_ATTRIBUTES, RESOURCE_SECURITY_ATTRIBUTES
 from src.contracts import AgentCard, ExcludedAgent, RoutingCandidate, RoutingDecision, TaskProfile
+from src.orchestration.output_contracts import get_agent_output_schema
 
 
 KNOWN_AGENT_CAPABILITIES = {
@@ -176,6 +177,7 @@ def build_agent_cards(agents: Iterable[Any]) -> list[AgentCard]:
                 risk_ceiling=risk_ceiling,
                 required_grants=_list(object_attrs.get("grants_required")),
                 tool_scopes=tools,
+                output_schema=get_agent_output_schema(name),
                 version=str(getattr(agent, "version", "1.0.0") or "1.0.0"),
                 status="ONLINE",
                 description=str(getattr(agent, "description", "") or ""),

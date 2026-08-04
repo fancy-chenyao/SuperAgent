@@ -1,5 +1,6 @@
 from fastapi.testclient import TestClient
 import pytest
+from types import SimpleNamespace
 
 import src.service.web_app as web_app
 
@@ -188,6 +189,71 @@ def test_reconciliation_api_releases_receipt_then_exposes_resume(
 
     timeline = client.get("/api/tasks/task-recon/governance").json()
     assert timeline[-1]["decision"] == "SAFE_TO_RETRY"
+
+
+def test_reconciliation_resume_claim_is_single_use_and_consumed_on_success(
+    tmp_path, monkeypatch
+):
+    reconciliation, _ = _reconciliation(tmp_path, monkeypatch)
+    store = get_reconciliation_store()
+    store.resolve(
+        reconciliation.reconciliation_id,
+        status="retry_ready",
+        operator="admin",
+        comment="verified not executed",
+    )
+
+    claimed = store.claim_for_resume(
+        task_id=reconciliation.task_id,
+        resume_step=reconciliation.resume_step,
+        operator="admin",
+    )
+    assert claimed is not None
+    assert claimed.status == "resuming"
+    with pytest.raises(ValueError, match="already in progress"):
+        store.claim_for_resume(
+            task_id=reconciliation.task_id,
+            resume_step=reconciliation.resume_step,
+            operator="admin",
+        )
+
+    completed = store.finish_resume(
+        reconciliation.reconciliation_id,
+        succeeded=True,
+    )
+    assert completed.status == "consumed"
+    assert completed.resolution["resume_succeeded"] is True
+    assert (
+        store.claim_for_resume(
+            task_id=reconciliation.task_id,
+            resume_step=reconciliation.resume_step,
+            operator="admin",
+        )
+        is None
+    )
+
+
+def test_failed_reconciliation_resume_returns_to_ready_state(tmp_path, monkeypatch):
+    reconciliation, _ = _reconciliation(tmp_path, monkeypatch)
+    store = get_reconciliation_store()
+    store.resolve(
+        reconciliation.reconciliation_id,
+        status="retry_ready",
+        operator="admin",
+    )
+    store.claim_for_resume(
+        task_id=reconciliation.task_id,
+        resume_step=reconciliation.resume_step,
+        operator="admin",
+    )
+
+    restored = store.finish_resume(
+        reconciliation.reconciliation_id,
+        succeeded=False,
+    )
+
+    assert restored.status == "retry_ready"
+    assert restored.resolution["resume_succeeded"] is False
 
 
 def test_reconciliation_api_confirms_success_with_external_operation_id(
@@ -833,6 +899,93 @@ def test_security_precheck_matches_static_policy_constraints(monkeypatch):
     document_summary = precheck.json()["tool_access"]["remote_docx_generator_tool"]
     assert salary_summary["decision"] == "REVIEW_REQUIRED"
     assert document_summary["decision"] == "ALLOW"
+
+
+def test_demo_static_assets_disable_stale_cache_and_include_resume_fixes():
+    client = TestClient(create_app())
+
+    index = client.get("/")
+    script = client.get("/static/app.js")
+
+    assert index.status_code == 200
+    assert "v=20260803-decision-history-1" in index.text
+    assert script.status_code == 200
+    assert script.headers["cache-control"] == "no-store"
+    assert "const uniqueOutputs = []" in script.text
+    assert 'await resumeTask({ inChat: true })' in script.text
+
+
+def test_governance_queue_items_include_chinese_friendly_task_context(
+    monkeypatch,
+):
+    import src.service.web_app as web_app
+
+    task = SimpleNamespace(
+        user_query="查询李娜的基本信息，生成收入证明，然后发给王经理",
+        created_at="2026-08-03T17:16:13+08:00",
+        execution_phase="execution",
+        planning_steps=[
+            {
+                "step_id": "step_3",
+                "title": "将收入证明发送给王经理",
+                "intents": ["email.send"],
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        web_app.TaskLogger,
+        "load",
+        classmethod(lambda cls, task_id: task),
+    )
+    monkeypatch.setattr(
+        web_app.TaskLogger,
+        "list_tasks",
+        classmethod(
+            lambda cls, **kwargs: [
+                {
+                    "task_id": "task-previous",
+                    "created_at": "2026-08-03T17:00:00+08:00",
+                },
+                {
+                    "task_id": "task-current",
+                    "created_at": "2026-08-03T17:16:13+08:00",
+                },
+            ]
+        ),
+    )
+
+    result = web_app._enrich_governance_queue_items(
+        [
+            {
+                "task_id": "task-current",
+                "workflow_id": "admin:demo",
+                "step_id": "step_3",
+            }
+        ]
+    )[0]
+
+    assert result["user_query"] == task.user_query
+    assert result["task_created_at"] == task.created_at
+    assert result["step_title"] == "将收入证明发送给王经理"
+    assert result["step_intents"] == ["email.send"]
+    assert result["execution_round"] == 2
+    assert result["execution_round_total"] == 2
+
+
+def test_governance_static_ui_explains_trigger_and_uses_chinese_context():
+    client = TestClient(create_app())
+
+    index = client.get("/")
+    script = client.get("/static/security.js")
+
+    assert "人工核对队列（外部操作状态不确定）" in index.text
+    assert "普通查询失败不会进入这里" in index.text
+    assert "触发时间：" in script.text
+    assert "所属对话/工作流执行轮次：" in script.text
+    assert "用户问题：" in script.text
+    assert "已恢复完成" in script.text
+    assert "文档生成工具" in script.text
+    assert "第 ${numbered[1]} 步" in script.text
 
 
 def test_agent_precheck_enforces_user_agent_roster(monkeypatch):

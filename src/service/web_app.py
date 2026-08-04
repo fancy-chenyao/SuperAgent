@@ -69,6 +69,78 @@ from src.skills.execution_evidence import (
 )
 
 
+class NoStoreStaticFiles(StaticFiles):
+    """Serve the local demo UI without stale JavaScript/CSS caches."""
+
+    async def get_response(self, path: str, scope: dict[str, Any]):
+        response = await super().get_response(path, scope)
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
+
+def _enrich_governance_queue_items(
+    items: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Attach human-readable conversation and step context to queue records."""
+
+    run_cache: dict[str, list[dict[str, Any]]] = {}
+    enriched: list[dict[str, Any]] = []
+    for raw_item in items:
+        item = dict(raw_item)
+        task_id = str(item.get("task_id") or "")
+        workflow_id = str(item.get("workflow_id") or "")
+        try:
+            task = TaskLogger.load(task_id) if task_id else None
+        except Exception:
+            # Queue records must remain operable even if an old task log is
+            # missing or malformed. The technical identifiers below still let
+            # an operator investigate that record.
+            task = None
+        if task is not None:
+            item["user_query"] = str(task.user_query or "")
+            item["task_created_at"] = str(task.created_at or "")
+            item["execution_phase"] = str(task.execution_phase or "")
+            step_id = str(item.get("step_id") or "")
+            step = next(
+                (
+                    value
+                    for value in (task.planning_steps or [])
+                    if isinstance(value, dict)
+                    and str(value.get("step_id") or "") == step_id
+                ),
+                None,
+            )
+            if step:
+                item["step_title"] = str(
+                    step.get("title") or step.get("description") or ""
+                )
+                item["step_intents"] = list(step.get("intents") or [])
+
+        if workflow_id:
+            if workflow_id not in run_cache:
+                try:
+                    runs = TaskLogger.list_tasks(
+                        workflow_id=workflow_id,
+                        execution_phase="execution",
+                    )
+                except Exception:
+                    runs = []
+                run_cache[workflow_id] = sorted(
+                    runs,
+                    key=lambda value: str(value.get("created_at") or ""),
+                )
+            run_ids = [
+                str(value.get("task_id") or "")
+                for value in run_cache[workflow_id]
+            ]
+            if task_id in run_ids:
+                item["execution_round"] = run_ids.index(task_id) + 1
+                item["execution_round_total"] = len(run_ids)
+
+        enriched.append(item)
+    return enriched
+
+
 class MemoryWriteRequest(BaseModel):
     user_id: str
     content: str
@@ -663,7 +735,7 @@ def create_app() -> FastAPI:
     if not web_dir.exists():
         web_dir.mkdir(parents=True, exist_ok=True)
 
-    app.mount("/static", StaticFiles(directory=str(web_dir)), name="static")
+    app.mount("/static", NoStoreStaticFiles(directory=str(web_dir)), name="static")
 
     @app.get("/")
     async def index():
@@ -1307,17 +1379,38 @@ def create_app() -> FastAPI:
             workflow_id=checkpoint.workflow_id,
         )
 
+        try:
+            resumed_reconciliation = get_reconciliation_store().claim_for_resume(
+                task_id=body.task_id,
+                resume_step=body.resume_step,
+                operator=body.user_id,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
         server = Server()
 
         async def event_stream() -> AsyncGenerator[str, None]:
             active_task_id: Optional[str] = body.task_id
             disconnected = False
+            reconciled_step_succeeded = bool(
+                resumed_reconciliation
+                and resumed_reconciliation.resolution.get("resume_from_status")
+                == "confirmed_succeeded"
+            )
             try:
                 async for event in server._run_agent_workflow_with_resume(
                     agent_request, resume_step=body.resume_step, task_id=body.task_id
                 ):
                     event_data = event.get("data") or {}
                     active_task_id = event_data.get("task_id") or active_task_id
+                    if (
+                        resumed_reconciliation
+                        and event.get("event") == "step_result"
+                        and event_data.get("step_id") == resumed_reconciliation.step_id
+                        and str(event_data.get("status") or "").upper() == "SUCCEEDED"
+                    ):
+                        reconciled_step_succeeded = True
                     if await request.is_disconnected():
                         disconnected = True
                         break
@@ -1326,6 +1419,17 @@ def create_app() -> FastAPI:
             except asyncio.CancelledError:
                 disconnected = True
             finally:
+                if resumed_reconciliation is not None:
+                    try:
+                        get_reconciliation_store().finish_resume(
+                            resumed_reconciliation.reconciliation_id,
+                            succeeded=reconciled_step_succeeded,
+                        )
+                    except Exception:
+                        logging.exception(
+                            "failed to finalize reconciliation resume %s",
+                            resumed_reconciliation.reconciliation_id,
+                        )
                 if disconnected:
                     _finalize_disconnected_task(
                         active_task_id,
@@ -1541,11 +1645,13 @@ def create_app() -> FastAPI:
         user_id: Optional[str] = None,
         _operator: str = Depends(_authenticate_governance_operator),
     ):
-        return get_approval_store().list(
-            status=status,
-            workflow_id=workflow_id,
-            task_id=task_id,
-            user_id=user_id,
+        return _enrich_governance_queue_items(
+            get_approval_store().list(
+                status=status,
+                workflow_id=workflow_id,
+                task_id=task_id,
+                user_id=user_id,
+            )
         )
 
     @app.post("/api/security/approvals/{approval_id}/approve")
@@ -1632,10 +1738,12 @@ def create_app() -> FastAPI:
         _operator: str = Depends(_authenticate_governance_operator),
     ):
         """List uncertain side effects that require an explicit human verdict."""
-        return get_reconciliation_store().list(
-            status=status,
-            task_id=task_id,
-            user_id=user_id,
+        return _enrich_governance_queue_items(
+            get_reconciliation_store().list(
+                status=status,
+                task_id=task_id,
+                user_id=user_id,
+            )
         )
 
     def _reconciliation_resume_response(reconciliation: Any) -> dict[str, Any]:

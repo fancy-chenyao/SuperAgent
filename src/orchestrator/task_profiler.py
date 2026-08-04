@@ -424,17 +424,25 @@ def _order_candidates_for_execution(
         }
         for item in base_order
     }
+    prior_names: list[str] = []
     for item in base_order:
-        available_names = [
+        # 只从原文中已经出现的任务推导隐式数据依赖，避免把后续独立任务
+        # 强行变成当前任务的上游。没有文本片段的 inferred 候选仍按融合前
+        # 的插入位置参与依赖解析，以保留员工 ID、薪资等必要前置步骤。
+        inferred_predecessors = [
             candidate.name
-            for candidate in base_order
-            if candidate.name != item.name
+            for candidate in candidates
+            if candidate.provenance == "inferred"
+            and candidate.name != item.name
+            and original_indexes[id(candidate)] < original_indexes[id(item)]
         ]
+        available_names = list(dict.fromkeys(inferred_predecessors + prior_names))
         dependencies[item.name].update(
             name
             for name in _dependency_names(item.name, available_names)
             if name in names and name != item.name
         )
+        prior_names.append(item.name)
 
     ordered: list[IntentCandidate] = []
     completed: set[str] = set()
@@ -495,7 +503,15 @@ def _dependency_names(intent: str, prior_names: list[str]) -> list[str]:
     if intent in {"salary_query", "leave_record_query"}:
         return [name for name in ("employee_information_query",) if name in prior]
     if intent == "travel_service":
-        return [name for name in ("employee_information_query",) if name in prior]
+        # “结合天气给出差/行程提醒” consumes both employee context (when
+        # present) and the preceding weather result.  Keeping this dependency
+        # in TaskProfile lets the governed TaskGraph pass the actual forecast
+        # Artifact into the travel Agent instead of merely running both steps.
+        return [
+            name
+            for name in ("employee_information_query", "weather_query")
+            if name in prior
+        ]
     if intent == "document_generation":
         # “查询/整理/生成文档”是一条传递依赖链。报告已经吸收前面的查询结果时，
         # 文档只直接依赖报告，避免同时建立冗余的跨级依赖。

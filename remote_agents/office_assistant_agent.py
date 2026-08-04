@@ -90,7 +90,6 @@ Important notes:
             result = await self.call_tool(
                 tool_name=tool_name,
                 arguments=params,
-                timeout=10
             )
 
             logger.info(f"[{self.name}] Tool execution completed successfully")

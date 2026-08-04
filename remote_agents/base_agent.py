@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional
 from abc import ABC, abstractmethod
 from contextvars import ContextVar, Token
 import logging
+import os
 import unicodedata
 
 from src.contracts.agent_contract import AgentContract
@@ -261,7 +262,7 @@ class BaseRemoteAgent(ABC):
         tool_name: str,
         arguments: Dict[str, Any],
         tool_service_url: str = "http://127.0.0.1:8011/tool",
-        timeout: int = 10
+        timeout: Optional[int] = None,
     ) -> Any:
         """
         Call a single tool.
@@ -276,6 +277,11 @@ class BaseRemoteAgent(ABC):
             Tool execution result
         """
         import httpx
+
+        if timeout is None:
+            timeout = int(os.getenv("REMOTE_TOOL_TIMEOUT", "120"))
+        if timeout <= 0:
+            raise ValueError("REMOTE_TOOL_TIMEOUT must be greater than zero")
 
         manifest = _authorized_remote_tools.get()
         matching_entries = [

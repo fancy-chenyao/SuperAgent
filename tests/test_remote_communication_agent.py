@@ -75,3 +75,44 @@ def test_communication_agent_queries_contacts_then_sends_notification() -> None:
         "remote_email_tool",
     ]
     assert calls[1][1]["to"] == "wangjing@ccb.com,lina@ccb.com"
+
+
+def test_communication_agent_outputs_partial_notification_without_recipients() -> None:
+    class Extractor:
+        async def extract(self, **_kwargs):
+            return {"subject": "通知"}
+
+    agent = RemoteCommunicationAgent()
+    calls = []
+
+    async def fake_call_tool(*, tool_name, arguments, **_kwargs):
+        calls.append((tool_name, arguments))
+        return {
+            "status": "success",
+            "sent": arguments,
+            "external_operation_id": "email-partial-1",
+        }
+
+    agent.call_tool = fake_call_tool
+    execution_brief = {
+        "assigned_steps": [{"intent": "message_or_email_send", "title": "发送通知"}],
+        "task_profile": {"entities": {}},
+    }
+    messages = [
+        {
+            "role": "user",
+            "content": "EXECUTION_CONTEXT\n"
+            + json.dumps(execution_brief, ensure_ascii=False),
+        }
+    ]
+    tools = [
+        {"name": "remote_contact_query_tool", "parameters": {}},
+        {"name": "remote_email_tool", "parameters": {}},
+    ]
+
+    result = asyncio.run(agent.execute(tools, messages, {}, Extractor()))
+
+    assert result["status"] == "success"
+    assert result["recipients"] == []
+    assert [item[0] for item in calls] == ["remote_email_tool"]
+    assert calls[0][1] == {"subject": "通知", "to": "", "body": ""}

@@ -134,6 +134,43 @@ def test_structured_steps_can_group_compatible_hr_subtasks():
     assert by_id["step_send"].depends_on == ["step_document"]
 
 
+def test_structured_plan_accepts_agent_name_dependency_aliases():
+    state = {
+        "task_profile": {
+            "subtasks": [
+                {"id": "subtask_1", "intent": "employee_information_query", "depends_on": []},
+                {"id": "subtask_2", "intent": "leave_record_query", "depends_on": ["subtask_1"]},
+                {"id": "subtask_3", "intent": "report_generation", "depends_on": ["subtask_2"]},
+            ]
+        }
+    }
+    steps = [
+        {
+            "step_id": "step_hr",
+            "subtask_ids": ["subtask_1"],
+            "intents": ["employee_information_query"],
+            "depends_on": [],
+            "agent_name": "RemoteHRAssistantAgent",
+        },
+        {
+            "step_id": "step_leave",
+            "subtask_ids": ["subtask_2"],
+            "intents": ["leave_record_query"],
+            "depends_on": ["RemoteHRAssistantAgent"],
+            "agent_name": "RemoteOfficeAssistantAgent",
+        },
+        {
+            "step_id": "step_report",
+            "subtask_ids": ["subtask_3"],
+            "intents": ["report_generation"],
+            "depends_on": ["step_leave"],
+            "agent_name": "RemoteReportAgent",
+        },
+    ]
+
+    assert _validate_plan_against_task_profile(steps, state) == []
+
+
 def test_structured_plan_rejects_missing_subtask_coverage():
     state = {
         "task_profile": {

@@ -121,21 +121,6 @@ class ClarificationAnalyzer:
                         )
                     )
 
-            elif intent == "travel_service":
-                if not (
-                    entities.get("employee_id")
-                    or entities.get("employee_name")
-                    or entities.get("people")
-                ):
-                    requirements.append(
-                        self._requirement(
-                            "employee_or_criteria",
-                            intent,
-                            "出差行程查询缺少员工身份，无法确定要读取谁的行程",
-                            "请问要结合哪位员工的出差行程？请提供员工姓名或工号。",
-                        )
-                    )
-
             elif intent == "message_or_email_send":
                 recipient = str(entities.get("recipient") or "").strip()
                 recipient_ready = bool(recipient) and (

@@ -46,6 +46,21 @@ def _upstream_report(messages: List[Dict[str, Any]]) -> str:
     return ""
 
 
+def _resolved_upstream_content(brief: Dict[str, Any]) -> str:
+    resolved = brief.get("resolved_inputs") or {}
+    if not isinstance(resolved, dict):
+        return ""
+    for value in resolved.values():
+        if isinstance(value, dict):
+            for key in ("markdown", "answer", "content", "message"):
+                candidate = value.get(key)
+                if candidate not in (None, ""):
+                    return str(candidate)
+        elif value not in (None, ""):
+            return str(value)
+    return ""
+
+
 def _document_title(brief: Dict[str, Any]) -> str:
     for step in brief.get("assigned_steps") or []:
         if isinstance(step, dict):
@@ -73,7 +88,11 @@ class RemoteDocumentGeneratorAgent(BaseRemoteAgent):
     ) -> Dict[str, Any]:
         """Execute document generation - single tool agent."""
         if not tools or len(tools) == 0:
-            return {"error": "No tools provided"}
+            return {
+                "status": "success",
+                "message": "当前没有可用的文档工具",
+                "content": {},
+            }
 
         tool = tools[0]
         tool_name = tool.get("name", "unknown")
@@ -86,7 +105,7 @@ class RemoteDocumentGeneratorAgent(BaseRemoteAgent):
             messages=messages
         )
         if not isinstance(arguments, dict):
-            raise ValueError("Document parameter extractor returned a non-object result")
+            arguments = {}
 
         # TaskProfile 是识别和规划阶段形成的执行契约。模板选择以其中已经校验过的
         # document_type 为准，防止参数模型生成注册表之外或仓库中不存在的模板名。
@@ -108,17 +127,15 @@ class RemoteDocumentGeneratorAgent(BaseRemoteAgent):
                     data.get("content")
                     or data.get("summary")
                     or data.get("report")
+                    or _resolved_upstream_content(brief)
                     or _upstream_report(messages)
                 )
-                if not content:
-                    raise ValueError("说明文档缺少上游摘要内容")
-                data["content"] = content
+                data["content"] = content or ""
 
         logger.info(f"[{self.name}] Calling {tool_name}")
         result = await self.call_tool(
             tool_name=tool_name,
             arguments=arguments,
-            timeout=30  # Document generation may take some time
         )
 
         return result

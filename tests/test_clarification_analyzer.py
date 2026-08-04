@@ -133,3 +133,30 @@ def test_meeting_without_participants_or_time_asks_two_specific_questions() -> N
         "请提供需要参加会议的人员。",
         "请提供会议日期、时间或可选择的时间范围。",
     ]
+
+
+def test_role_recipient_with_whitespace_is_executable() -> None:
+    query = "查询员工张三的工资，生成收入证明，发邮件通知 HR"
+    profile = _profile(
+        query,
+        {
+            "primary_intent": "salary_query",
+            "intents": [
+                _intent("salary_query", 0.96, "查询员工张三的工资"),
+                _intent("document_generation", 0.94, "生成收入证明"),
+                _intent("message_or_email_send", 0.93, "发邮件通知 HR"),
+            ],
+            "entities": {
+                "employee_name": "张三",
+                "people": ["张三"],
+                "document_type": "income_proof",
+            },
+            "ambiguities": [],
+            "needs_clarification": False,
+            "clarification_questions": [],
+        },
+    )
+
+    assert profile.entities["recipient"] == "HR"
+    assert profile.needs_clarification is False
+    assert profile.missing_fields == []

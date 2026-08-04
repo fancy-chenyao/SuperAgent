@@ -369,6 +369,20 @@ class PolicyEngine:
             result["reason"] = "Operation not allowed from external network"
 
     @staticmethod
+    def _is_governance_administrator(subject: Subject) -> bool:
+        """Return whether trusted attributes identify a governance admin.
+
+        This is intentionally *not* a policy-engine bypass.  It is used only
+        for the demo's approval and environment exceptions; roles, operation
+        modes, scenario fit, grants and clearance are still evaluated by the
+        ordinary authorization rules.
+        """
+
+        grants = {str(item).lower() for item in subject.get_grants()}
+        job_roles = {str(item).lower() for item in subject.get_job_roles()}
+        return "all" in grants or "system_orchestrator" in job_roles
+
+    @staticmethod
     def _bypasses_environment_constraints(subject: Subject) -> bool:
         """Allow the system administrator to operate the demo at any time.
 
@@ -376,9 +390,7 @@ class PolicyEngine:
         roles are still subject to working-hour and network-zone controls.
         """
 
-        grants = {str(item).lower() for item in subject.get_grants()}
-        job_roles = {str(item).lower() for item in subject.get_job_roles()}
-        return "all" in grants or "system_orchestrator" in job_roles
+        return PolicyEngine._is_governance_administrator(subject)
 
     @staticmethod
     def _bypasses_mandatory_review(subject: Subject) -> bool:
@@ -389,9 +401,7 @@ class PolicyEngine:
         into an ALLOW.
         """
 
-        grants = {str(item).lower() for item in subject.get_grants()}
-        job_roles = {str(item).lower() for item in subject.get_job_roles()}
-        return "all" in grants or "system_orchestrator" in job_roles
+        return PolicyEngine._is_governance_administrator(subject)
 
     def _apply_resource_environment_constraints(
         self,

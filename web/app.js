@@ -102,6 +102,9 @@ const routingExcludedView = document.getElementById("routingExcludedView");
 const decisionTopAgentSummary = document.getElementById("decisionTopAgentSummary");
 const decisionDetailTabs = document.getElementById("decisionDetailTabs");
 const decisionDetailPanel = document.getElementById("decisionDetailPanel");
+const decisionConversationSelect = document.getElementById("decisionConversationSelect");
+const decisionRoundSelect = document.getElementById("decisionRoundSelect");
+const decisionHistoryMeta = document.getElementById("decisionHistoryMeta");
 
 let chatMirrorController = null;
 
@@ -369,11 +372,14 @@ let activeConversationTranscript = [];
 let activeConversationId = null;
 let activeConversationCreatedAt = null;
 let activeConversationTaskIds = new Set();
+let activeConversationDecisions = [];
 let coordinatorBuffer = "";
 let clarificationPending = false;
 let pendingClarificationContext = null;
 let coordinatorResponseHandled = false;
 let latestRoutingDecision = null;
+let selectedDecisionConversationId = null;
+let selectedDecisionId = null;
 let latestPlanningFailureMessage = "";
 let conversationContextEntities = {};
 let conversationContextArtifacts = [];
@@ -393,6 +399,7 @@ const LEGACY_CHAT_HISTORY_KEY_PREFIX = "cooragent.chatHistory.v1";
 const ACTIVE_CONVERSATION_LIMIT = 12;
 const CONVERSATION_TRANSCRIPT_LIMIT = 100;
 const CONVERSATION_MESSAGE_CHAR_LIMIT = 12000;
+const DECISION_HISTORY_LIMIT = 5;
 
 mermaid.initialize({ startOnLoad: false, theme: "default" });
 
@@ -853,6 +860,54 @@ const captureAssistantConversationContext = () => {
 const getChatHistoryKey = (userId) => `${CHAT_HISTORY_KEY_PREFIX}:${encodeURIComponent(userId)}`;
 const getLegacyChatHistoryKey = (userId) => `${LEGACY_CHAT_HISTORY_KEY_PREFIX}:${encodeURIComponent(userId)}`;
 
+const cloneDecisionEventData = (value) => {
+  if (!value || typeof value !== "object") return {};
+  try {
+    return JSON.parse(JSON.stringify(value));
+  } catch (err) {
+    console.warn("Failed to clone routing decision:", err);
+    return {};
+  }
+};
+
+const normalizeStoredDecision = (decision, fallbackRound = 1) => {
+  if (!decision || typeof decision !== "object") return null;
+  const eventData = cloneDecisionEventData(decision.eventData || decision.event_data);
+  const workflowId = String(
+    decision.workflowId
+      || decision.workflow_id
+      || eventData.workflow_id
+      || ""
+  ).trim();
+  const taskIds = Array.isArray(decision.taskIds)
+    ? [...new Set(decision.taskIds.map(String).filter(Boolean))]
+    : [decision.taskId || eventData.task_id]
+      .map((value) => String(value || ""))
+      .filter(Boolean);
+  const round = Math.max(1, Number.parseInt(decision.round, 10) || fallbackRound);
+  const createdAt = decision.createdAt || decision.created_at || new Date().toISOString();
+  const query = String(
+    decision.query
+      || eventData.task_profile?.resolved_request
+      || eventData.task_profile?.business_goal
+      || ""
+  ).trim();
+  const id = String(
+    decision.id
+      || (workflowId ? `decision:${workflowId}` : `decision:${createdAt}:${round}`)
+  );
+  return {
+    id,
+    round,
+    workflowId,
+    taskIds,
+    query,
+    createdAt,
+    updatedAt: decision.updatedAt || decision.updated_at || createdAt,
+    eventData,
+  };
+};
+
 const normalizeStoredConversation = (conversation) => {
   if (!conversation || typeof conversation !== "object") return null;
   const messages = Array.isArray(conversation.messages)
@@ -877,6 +932,14 @@ const normalizeStoredConversation = (conversation) => {
     : [];
   if (!messages.length) return null;
   const firstUserMessage = messages.find((message) => message.role === "user")?.content || "新对话";
+  const decisions = (Array.isArray(conversation.decisions) ? conversation.decisions : [])
+    .map((decision, index) => normalizeStoredDecision(decision, index + 1))
+    .filter(Boolean)
+    .sort((left, right) => (
+      left.round - right.round
+      || String(left.createdAt).localeCompare(String(right.createdAt))
+    ))
+    .slice(-DECISION_HISTORY_LIMIT);
   return {
     id: String(conversation.id || `${Date.now()}-${Math.random().toString(16).slice(2)}`),
     title: String(conversation.title || firstUserMessage).trim().slice(0, 48),
@@ -903,6 +966,7 @@ const normalizeStoredConversation = (conversation) => {
     contextReferences: Array.isArray(conversation.contextReferences)
       ? conversation.contextReferences.map((item) => ({ ...item }))
       : [],
+    decisions,
     messages,
   };
 };
@@ -973,6 +1037,11 @@ const saveActiveConversation = () => {
     currentResolvedRequest,
     currentRequestEntities: { ...currentRequestEntities },
     contextReferences: currentContextReferences.map((item) => ({ ...item })),
+    decisions: activeConversationDecisions.map((decision) => ({
+      ...decision,
+      taskIds: [...decision.taskIds],
+      eventData: cloneDecisionEventData(decision.eventData),
+    })),
     messages: activeConversationTranscript.map((message) => ({ ...message })),
   });
   persistChatHistory(userId, conversations);
@@ -992,6 +1061,7 @@ const renderChatHistory = () => {
   if (!userId) {
     conversationHistoryMeta.textContent = "输入 User ID 后显示对应记录";
     clearChatHistoryBtn.disabled = true;
+    renderDecisionHistoryControls();
     scheduleChatMirror();
     return;
   }
@@ -1003,6 +1073,7 @@ const renderChatHistory = () => {
     empty.className = "conversation-history-empty";
     empty.textContent = "暂无对话";
     conversationHistoryList.appendChild(empty);
+    renderDecisionHistoryControls();
     scheduleChatMirror();
     return;
   }
@@ -1021,6 +1092,7 @@ const renderChatHistory = () => {
     item.addEventListener("click", () => loadConversation(conversation));
     conversationHistoryList.appendChild(item);
   });
+  renderDecisionHistoryControls();
   scheduleChatMirror();
 };
 
@@ -1093,6 +1165,13 @@ const loadConversation = (conversation) => {
   activeConversationId = normalized.id;
   activeConversationCreatedAt = normalized.createdAt;
   activeConversationTaskIds = new Set(normalized.taskIds || []);
+  activeConversationDecisions = (normalized.decisions || []).map((decision) => ({
+    ...decision,
+    taskIds: [...decision.taskIds],
+    eventData: cloneDecisionEventData(decision.eventData),
+  }));
+  selectedDecisionConversationId = normalized.id;
+  selectedDecisionId = activeConversationDecisions.at(-1)?.id || null;
   activeConversationTranscript = normalized.messages.map((message) => ({ ...message }));
   activeConversationMessages = activeConversationTranscript
     .slice(-ACTIVE_CONVERSATION_LIMIT)
@@ -1134,16 +1213,20 @@ const clearChatHistory = async () => {
   const conversations = userId ? loadChatHistory(userId) : [];
   if (!userId || !conversations.length) return;
   if (!window.confirm(`确定清空用户 ${userId} 的最近对话吗？`)) return;
-  const workflowIds = [...new Set(
-    conversations
-      .map((conversation) => String(conversation.workflowId || "").trim())
-      .filter(Boolean)
-  )];
-  const taskIds = [...new Set(
-    conversations.flatMap((conversation) => (
-      Array.isArray(conversation.taskIds) ? conversation.taskIds : []
-    )).map(String).filter(Boolean)
-  )];
+  const workflowIds = [...new Set(conversations.flatMap((conversation) => [
+    conversation.workflowId,
+    ...(Array.isArray(conversation.decisions)
+      ? conversation.decisions.map((decision) => decision.workflowId)
+      : []),
+  ]).map((value) => String(value || "").trim()).filter(Boolean))];
+  const taskIds = [...new Set(conversations.flatMap((conversation) => [
+    ...(Array.isArray(conversation.taskIds) ? conversation.taskIds : []),
+    ...(Array.isArray(conversation.decisions)
+      ? conversation.decisions.flatMap((decision) => (
+        Array.isArray(decision.taskIds) ? decision.taskIds : []
+      ))
+      : []),
+  ]).map((value) => String(value || "").trim()).filter(Boolean))];
   try {
     await Promise.all(taskIds.map(async (taskId) => {
       const response = await fetch(`/api/tasks/${encodeURIComponent(taskId)}`, {
@@ -1175,7 +1258,10 @@ const clearChatHistory = async () => {
   resetActiveConversation(userId);
   renderChatHistory();
   if (window.SecurityModule?.loadSecurityReconciliations) {
-    window.SecurityModule.loadSecurityReconciliations();
+    await window.SecurityModule.loadSecurityReconciliations();
+  }
+  if (window.SecurityModule?.loadSecurityApprovals) {
+    await window.SecurityModule.loadSecurityApprovals();
   }
 };
 
@@ -1194,6 +1280,9 @@ const resetActiveConversation = (userId = userIdInput.value.trim()) => {
   pendingClarificationContext = null;
   coordinatorResponseHandled = false;
   latestRoutingDecision = null;
+  activeConversationDecisions = [];
+  selectedDecisionConversationId = null;
+  selectedDecisionId = null;
   conversationContextEntities = {};
   conversationContextArtifacts = [];
   currentRequestQuery = "";
@@ -1862,8 +1951,26 @@ const formatStepResultContent = (data) => {
     : {};
   const outputNames = Object.keys(outputs);
   let value = outputs;
-  if (outputNames.length === 1) {
-    value = outputs[outputNames[0]];
+  if (outputNames.length > 0) {
+    // One Agent result may be published under several logical output aliases
+    // for downstream binding.  Those aliases are not separate business rows;
+    // rendering every identical value produced four duplicate tables for the
+    // HR query.  Collapse only byte-equivalent values and keep genuinely
+    // different outputs keyed by their logical names.
+    const uniqueOutputs = [];
+    const seen = new Set();
+    outputNames.forEach((name) => {
+      const candidate = outputs[name];
+      let fingerprint;
+      try { fingerprint = JSON.stringify(candidate); } catch (e) { fingerprint = `${candidate}`; }
+      if (!seen.has(fingerprint)) {
+        seen.add(fingerprint);
+        uniqueOutputs.push([name, candidate]);
+      }
+    });
+    value = uniqueOutputs.length === 1
+      ? uniqueOutputs[0][1]
+      : Object.fromEntries(uniqueOutputs);
   }
   if (outputNames.length > 0) {
     return typeof value === "string" ? value : JSON.stringify(value, null, 2);
@@ -2511,6 +2618,147 @@ const escapeHtml = (str) => {
   return div.innerHTML;
 };
 
+const getDecisionConsoleConversations = () => {
+  const userId = userIdInput.value.trim();
+  if (!userId) return [];
+  const conversations = loadChatHistory(userId);
+  if (activeConversationId && activeConversationDecisions.length) {
+    const activeIndex = conversations.findIndex((item) => item.id === activeConversationId);
+    const activeSnapshot = {
+      id: activeConversationId,
+      title: conversations[activeIndex]?.title
+        || activeConversationTranscript.find((message) => message.role === "user")?.content
+        || "当前对话",
+      updatedAt: new Date().toISOString(),
+      decisions: activeConversationDecisions,
+    };
+    if (activeIndex >= 0) {
+      conversations[activeIndex] = { ...conversations[activeIndex], ...activeSnapshot };
+    } else {
+      conversations.unshift(activeSnapshot);
+    }
+  }
+  return conversations.filter((conversation) => conversation.decisions?.length);
+};
+
+const decisionConversationLabel = (conversation) => {
+  const title = String(conversation.title || "未命名对话").trim();
+  const time = formatConversationTime(conversation.updatedAt);
+  return time ? `${title} · ${time}` : title;
+};
+
+const decisionRoundLabel = (decision) => {
+  const query = String(decision.query || "未保存原始问题").trim();
+  const shortQuery = query.length > 28 ? `${query.slice(0, 28)}…` : query;
+  const time = formatConversationTime(decision.createdAt);
+  return `第 ${decision.round} 轮 · ${shortQuery}${time ? ` · ${time}` : ""}`;
+};
+
+const rememberRoutingDecision = (eventData) => {
+  if (!activeConversationId || !eventData || typeof eventData !== "object") return null;
+  const now = new Date().toISOString();
+  const workflowId = String(eventData.workflow_id || workflowIdInput?.value.trim() || "").trim();
+  const taskId = String(eventData.task_id || "").trim();
+  const profile = eventData.task_profile || {};
+  const query = String(
+    profile.resolved_request
+      || profile.business_goal
+      || currentResolvedRequest
+      || currentRequestQuery
+      || originalUserQuery
+      || ""
+  ).trim();
+  const existingIndex = workflowId
+    ? activeConversationDecisions.findIndex((item) => item.workflowId === workflowId)
+    : -1;
+
+  if (existingIndex >= 0) {
+    const existing = activeConversationDecisions[existingIndex];
+    const updated = {
+      ...existing,
+      query: query || existing.query,
+      updatedAt: now,
+      taskIds: [...new Set([...existing.taskIds, taskId].filter(Boolean))],
+      eventData: cloneDecisionEventData(eventData),
+    };
+    activeConversationDecisions.splice(existingIndex, 1, updated);
+    selectedDecisionConversationId = activeConversationId;
+    selectedDecisionId = updated.id;
+    return updated;
+  }
+
+  const nextRound = activeConversationDecisions.reduce(
+    (maximum, item) => Math.max(maximum, Number(item.round) || 0),
+    0
+  ) + 1;
+  const decision = normalizeStoredDecision({
+    id: workflowId
+      ? `${activeConversationId}:decision:${workflowId}`
+      : `${activeConversationId}:decision:${now}:${nextRound}`,
+    round: nextRound,
+    workflowId,
+    taskIds: taskId ? [taskId] : [],
+    query,
+    createdAt: now,
+    updatedAt: now,
+    eventData,
+  }, nextRound);
+  if (!decision) return null;
+  activeConversationDecisions = [
+    ...activeConversationDecisions,
+    decision,
+  ].slice(-DECISION_HISTORY_LIMIT);
+  selectedDecisionConversationId = activeConversationId;
+  selectedDecisionId = decision.id;
+  return decision;
+};
+
+const renderDecisionHistoryControls = ({
+  conversationId = selectedDecisionConversationId,
+  decisionId = selectedDecisionId,
+  render = true,
+} = {}) => {
+  if (!decisionConversationSelect || !decisionRoundSelect) return null;
+  const conversations = getDecisionConsoleConversations();
+  if (!conversations.length) {
+    decisionConversationSelect.innerHTML = '<option value="">暂无历史决策</option>';
+    decisionRoundSelect.innerHTML = '<option value="">暂无决策轮次</option>';
+    decisionConversationSelect.disabled = true;
+    decisionRoundSelect.disabled = true;
+    if (decisionHistoryMeta) decisionHistoryMeta.textContent = "每个对话最多保存五轮决策。";
+    return null;
+  }
+
+  const selectedConversation = conversations.find((item) => item.id === conversationId)
+    || conversations.find((item) => item.id === activeConversationId)
+    || conversations[0];
+  selectedDecisionConversationId = selectedConversation.id;
+  decisionConversationSelect.disabled = false;
+  decisionConversationSelect.innerHTML = conversations.map((conversation) => (
+    `<option value="${escapeHtml(conversation.id)}">${escapeHtml(decisionConversationLabel(conversation))}</option>`
+  )).join("");
+  decisionConversationSelect.value = selectedConversation.id;
+
+  const decisions = [...selectedConversation.decisions]
+    .sort((left, right) => right.round - left.round);
+  const selectedDecision = decisions.find((item) => item.id === decisionId)
+    || decisions[0];
+  selectedDecisionId = selectedDecision.id;
+  decisionRoundSelect.disabled = false;
+  decisionRoundSelect.innerHTML = decisions.map((decision) => (
+    `<option value="${escapeHtml(decision.id)}">${escapeHtml(decisionRoundLabel(decision))}</option>`
+  )).join("");
+  decisionRoundSelect.value = selectedDecision.id;
+
+  if (render) {
+    renderRoutingDecision(selectedDecision.eventData, {
+      conversation: selectedConversation,
+      decision: selectedDecision,
+    });
+  }
+  return selectedDecision;
+};
+
 const renderDecisionDetailControls = (sections) => {
   if (!decisionDetailTabs || !decisionDetailPanel) return;
   const visibleSections = sections.filter((section) => section && !section.hidden);
@@ -2557,7 +2805,7 @@ const renderDecisionDetailControls = (sections) => {
     </div>`;
 };
 
-const renderRoutingDecision = (eventData) => {
+const renderRoutingDecision = (eventData, historyContext = null) => {
   if (!mainAgentDecisionCard) return;
   const profile = eventData?.task_profile || {};
   const route = eventData?.routing_decision || {};
@@ -2587,6 +2835,17 @@ const renderRoutingDecision = (eventData) => {
   mainAgentDecisionCard.style.display = "";
   routingDecisionBadge.textContent = `${decision} · ${Math.round((route.confidence || 0) * 100)}%`;
   routingDecisionBadge.className = `tag ${decision === "DISPATCH" ? "accent" : "warn"}`;
+  if (decisionHistoryMeta) {
+    const historyDecision = historyContext?.decision;
+    const historyConversation = historyContext?.conversation;
+    if (historyDecision) {
+      const timestamp = formatConversationTime(historyDecision.createdAt);
+      const query = historyDecision.query || "未保存原始问题";
+      decisionHistoryMeta.textContent = `${historyConversation?.title || "当前对话"} · 第 ${historyDecision.round} 轮${timestamp ? ` · ${timestamp}` : ""} · ${query}`;
+    } else {
+      decisionHistoryMeta.textContent = "当前决策";
+    }
+  }
 
   const profileItems = [
     ["主意图", profile.intent || "-"],
@@ -3117,6 +3376,7 @@ const handleEvent = (eventName, payload) => {
   }
   if (eventName === "routing_decision") {
     latestRoutingDecision = payload.data || {};
+    const storedDecision = rememberRoutingDecision(latestRoutingDecision);
     const profile = latestRoutingDecision.task_profile || {};
     mergeConversationContextEntities(profile.entities || {});
     currentRequestEntities = profile.entities && typeof profile.entities === "object"
@@ -3137,8 +3397,15 @@ const handleEvent = (eventName, payload) => {
     } else {
       rememberPendingClarification(latestRoutingDecision);
     }
-    renderRoutingDecision(payload.data || {});
     saveActiveConversation();
+    if (storedDecision) {
+      renderDecisionHistoryControls({
+        conversationId: activeConversationId,
+        decisionId: storedDecision.id,
+      });
+    } else {
+      renderRoutingDecision(payload.data || {});
+    }
     return;
   }
   if (eventName === "start_of_agent") {
@@ -5057,6 +5324,25 @@ const runSelectedHealthCheck = async () => {
 runBtn.addEventListener("click", runWorkflow);
 stopBtn.addEventListener("click", stopWorkflow);
 if (newConversationBtn) newConversationBtn.addEventListener("click", () => resetActiveConversation());
+if (decisionConversationSelect) {
+  decisionConversationSelect.addEventListener("change", () => {
+    selectedDecisionConversationId = decisionConversationSelect.value || null;
+    selectedDecisionId = null;
+    renderDecisionHistoryControls({
+      conversationId: selectedDecisionConversationId,
+      decisionId: null,
+    });
+  });
+}
+if (decisionRoundSelect) {
+  decisionRoundSelect.addEventListener("change", () => {
+    selectedDecisionId = decisionRoundSelect.value || null;
+    renderDecisionHistoryControls({
+      conversationId: selectedDecisionConversationId,
+      decisionId: selectedDecisionId,
+    });
+  });
+}
 messageInput.addEventListener("input", resizeMessageInput);
 messageInput.addEventListener("keydown", (event) => {
   if (event.key === "Enter" && !event.shiftKey) {
@@ -5586,7 +5872,7 @@ const copyTaskLog = async () => {
   }
 };
 
-const resumeTask = async () => {
+const resumeTask = async ({ inChat = false } = {}) => {
   const taskId = resumeTaskIdInput.value.trim();
   const workflowId = resumeWorkflowIdInput.value.trim();
   const resumeStep = parseInt(resumeStepInput.value, 10);
@@ -5597,7 +5883,19 @@ const resumeTask = async () => {
     return;
   }
 
-  resumeOutput.textContent = "";
+  if (inChat) {
+    switchTab("chat");
+    currentRunContext = "executing";
+    executionInProgress = true;
+    currentRunHasError = false;
+    setChatPlanActionsDisabled(true);
+    updateChatExecutionProgress("running", "正在从失败步骤继续原任务...");
+    setStatus("Resuming", true);
+    runBtn.disabled = true;
+    userIdInput.disabled = true;
+  } else {
+    resumeOutput.textContent = "";
+  }
   resumeBtn.disabled = true;
   resumeStopBtn.disabled = false;
 
@@ -5629,11 +5927,16 @@ const resumeTask = async () => {
     let buffer = "";
 
     const appendResume = (text) => {
+      if (inChat) return;
       resumeOutput.textContent += text;
       resumeOutput.scrollTop = resumeOutput.scrollHeight;
     };
 
     const handleResumeEvent = (eventName, payload) => {
+      if (inChat) {
+        handleEvent(eventName, payload);
+        return;
+      }
       if (eventName === "messages") {
         const content = payload.data?.delta?.content || payload.data?.message || "";
         appendResume(content);
@@ -5674,8 +5977,25 @@ const resumeTask = async () => {
       buffer = parseSse(buffer, handleResumeEvent);
     }
   } catch (err) {
-    resumeOutput.textContent += `\n[error] ${err.message || err}\n`;
+    if (inChat) {
+      currentRunHasError = true;
+      errorStepCard(err.message || String(err));
+      updateChatExecutionProgress("error", `恢复失败：${err.message || err}`);
+      setStatus("Resume Failed", false);
+      throw err;
+    } else {
+      resumeOutput.textContent += `\n[error] ${err.message || err}\n`;
+    }
   } finally {
+    if (inChat) {
+      currentRunContext = null;
+      executionInProgress = false;
+      runBtn.disabled = false;
+      userIdInput.disabled = false;
+      if (newConversationBtn) newConversationBtn.disabled = false;
+      if (!currentRunHasError) captureAssistantConversationContext();
+      scrollChatToLatest();
+    }
     resumeBtn.disabled = false;
     resumeStopBtn.disabled = true;
     resumeAbortController = null;
@@ -5743,16 +6063,12 @@ window.resumeApprovedTask = async ({
   resume_step,
   user_id,
 }) => {
-  const tasksTab = document.querySelector('.tab[data-tab="tasks"]');
-  if (tasksTab) tasksTab.click();
   selectedTaskId = task_id;
   resumeTaskIdInput.value = task_id || "";
   resumeWorkflowIdInput.value = workflow_id || "";
   resumeStepInput.value = Number(resume_step) || 1;
   resumeUserIdInput.value = user_id || "test";
-  resumePanel.style.display = "";
-  resumePanel.scrollIntoView({ behavior: "smooth", block: "start" });
-  await resumeTask();
+  await resumeTask({ inChat: true });
   if (window.SecurityModule?.loadSecurityApprovals) {
     window.SecurityModule.loadSecurityApprovals();
   }
@@ -5809,11 +6125,18 @@ clearResumeOutputBtn.addEventListener("click", () => {
   const userIdInput = document.getElementById("userId");
   if (demoRole && userIdInput && demoRole.value && (!userIdInput.value || userIdInput.value === "test")) {
     userIdInput.value = demoRole.value;
+    activeConversationUserId = demoRole.value;
+    renderChatHistory();
   }
   if (demoRole) {
     demoRole.addEventListener("change", function() {
       if (userIdInput && demoRole.value) {
         userIdInput.value = demoRole.value;
+        if (activeConversationUserId !== demoRole.value) {
+          resetActiveConversation(demoRole.value);
+        } else {
+          renderChatHistory();
+        }
       }
       if (window.SecurityModule && window.SecurityModule.loadUserSecurityProfile && demoRole.value) {
         window.SecurityModule.loadUserSecurityProfile(demoRole.value);

@@ -82,24 +82,13 @@ class RemoteCommunicationAgent(BaseRemoteAgent):
         email_tool = _tool_by_name(tools, "remote_email_tool")
         if _is_notification_step(messages) and email_tool:
             recipients = _notification_recipients(messages)
-            if not recipients:
-                return {"status": "failed", "error": "通知任务没有可解析的收件人"}
 
             contacts_result: Dict[str, Any] = {"contacts": []}
-            if contact_tool:
+            if contact_tool and recipients:
                 contacts_result = await self.call_tool(
                     tool_name="remote_contact_query_tool",
                     arguments={"names": recipients},
                 )
-                unresolved = contacts_result.get("unresolved_names") or []
-                contacts = contacts_result.get("contacts") or []
-                if unresolved or not contacts:
-                    return {
-                        "status": "failed",
-                        "error": "部分通知对象没有可用联系方式",
-                        "unresolved_recipients": unresolved or recipients,
-                        "contact_lookup": contacts_result,
-                    }
 
             emails = list(
                 dict.fromkeys(
@@ -108,12 +97,6 @@ class RemoteCommunicationAgent(BaseRemoteAgent):
                     if str(contact.get("email") or "").strip()
                 )
             )
-            if not emails:
-                return {
-                    "status": "failed",
-                    "error": "通知对象没有可用邮箱",
-                    "contact_lookup": contacts_result,
-                }
 
             email_arguments = await parameter_extractor.extract(
                 agent_name=self.name,
@@ -122,9 +105,14 @@ class RemoteCommunicationAgent(BaseRemoteAgent):
                 messages=messages
                 + [{"role": "assistant", "content": json.dumps(contacts_result, ensure_ascii=False)}],
             )
-            email_arguments["to"] = ",".join(emails)
-            if not str(email_arguments.get("body") or "").strip():
-                return {"status": "failed", "error": "未能根据会议结果生成通知正文"}
+            if not isinstance(email_arguments, dict):
+                email_arguments = {}
+            if emails:
+                email_arguments["to"] = ",".join(emails)
+            else:
+                email_arguments.setdefault("to", "")
+            email_arguments.setdefault("subject", "")
+            email_arguments.setdefault("body", "")
 
             sent = await self.call_tool(
                 tool_name="remote_email_tool",
@@ -132,9 +120,12 @@ class RemoteCommunicationAgent(BaseRemoteAgent):
             )
             return {
                 "status": "success",
-                "message": f"已向 {len(emails)} 个参会邮箱发送通知",
+                "message": (
+                    f"已输出通知内容，匹配到 {len(emails)} 个参会邮箱"
+                ),
                 "recipients": recipients,
                 "resolved_contacts": contacts_result.get("contacts") or [],
+                "unresolved_recipients": contacts_result.get("unresolved_names") or [],
                 "sent": sent.get("sent") or sent,
             }
 

@@ -2,6 +2,7 @@ from pathlib import Path
 
 
 APP_JS = Path(__file__).resolve().parents[1] / "web" / "app.js"
+INDEX_HTML = Path(__file__).resolve().parents[1] / "web" / "index.html"
 
 
 def _source() -> str:
@@ -119,9 +120,39 @@ def test_clear_conversation_cascades_backend_history_before_local_storage():
     assert 'fetch(`/api/tasks/${encodeURIComponent(taskId)}`' in source
     assert 'fetch(`/api/conversation-history?${query}`' in source
     assert "headers: window.getGovernanceAuthHeaders(false)" in source
+    assert "conversation.decisions.map((decision) => decision.workflowId)" in source
+    assert "conversation.decisions.flatMap((decision)" in source
+    assert "Array.isArray(decision.taskIds) ? decision.taskIds : []" in source
     fetch_index = source.index('fetch(`/api/conversation-history?${query}`')
     local_delete_index = source.index(
         "localStorage.removeItem(getChatHistoryKey(userId))"
     )
     assert fetch_index < local_delete_index
+
+
+def test_decision_console_selects_conversation_and_keeps_five_rounds():
+    source = _source()
+    index = INDEX_HTML.read_text(encoding="utf-8")
+
+    assert 'id="decisionConversationSelect"' in index
+    assert 'id="decisionRoundSelect"' in index
+    assert "const DECISION_HISTORY_LIMIT = 5" in source
+    assert "].slice(-DECISION_HISTORY_LIMIT)" in source
+    assert "activeConversationDecisions.findIndex((item) => item.workflowId === workflowId)" in source
+    assert "const rememberRoutingDecision = (eventData)" in source
+    assert "const renderDecisionHistoryControls = ({" in source
+    assert "decisions: activeConversationDecisions.map" in source
+
+
+def test_routing_decision_is_saved_before_history_console_renders():
+    source = _source()
+    event_branch = source[source.index('if (eventName === "routing_decision")'):]
+
+    remember_index = event_branch.index(
+        "const storedDecision = rememberRoutingDecision(latestRoutingDecision)"
+    )
+    save_index = event_branch.index("saveActiveConversation()")
+    render_index = event_branch.index("renderDecisionHistoryControls({")
+
+    assert remember_index < save_index < render_index
 

@@ -203,6 +203,41 @@ body {
   border-left: 4px solid #2f7cff;
 }
 
+.decision-history-toolbar {
+  display: grid;
+  grid-template-columns: minmax(180px, 1.4fr) minmax(150px, 1fr);
+  gap: 10px;
+  margin: 2px 0 8px;
+}
+
+.decision-history-toolbar label {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.decision-history-toolbar select {
+  width: 100%;
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid rgba(20, 24, 40, 0.12);
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.9);
+  color: var(--text);
+  font: inherit;
+}
+
+.decision-history-meta {
+  min-height: 18px;
+  margin-bottom: 10px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
 .decision-profile {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
@@ -408,6 +443,10 @@ body {
 }
 
 @media (max-width: 640px) {
+  .decision-history-toolbar {
+    grid-template-columns: 1fr;
+  }
+
   .decision-profile {
     grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
   }
@@ -3286,6 +3325,38 @@ button.small {
 .sec-event-detail {
   font-size: 12px;
   line-height: 1.8;
+}
+
+.sec-governance-context {
+  padding: 9px 10px;
+  margin: 7px 0 9px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.56);
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.65;
+}
+
+.sec-governance-query {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.sec-governance-technical {
+  margin: 6px 0 9px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.sec-governance-technical summary {
+  cursor: pointer;
+  user-select: none;
+}
+
+.sec-governance-technical div {
+  margin-top: 4px;
+  overflow-wrap: anywhere;
+  font-family: "Microsoft YaHei Mono", "Consolas", "Monaco", monospace;
 }
 
 .governance-timeline {

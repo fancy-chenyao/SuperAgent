@@ -586,6 +586,48 @@ def test_t7_email_step_is_classified_as_send_not_read():
     assert step.is_read_only is False
 
 
+def test_document_generation_preserves_generate_operation_mode():
+    """Concrete resource verbs must not be collapsed to generic ``write``."""
+    graph = plan_to_task_graph(
+        [
+            {
+                "agent_name": "RemoteDocumentGeneratorAgent",
+                # Even stale/untrusted planner output cannot replace the
+                # trusted single-mode resource verb with generic write.
+                "operation_mode": "write",
+            }
+        ],
+        task_id="document-generate-mode",
+    )
+
+    step = graph.steps[0]
+    assert step.operation_mode == "generate"
+    assert step.is_read_only is False
+
+
+def test_document_subtask_generate_does_not_get_recollapsed_to_write():
+    graph = plan_to_task_graph(
+        [
+            {
+                "agent_name": "RemoteDocumentGeneratorAgent",
+                "subtask_ids": ["make-document"],
+            }
+        ],
+        task_id="document-subtask-generate-mode",
+        subtasks=[
+            {
+                "id": "make-document",
+                "intent": "document_generation",
+                "action": "generate",
+                "depends_on": [],
+            }
+        ],
+    )
+
+    assert graph.steps[0].operation_mode == "generate"
+    assert graph.steps[0].operation_mode_source == "task_profile_action"
+
+
 def test_pure_query_agent_stays_read_only():
     g = plan_to_task_graph(
         [{"agent_name": "RemoteHRAssistantAgent", "title": "query"}], task_id="t"

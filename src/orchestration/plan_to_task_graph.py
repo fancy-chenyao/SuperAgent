@@ -188,6 +188,21 @@ def _derive_operation_mode(
 
     if registered:
         base_mode = _classify_modes(config_modes)
+        effective_config_modes = {
+            str(mode).lower()
+            for mode in config_modes
+            if str(mode).lower() != "delegate"
+        }
+        # Preserve a single concrete mutation verb (generate/export/create/...)
+        # end-to-end.  Collapsing it to generic ``write`` makes the scheduler's
+        # trusted action disagree with the resource policy, e.g. a document
+        # generator that allows ``generate`` is incorrectly denied as
+        # ``write``.  Mixed-mode agents still use the conservative class below
+        # until a trusted task-profile action selects the invocation mode.
+        if len(effective_config_modes) == 1:
+            concrete_mode = next(iter(effective_config_modes))
+            if concrete_mode not in _READ_MODES:
+                base_mode = concrete_mode
         base_source = "agent_config"
         base_reason = f"agent_config modes={sorted({str(m).lower() for m in config_modes})}"
         # Some Agents deliberately expose both query and mutation tools.  The
@@ -200,15 +215,32 @@ def _derive_operation_mode(
             for mode in config_modes
             if str(mode).lower() != "delegate"
         }
-        if trusted_task_mode in configured_mode_classes:
+        trusted_task_class = (
+            _classify_single(trusted_task_mode)
+            if trusted_task_mode
+            else None
+        )
+        if trusted_task_mode in effective_config_modes:
+            # The server-owned task profile chose an exact verb supported by
+            # the resource.  Preserve it (notably ``generate``) for policy
+            # enforcement and audit output.
             base_mode = str(trusted_task_mode)
             base_source = "task_profile_action"
             base_reason = (
-                f"server task-profile action selected {trusted_task_mode} "
+                f"server task-profile action selected exact mode "
+                f"{trusted_task_mode} from configured modes="
+                f"{sorted(effective_config_modes)}"
+            )
+        elif trusted_task_class in configured_mode_classes:
+            base_mode = str(trusted_task_class)
+            base_source = "task_profile_action"
+            base_reason = (
+                f"server task-profile action selected {trusted_task_class} "
                 f"from configured modes={sorted(configured_mode_classes)}"
             )
         # A caller "write" hint may raise a read baseline to write.
-        if agent_name in write_agents and _MODE_RANK["write"] > _MODE_RANK[base_mode]:
+        base_rank = _MODE_RANK[_classify_single(base_mode)]
+        if agent_name in write_agents and _MODE_RANK["write"] > base_rank:
             base_mode = "write"
             base_source = "caller_write_agents"
             base_reason = "caller-declared write raised read baseline"
@@ -224,8 +256,9 @@ def _derive_operation_mode(
 
     if explicit_mode:
         exp_mode = _classify_single(explicit_mode)
+        base_rank = _MODE_RANK[_classify_single(base_mode)]
         # Planner may only escalate risk, never de-escalate a side effect.
-        if _MODE_RANK[exp_mode] > _MODE_RANK[base_mode]:
+        if _MODE_RANK[exp_mode] > base_rank:
             return (
                 exp_mode,
                 "planner_upgrade",
@@ -531,12 +564,15 @@ def plan_to_task_graph(
                 completion_conditions.append(CompletionCondition(**condition))
 
         trusted_modes = [
-            _classify_single(str(subtask_by_id[subtask_id].get("action") or ""))
+            str(subtask_by_id[subtask_id].get("action") or "").lower()
             for subtask_id in _subtask_ids_for(raw)
             if subtask_id in subtask_by_id
         ]
         trusted_task_mode = (
-            max(trusted_modes, key=lambda value: _MODE_RANK[value])
+            max(
+                trusted_modes,
+                key=lambda value: _MODE_RANK[_classify_single(value)],
+            )
             if trusted_modes
             else None
         )

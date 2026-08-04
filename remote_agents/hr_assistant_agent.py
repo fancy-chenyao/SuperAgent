@@ -152,7 +152,6 @@ class RemoteHRAssistantAgent(BaseRemoteAgent):
                 person_result = await self.call_tool(
                     tool_name="remote_person_info_tool",
                     arguments=person_params,
-                    timeout=10
                 )
 
                 # Extract person list from the result
@@ -200,7 +199,6 @@ class RemoteHRAssistantAgent(BaseRemoteAgent):
                 salary_result = await self.call_tool(
                     tool_name="remote_salary_info_tool",
                     arguments=salary_params,
-                    timeout=10
                 )
 
                 # Extract salary list from the result

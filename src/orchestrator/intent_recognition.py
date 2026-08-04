@@ -357,7 +357,9 @@ _LEAVE_QUERY_SUBJECT_PATTERN = (
     r"(?:(?:请问(?:一下)?|请(?:帮我|帮忙)?|麻烦(?:帮我|帮忙)?|帮我|帮忙)\s*)?"
     r"(?:(?:查(?:询|一下|下)?|查看|看看|看(?:一下)?|确认(?:一下)?)\s*)?"
     r"(?:员工)?([\u4e00-\u9fff]{2,4}?)"
-    r"(?=(?:最近|本月|本周|这段时间)?(?:有没有|是否|有无).{0,8}(?:请假|休假))"
+    r"(?=(?:最近|本月|本周|这段时间)?(?:有没有|是否|有无)"
+    r"(?!.{0,8}(?:打算|计划|准备|需要|想|要不要|应该|可以|能否))"
+    r".{0,8}(?:请假|休假))"
 )
 
 
@@ -386,7 +388,7 @@ def extract_entities(text: str) -> dict[str, Any]:
         entities["location"] = location_match.group(1)
 
     recipient_match = re.search(
-        r"(?:发给|发送给|寄给|转给|抄送给?|交给|通知)([\w.@\-\u4e00-\u9fff]{2,30}?)(?=$|[，,。；;]|然后|并且|并发|再)",
+        r"(?:发给|发送给|寄给|转给|抄送给?|交给|通知)\s*([\w.@\-\u4e00-\u9fff]{2,30}?)(?=$|[，,。；;]|然后|并且|并发|再)",
         raw,
     )
     if not recipient_match:
@@ -506,21 +508,24 @@ def _exclude_context_matches(
     text: str,
     matches: list[tuple[int, str]],
     exclusions: tuple[str, ...],
+    preserve_patterns: tuple[str, ...] = (),
 ) -> list[tuple[int, str]]:
     if not exclusions:
         return matches
-    return [
-        (position, matched_text)
-        for position, matched_text in matches
-        if not any(
-            re.search(
-                exclusion,
-                _clause_for_match(text, position, matched_text),
-                flags=re.IGNORECASE,
-            )
+    filtered: list[tuple[int, str]] = []
+    for position, matched_text in matches:
+        clause = _clause_for_match(text, position, matched_text)
+        excluded = any(
+            re.search(exclusion, clause, flags=re.IGNORECASE)
             for exclusion in exclusions
         )
-    ]
+        preserved = any(
+            re.search(pattern, clause, flags=re.IGNORECASE)
+            for pattern in preserve_patterns
+        )
+        if not excluded or preserved:
+            filtered.append((position, matched_text))
+    return filtered
 
 
 def _is_negated(text: str, start: int, keyword: str) -> bool:
@@ -576,15 +581,18 @@ class RuleIntentRecognizer:
                     (match.start(), match.group(0))
                     for match in re.finditer(str(pattern), text, flags=re.IGNORECASE)
                 )
-            matches.extend(
-                _exclude_context_matches(
-                    text,
-                    pattern_matches,
-                    tuple(
-                        str(item)
-                        for item in definition.get("context_exclusions") or ()
-                    ),
-                )
+            matches.extend(pattern_matches)
+            matches = _exclude_context_matches(
+                text,
+                matches,
+                tuple(
+                    str(item)
+                    for item in definition.get("context_exclusions") or ()
+                ),
+                tuple(
+                    str(item)
+                    for item in definition.get("context_preserve_patterns") or ()
+                ),
             )
             matches = sorted(set(matches))
             if not matches:

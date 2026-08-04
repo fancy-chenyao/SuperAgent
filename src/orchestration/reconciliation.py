@@ -299,6 +299,72 @@ class ReconciliationStore:
                 self._transaction_path.unlink(missing_ok=True)
                 return request
 
+    def claim_for_resume(
+        self,
+        *,
+        task_id: str,
+        resume_step: int,
+        operator: str,
+    ) -> Optional[ReconciliationRequest]:
+        """Atomically claim a manually cleared reconciliation for one resume."""
+
+        with self._lock:
+            matches = [
+                ReconciliationRequest(**item)
+                for item in self.list(task_id=task_id)
+                if int(item.get("resume_step") or 0) == int(resume_step)
+                and item.get("status") in {
+                    "retry_ready",
+                    "confirmed_succeeded",
+                    "resuming",
+                }
+            ]
+            if not matches:
+                return None
+            request = sorted(
+                matches,
+                key=lambda item: item.updated_at,
+                reverse=True,
+            )[0]
+            if request.status == "resuming":
+                raise ValueError("reconciliation resume is already in progress")
+            previous_status = request.status
+            request.status = "resuming"
+            request.updated_at = datetime.now().isoformat()
+            request.resolution = {
+                **dict(request.resolution or {}),
+                "resume_from_status": previous_status,
+                "resume_operator": operator,
+                "resume_started_at": request.updated_at,
+            }
+            self._save(request)
+            return request
+
+    def finish_resume(
+        self,
+        reconciliation_id: str,
+        *,
+        succeeded: bool,
+    ) -> ReconciliationRequest:
+        """Consume a successful resume or restore its ready state on failure."""
+
+        with self._lock:
+            request = self._require(reconciliation_id)
+            if request.status != "resuming":
+                return request
+            previous_status = str(
+                request.resolution.get("resume_from_status") or "retry_ready"
+            )
+            request.status = "consumed" if succeeded else previous_status
+            request.updated_at = datetime.now().isoformat()
+            request.resolution = {
+                **dict(request.resolution or {}),
+                "resume_finished_at": request.updated_at,
+                "resume_succeeded": bool(succeeded),
+            }
+            self._save(request)
+            return request
+
     def delete(
         self,
         *,

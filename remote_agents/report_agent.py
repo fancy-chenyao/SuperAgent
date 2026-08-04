@@ -35,6 +35,31 @@ def _resolved_report_sources(messages: List[Dict[str, Any]]) -> Dict[str, Any] |
     return None
 
 
+def _resolved_legacy_report_data(messages: List[Dict[str, Any]]) -> List[Any]:
+    """Collect legacy resolved inputs when the report.sources contract is absent."""
+
+    for message in reversed(messages or []):
+        content = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(content, str) or not content.startswith("EXECUTION_CONTEXT"):
+            continue
+        _, _, raw = content.partition("\n")
+        try:
+            brief = json.loads(raw)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        resolved = brief.get("resolved_inputs") if isinstance(brief, dict) else None
+        if not isinstance(resolved, dict):
+            continue
+        data: List[Any] = []
+        for value in resolved.values():
+            if isinstance(value, dict) and isinstance(value.get("records"), list):
+                data.extend(value["records"])
+            else:
+                data.append(value)
+        return data
+    return []
+
+
 class RemoteReportAgent(BaseRemoteAgent):
     """Report Agent for generating reports."""
 
@@ -108,6 +133,10 @@ class RemoteReportAgent(BaseRemoteAgent):
                 )
                 if not isinstance(arguments, dict):
                     arguments = {}
+                if not arguments.get("data") and not arguments.get("sections"):
+                    legacy_data = _resolved_legacy_report_data(messages)
+                    if legacy_data:
+                        arguments["data"] = legacy_data
 
             llm_timeout = int(os.getenv("REMOTE_REPORT_LLM_TIMEOUT", "120"))
             tool_timeout = int(os.getenv("REMOTE_REPORT_TOOL_TIMEOUT", "150"))

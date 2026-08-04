@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>CoorAgent Web Studio</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260722-chat-1" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260803-decision-history-1" />
     <script src="/static/mermaid.min.js"></script>
   </head>
   <body>
@@ -153,6 +153,17 @@
                   <h3>主 Agent 决策台</h3>
                   <span id="routingDecisionBadge" class="tag">等待路由</span>
                 </div>
+                <div class="decision-history-toolbar" aria-label="历史决策选择">
+                  <label>
+                    <span>对话窗口</span>
+                    <select id="decisionConversationSelect" aria-label="选择对话窗口"></select>
+                  </label>
+                  <label>
+                    <span>决策轮次</span>
+                    <select id="decisionRoundSelect" aria-label="选择决策轮次"></select>
+                  </label>
+                </div>
+                <div id="decisionHistoryMeta" class="decision-history-meta"></div>
                 <div id="taskProfileView" class="decision-profile"></div>
                 <div id="decisionTopAgentSummary" class="decision-top-agent"></div>
                 <div id="decisionDetailTabs" class="decision-detail-tabs" aria-label="主 Agent 决策详情"></div>
@@ -525,11 +536,11 @@
                   </div>
                   <div class="detail-card">
                     <div class="summary-header">
-                      <h3>人工核对队列</h3>
+                      <h3>人工核对队列（外部操作状态不确定）</h3>
                       <button id="refreshReconciliationsBtn" class="ghost" type="button">刷新</button>
                     </div>
                     <p class="sec-reconciliation-help">
-                      用于处理外部副作用结果不确定的任务。核对外部系统后，再选择安全重试、确认成功、冻结或终止。
+                      仅在发邮件、生成文档、创建会议等外部操作已经发起，但系统无法确认成功或失败时触发。普通查询失败不会进入这里；权限和高风险审批请查看上方“人工审批队列”。
                     </p>
                     <div id="securityReconciliations" class="sec-approvals">
                       <div class="sec-empty">暂无待核对任务</div>
@@ -551,7 +562,7 @@
       </main>
     </div>
 
-    <script src="/static/app.js?v=20260729-conversation-cleanup-1"></script>
-    <script src="/static/security.js?v=20260729-reconciliation-1"></script>
+    <script src="/static/app.js?v=20260803-decision-history-1"></script>
+    <script src="/static/security.js?v=20260803-resume-dedupe-1"></script>
   </body>
 </html>

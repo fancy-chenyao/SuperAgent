@@ -15,6 +15,68 @@ let secApprovals = [];
 let secReconciliations = [];
 const SEC_MAX_DENIED_HISTORY = 5;
 
+const SECURITY_AGENT_LABELS_ZH = {
+    RemoteHRAssistantAgent: "员工与薪资查询",
+    RemoteDocumentGeneratorAgent: "文档生成",
+    RemoteEmailDispatchAgent: "邮件发送",
+    RemoteCommunicationAgent: "消息通知",
+    RemoteMeetingManagerAgent: "会议安排",
+    RemoteOfficeAssistantAgent: "办公与差旅行程",
+    RemoteHRCalendarAgent: "日程查询",
+    RemoteBusinessRiskAgent: "授信风险查询",
+    RemoteReportAgent: "报告生成",
+};
+
+const SECURITY_TOOL_LABELS_ZH = {
+    remote_docx_generator_tool: "文档生成工具",
+    remote_email_tool: "邮件发送工具",
+    remote_meeting_scheduling_tool: "会议安排工具",
+    remote_notification_tool: "消息通知工具",
+};
+
+function formatSecurityTime(value) {
+    if (!value) return "未知时间";
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return String(value);
+    return date.toLocaleString("zh-CN", { hour12: false });
+}
+
+function reconciliationReasonZh(item) {
+    const raw = String(item.error || "");
+    const timeout = raw.match(/Tool\s+([^\s]+)\s+timed out after\s+(\d+)s/i);
+    if (timeout) {
+        const toolLabel = SECURITY_TOOL_LABELS_ZH[timeout[1]] || `远程工具 ${timeout[1]}`;
+        return `${toolLabel}在 ${timeout[2]} 秒内未返回，系统无法确认外部操作是否已经完成。`;
+    }
+    if (/remote request timeout|timeout/i.test(raw)) {
+        return "远程请求超时，系统无法确认外部操作是否已经完成。";
+    }
+    return raw || "外部操作结果不确定，需要人工核对。";
+}
+
+function governanceStepLabel(value) {
+    const raw = String(value || "").trim();
+    const numbered = raw.match(/^step[_-]?(\d+)$/i);
+    return numbered ? `第 ${numbered[1]} 步` : (raw || "未知步骤");
+}
+
+function governanceConversationContext(item) {
+    const query = String(item.user_query || "").trim();
+    const round = Number(item.execution_round || 0);
+    const total = Number(item.execution_round_total || 0);
+    const roundText = round > 0
+        ? `第 ${round} 次执行${total >= round ? `（当前共 ${total} 次）` : ""}`
+        : "执行轮次未知";
+    const stepTitle = String(item.step_title || "").trim();
+    return `
+      <div class="sec-governance-context">
+        <div><strong>触发时间：</strong>${escapeHtml(formatSecurityTime(item.created_at || item.task_created_at))}</div>
+        <div><strong>所属对话/工作流执行轮次：</strong>${escapeHtml(roundText)}</div>
+        <div class="sec-governance-query" title="${escapeHtml(query)}"><strong>用户问题：</strong>${escapeHtml(query || "历史记录中未保存原始问题")}</div>
+        ${stepTitle ? `<div><strong>触发步骤：</strong>${escapeHtml(stepTitle)}</div>` : ""}
+      </div>`;
+}
+
 function formatScenarioFitSummary(fitResult) {
     if (!fitResult || typeof fitResult !== "object") return "";
 
@@ -118,12 +180,12 @@ async function decideSecurityReconciliation(reconciliationId, decision) {
     let outputs = {};
     if (decision === "succeeded") {
         externalOperationId = window.prompt(
-            "请输入外部系统中的操作编号（例如邮件 ID、文档 ID、流水号）：",
+            "请输入成功凭证编号（邮件 ID、文档 ID、会议 ID 或业务流水号）：",
             ""
         );
         if (externalOperationId === null) return null;
         if (!externalOperationId.trim()) {
-            throw new Error("确认成功必须填写外部操作编号");
+            throw new Error("确认成功必须填写凭证编号");
         }
     }
     if (decision === "succeeded") {
@@ -200,16 +262,22 @@ function renderSecurityReconciliations() {
     const labels = {
         pending: "待核对",
         frozen: "已冻结",
-        retry_ready: "可安全重试",
-        confirmed_succeeded: "已确认成功",
-        terminated: "已终止",
+        retry_ready: "已确认未执行，可安全重试",
+        confirmed_succeeded: "已确认外部执行成功",
+        resuming: "正在恢复原任务",
+        consumed: "已恢复完成",
+        terminated: "已人工终止",
     };
     el.innerHTML = secReconciliations.slice(0, 20).map((item) => {
         const status = String(item.status || "pending").toLowerCase();
         const isActionable = status === "pending" || status === "frozen";
         const canResume = status === "retry_ready" || status === "confirmed_succeeded";
         const externalId = item.external_operation_id
-            ? `<div><strong>外部操作：</strong>${escapeHtml(item.external_operation_id)}</div>`
+            ? `<div><strong>外部操作编号：</strong>${escapeHtml(item.external_operation_id)}</div>`
+            : "";
+        const agentLabel = SECURITY_AGENT_LABELS_ZH[item.agent_name] || item.agent_name || "未知执行器";
+        const handledAt = item.updated_at && item.updated_at !== item.created_at
+            ? `<div><strong>最近处理时间：</strong>${escapeHtml(formatSecurityTime(item.updated_at))}</div>`
             : "";
         const actions = isActionable
             ? `<div class="sec-approval-actions sec-reconciliation-actions">
@@ -228,15 +296,21 @@ function renderSecurityReconciliations() {
           <div class="sec-approval-item status-${escapeHtml(status)}">
             <div class="sec-approval-header">
               <strong>${escapeHtml(labels[status] || status.toUpperCase())}</strong>
-              <span class="tag warn">${escapeHtml(item.step_id || "step")}</span>
+              <span class="tag warn">${escapeHtml(governanceStepLabel(item.step_id))}</span>
             </div>
-            <div class="sec-approval-id">${escapeHtml(item.reconciliation_id)}</div>
+            ${governanceConversationContext(item)}
             <div class="sec-approval-body">
-              <div><strong>任务：</strong>${escapeHtml(item.task_id)}</div>
-              <div><strong>执行者：</strong>${escapeHtml(item.agent_name || "unknown")}</div>
-              <div title="${escapeHtml(item.error || "")}"><strong>失败原因：</strong>${escapeHtml(item.error || "外部操作结果不确定")}</div>
+              <div><strong>执行器：</strong>${escapeHtml(agentLabel)}</div>
+              <div title="${escapeHtml(item.error || "")}"><strong>触发原因：</strong>${escapeHtml(reconciliationReasonZh(item))}</div>
+              ${handledAt}
               ${externalId}
             </div>
+            <details class="sec-governance-technical">
+              <summary>查看内部编号</summary>
+              <div>核对编号：${escapeHtml(item.reconciliation_id)}</div>
+              <div>任务编号：${escapeHtml(item.task_id)}</div>
+              <div>工作流编号：${escapeHtml(item.workflow_id || "-")}</div>
+            </details>
             ${actions}${resume}
           </div>`;
     }).join("");
@@ -262,14 +336,21 @@ function renderSecurityReconciliations() {
         });
     });
     el.querySelectorAll(".sec-reconciliation-resume").forEach((button) => {
-        button.addEventListener("click", () => {
+        button.addEventListener("click", async () => {
             if (typeof window.resumeApprovedTask === "function") {
-                window.resumeApprovedTask({
-                    task_id: button.dataset.taskId,
-                    workflow_id: button.dataset.workflowId,
-                    resume_step: Number(button.dataset.resumeStep) || 1,
-                    user_id: button.dataset.userId || "test",
-                });
+                button.disabled = true;
+                try {
+                    await window.resumeApprovedTask({
+                        task_id: button.dataset.taskId,
+                        workflow_id: button.dataset.workflowId,
+                        resume_step: Number(button.dataset.resumeStep) || 1,
+                        user_id: button.dataset.userId || "test",
+                    });
+                    await loadSecurityReconciliations();
+                } catch (e) {
+                    window.alert(`恢复原任务失败：${e.message || e}`);
+                    button.disabled = false;
+                }
             }
         });
     });
@@ -307,6 +388,13 @@ function renderSecurityApprovals() {
         return;
     }
 
+    const labels = {
+        pending: "待审批",
+        approved: "已批准，待恢复",
+        consumed: "已恢复完成",
+        rejected: "已拒绝",
+        expired: "已过期",
+    };
     el.innerHTML = secApprovals.slice(0, 20).map((item) => {
         const status = String(item.status || "pending").toLowerCase();
         const reason = item.policy_result?.reason || "策略要求人工审批";
@@ -326,15 +414,23 @@ function renderSecurityApprovals() {
         return `
           <div class="sec-approval-item status-${escapeHtml(status)}">
             <div class="sec-approval-header">
-              <strong>${escapeHtml(status.toUpperCase())}</strong>
-              <span class="tag accent">${escapeHtml(item.step_id || item.node_name || "step")}</span>
+              <strong>${escapeHtml(labels[status] || status)}</strong>
+              <span class="tag accent">${escapeHtml(governanceStepLabel(item.step_id || item.node_name))}</span>
             </div>
-            <div class="sec-approval-id">${escapeHtml(item.approval_id)}</div>
+            ${governanceConversationContext(item)}
             <div class="sec-approval-body">
-              <div><strong>任务：</strong>${escapeHtml(item.task_id)}</div>
               <div><strong>操作：</strong>${escapeHtml(action)} → ${escapeHtml(target)}</div>
-              <div><strong>原因：</strong>${escapeHtml(reason)}</div>
+              <div><strong>审批原因：</strong>${escapeHtml(reason)}</div>
+              ${item.updated_at && item.updated_at !== item.created_at
+                ? `<div><strong>最近处理时间：</strong>${escapeHtml(formatSecurityTime(item.updated_at))}</div>`
+                : ""}
             </div>
+            <details class="sec-governance-technical">
+              <summary>查看内部编号</summary>
+              <div>审批编号：${escapeHtml(item.approval_id)}</div>
+              <div>任务编号：${escapeHtml(item.task_id)}</div>
+              <div>工作流编号：${escapeHtml(item.workflow_id || "-")}</div>
+            </details>
             ${pendingActions}${resumeAction}
           </div>`;
     }).join("");

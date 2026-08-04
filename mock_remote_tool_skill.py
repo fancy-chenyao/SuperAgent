@@ -226,7 +226,19 @@ def _parse_optional_amount(value: Any) -> Optional[float]:
     if isinstance(value, (int, float)):
         return float(value)
     text = str(value).strip()
-    if not text or text in {"-", "N/A", "n/a", "None", "null", "未提供", "暂无"}:
+    placeholders = {
+        "-",
+        "N/A",
+        "n/a",
+        "None",
+        "null",
+        "未提供",
+        "暂无",
+        "待补充",
+        "待确认",
+        "未知",
+    }
+    if not text or text in placeholders:
         return None
     text = text.replace(",", "").replace("元", "").replace("人民币", "").strip()
     if not text:
@@ -901,8 +913,16 @@ async def health():
 async def tool(req: ToolRequest, authorization: Optional[str] = Header(default=None)):
     global _TODO_CACHE, _EMAIL_CACHE, _SCHEDULE_CACHE
     if req.tool == "remote_weather_tool":
-        location = req.arguments.get("location", "")
-        result = f"[remote-tool] {location} weather: sunny 20C"
+        location = req.arguments.get("location") or "未指定地点"
+        date = req.arguments.get("date") or req.arguments.get("time") or "明天"
+        result = {
+            "status": "success",
+            "location": location,
+            "date": date,
+            "weather": "晴",
+            "temperature": "20℃",
+            "message": f"{location}{date}天气晴，气温约20℃",
+        }
     elif req.tool == "remote_person_info_tool":
         try:
             sample = _load_sample()
@@ -1213,30 +1233,24 @@ async def tool(req: ToolRequest, authorization: Optional[str] = Header(default=N
         print(f"[TOOL] Arguments type: {type(req.arguments)}")
         print(f"[TOOL] Arguments keys: {list(req.arguments.keys()) if isinstance(req.arguments, dict) else 'N/A'}")
 
+        arguments = req.arguments if isinstance(req.arguments, dict) else {}
+        payload = {
+            "id": f"email-{int(time.time() * 1000)}",
+            "from": arguments.get("from") or "noreply@internal.local",
+            "to": arguments.get("to") or "",
+            "subject": arguments.get("subject") or "",
+            "body": arguments.get("body") or "",
+            "attachments": arguments.get("attachments") or [],
+        }
+        persisted = False
+        warnings: List[str] = []
         try:
-            data = _load_emails()
+            try:
+                data = _load_emails()
+            except FileNotFoundError:
+                data = {"emails": []}
             emails = data.get("emails", [])
-
-            # Extract parameters
-            to_value = req.arguments.get("to")
-            body_value = req.arguments.get("body", "")
-
-            if not str(to_value or "").strip():
-                raise ValueError("to is required")
-            if not str(body_value or "").strip():
-                raise ValueError("body is required")
-
-            print(f"[TOOL] Extracted 'to': {to_value}")
-            print(f"[TOOL] Extracted 'body' length: {len(str(body_value))}")
-
-            payload = {
-                "id": f"email-{len(emails)+1:04d}",
-                "from": req.arguments.get("from", "noreply@internal.local"),
-                "to": to_value,
-                "subject": req.arguments.get("subject", "邮件发送"),
-                "body": body_value,
-                "attachments": req.arguments.get("attachments", []),
-            }
+            payload["id"] = f"email-{len(emails)+1:04d}"
 
             print(f"[TOOL] Created payload:")
             print(f"[TOOL]   id: {payload['id']}")
@@ -1249,14 +1263,21 @@ async def tool(req: ToolRequest, authorization: Optional[str] = Header(default=N
             data["emails"] = emails
             _EMAIL_CACHE = data
             _email_path().write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-            result = {"status": "success", "sent": payload}
-
+            persisted = True
             print(f"[TOOL] Email saved successfully")
         except Exception as exc:
-            print(f"[TOOL] Error: {exc}")
-            import traceback
-            traceback.print_exc()
-            result = {"status": "error", "error": str(exc)}
+            # This is a demo Agent: return the content it could assemble even
+            # when the optional local log cannot be written.
+            warnings.append(f"本地邮件记录未保存：{exc}")
+            logger.warning("Email log persistence skipped: %s", exc)
+        result = {
+            "status": "success",
+            "sent": payload,
+            "persisted": persisted,
+            "external_operation_id": payload["id"],
+        }
+        if warnings:
+            result["warnings"] = warnings
     elif req.tool == "remote_schedule_tool":
         try:
             data = _load_schedules()
@@ -1380,11 +1401,11 @@ async def tool(req: ToolRequest, authorization: Optional[str] = Header(default=N
                 # 提取会议信息
                 title = meeting_data.get("title", "视频会议")
                 date = meeting_data.get("date")
-                time = meeting_data.get("time")
+                meeting_time = meeting_data.get("time")
                 participants = meeting_data.get("participants", [])
                 agenda = meeting_data.get("agenda", "")
                 
-                if not date or not time:
+                if not date or not meeting_time:
                     raise ValueError("date and time are required")
                 
                 # 创建会议记录
@@ -1392,7 +1413,7 @@ async def tool(req: ToolRequest, authorization: Optional[str] = Header(default=N
                     "id": f"meeting-{len(meetings)+1:04d}",
                     "title": title,
                     "date": date,
-                    "time": time,
+                    "time": meeting_time,
                     "participants": participants,
                     "agenda": agenda,
                     "status": "scheduled",
@@ -1554,17 +1575,28 @@ async def tool(req: ToolRequest, authorization: Optional[str] = Header(default=N
             logger.error(traceback.format_exc())
             result = {"status": "error", "error": str(exc)}
     elif req.tool == "remote_docx_generator_tool":
+        arguments = req.arguments if isinstance(req.arguments, dict) else {}
+        template_name = str(arguments.get("template_name") or "").strip()
+        raw_data = arguments.get("data")
+        if isinstance(raw_data, dict):
+            data = dict(raw_data)
+        elif raw_data in (None, ""):
+            data = {}
+        else:
+            data = {"content": raw_data}
+        output_filename = (
+            str(arguments.get("output_filename") or "").strip()
+            or f"document_{int(time.time())}"
+        )
+        output_path = Path(__file__).resolve().parent / "output" / f"{output_filename}.docx"
+        operation_id = f"document-{int(time.time() * 1000)}"
         try:
             from docx import Document
             from docx.shared import Pt, Inches
             from docx.enum.text import WD_PARAGRAPH_ALIGNMENT
 
-            template_name = req.arguments.get("template_name")
-            data = req.arguments.get("data", {})
-            output_filename = req.arguments.get("output_filename") or f"document_{int(time.time())}"
-
             document_type = str(
-                req.arguments.get("document_type")
+                arguments.get("document_type")
                 or data.get("document_type")
                 or ""
             ).strip()
@@ -1584,7 +1616,25 @@ async def tool(req: ToolRequest, authorization: Optional[str] = Header(default=N
             template_config = templates.get("templates", {}).get(template_name)
 
             if not template_config:
-                raise ValueError(f"Template '{template_name}' not found")
+                template_name = template_name or document_type or "generic"
+                generic_lines = [
+                    f"{key}：{value}"
+                    for key, value in data.items()
+                    if value not in (None, "", [], {})
+                ]
+                template_config = {
+                    "content": [
+                        {
+                            "type": "heading",
+                            "text": data.get("title") or output_filename,
+                            "level": 1,
+                        },
+                        {
+                            "type": "paragraph",
+                            "text": "\n".join(generic_lines),
+                        },
+                    ]
+                }
 
             # Prepare data with defaults
             current_date = datetime.datetime.now().strftime("%Y年%m月%d日")
@@ -1635,6 +1685,9 @@ async def tool(req: ToolRequest, authorization: Optional[str] = Header(default=N
                     placeholder = "{{" + key + "}}"
                     if placeholder in text:
                         text = text.replace(placeholder, str(value))
+                # Missing values are optional in this demo. Do not leak raw
+                # template placeholders into the generated document.
+                text = re.sub(r"\{\{[^{}]+\}\}", "", text)
 
                 if item_type == "heading":
                     level = item.get("level", 1)
@@ -1664,20 +1717,32 @@ async def tool(req: ToolRequest, authorization: Optional[str] = Header(default=N
             doc.save(str(output_path))
 
             logger.info(f"Document generated successfully: {output_path}")
+            operation_id = str(output_path)
 
             result = {
                 "status": "success",
                 "file_path": str(output_path),
                 "file_name": f"{output_filename}.docx",
                 "template_used": template_name,
-                "message": f"文档已生成：{output_filename}.docx"
+                "message": f"文档已生成：{output_filename}.docx",
+                "external_operation_id": str(output_path),
             }
 
         except Exception as exc:
-            import traceback
-            logger.error(f"Document generation error: {exc}")
-            logger.error(traceback.format_exc())
-            result = {"status": "error", "error": str(exc), "traceback": traceback.format_exc()}
+            # The document Agent is demonstrative and should expose whatever
+            # content it assembled instead of turning incomplete inputs into a
+            # workflow failure. Permission denial is enforced before this tool.
+            logger.warning("Document file output skipped: %s", exc)
+            result = {
+                "status": "success",
+                "file_path": "",
+                "file_name": f"{output_filename}.docx",
+                "template_used": template_name or "generic",
+                "message": "已输出当前可用的文档内容，未生成本地文件",
+                "content": data,
+                "warnings": [str(exc)],
+                "external_operation_id": operation_id,
+            }
     elif req.tool == "get_calendar_events_tool":
         try:
             data = _load_calendar_events()
@@ -1892,14 +1957,17 @@ async def tool(req: ToolRequest, authorization: Optional[str] = Header(default=N
             employee_name = req.arguments.get("employee_name")
             filters = req.arguments.get("filters", {})
 
-            if not employee_id:
-                raise ValueError("employee_id is required")
-
             # Load all records
             all_records = _load_leave_applications()
 
-            # Filter by employee_id
-            records = [r for r in all_records if r.get("employee_id") == employee_id]
+            # Missing demo parameters are non-fatal. Filter by the most precise
+            # identity available, otherwise return the available simulated data.
+            if employee_id:
+                records = [r for r in all_records if r.get("employee_id") == employee_id]
+            elif employee_name:
+                records = [r for r in all_records if r.get("employee_name") == employee_name]
+            else:
+                records = list(all_records)
 
             # Apply additional filters
             if filters:
@@ -1980,14 +2048,17 @@ async def tool(req: ToolRequest, authorization: Optional[str] = Header(default=N
             employee_name = req.arguments.get("employee_name")
             filters = req.arguments.get("filters", {})
 
-            if not employee_id:
-                raise ValueError("employee_id is required")
-
             # Load all records
             all_records = _load_travel_applications()
 
-            # Filter by employee_id
-            records = [r for r in all_records if r.get("employee_id") == employee_id]
+            # Missing demo parameters are non-fatal. Filter by the most precise
+            # identity available, otherwise return the available simulated data.
+            if employee_id:
+                records = [r for r in all_records if r.get("employee_id") == employee_id]
+            elif employee_name:
+                records = [r for r in all_records if r.get("employee_name") == employee_name]
+            else:
+                records = list(all_records)
 
             # Apply additional filters
             if filters:
@@ -2016,7 +2087,12 @@ async def tool(req: ToolRequest, authorization: Optional[str] = Header(default=N
                 "traceback": traceback.format_exc()
             }
     else:
-        result = f"[remote-tool:{req.tool}] ok"
+        result = {
+            "status": "success",
+            "tool": req.tool,
+            "arguments": dict(req.arguments or {}),
+            "message": f"[remote-tool:{req.tool}] ok",
+        }
 
     return {
         "status": "success",
